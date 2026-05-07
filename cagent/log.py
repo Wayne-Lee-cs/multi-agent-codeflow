@@ -1,0 +1,92 @@
+"""Console progress printing — subscribes to dashboard events and prints lines."""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from datetime import datetime, timezone
+from typing import Literal
+
+from cagent.progress import Dashboard, Event
+
+
+class LinePrinter:
+    """Prints real-time progress lines to stdout as tasks execute."""
+
+    def __init__(self, dashboard: Dashboard, quiet: bool = False):
+        self.dashboard = dashboard
+        self.quiet = quiet
+        self._queue: asyncio.Queue[tuple[str, Event]] = asyncio.Queue()
+
+    def push(self, task_id: str, event: Event) -> None:
+        """Called by dashboard to push an event for printing."""
+        self._queue.put_nowait((task_id, event))
+
+    async def run(self) -> None:
+        """Consume events and print to stdout. Run as a background task."""
+        while True:
+            try:
+                task_id, event = await asyncio.wait_for(self._queue.get(), timeout=0.5)
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
+
+            self._print_line(task_id, event)
+
+    def _print_line(self, task_id: str, event: Event) -> None:
+        ts = datetime.fromtimestamp(event.ts, tz=timezone.utc).strftime("%H:%M:%S")
+        kind = event.kind
+        summary = event.summary
+
+        if self.quiet:
+            # Only print START / DONE / FAIL / DENIED
+            if kind == "start":
+                print(f"[{ts}] {task_id} START {summary}")
+            elif kind == "done":
+                tp = self.dashboard.tasks.get(task_id)
+                extra = ""
+                if tp:
+                    extra = f"  {tp.tool_count} tools"
+                    if tp.commit_sha:
+                        extra += f"  commit {tp.commit_sha[:7]}"
+                print(f"[{ts}] {task_id} DONE{extra}")
+            elif kind == "error":
+                print(f"[{ts}] {task_id} FAIL {summary}")
+            elif kind == "denied":
+                print(f"[{ts}] {task_id} DENIED {summary}")
+            return
+
+        # Verbose mode — print everything
+        if kind == "start":
+            print(f"[{ts}] {task_id} START {summary}")
+        elif kind == "tool_use":
+            print(f"[{ts}] {task_id} {summary}")
+        elif kind == "denied":
+            print(f"[{ts}] {task_id} DENIED {summary}")
+        elif kind == "text":
+            # Only print non-trivial text
+            if len(summary.strip()) > 10:
+                print(f"[{ts}] {task_id} text: {summary[:60]}")
+        elif kind == "done":
+            tp = self.dashboard.tasks.get(task_id)
+            extra = ""
+            if tp:
+                elapsed = ""
+                if tp.started_at and tp.ended_at:
+                    secs = int(tp.ended_at - tp.started_at)
+                    if secs >= 60:
+                        elapsed = f"  {secs // 60}m{secs % 60}s"
+                    else:
+                        elapsed = f"  {secs}s"
+                extra = f"{elapsed} {tp.tool_count} tools"
+                if tp.commit_sha:
+                    extra += f"  commit {tp.commit_sha[:7]}"
+            print(f"[{ts}] {task_id} DONE{extra}")
+        elif kind == "error":
+            print(f"[{ts}] {task_id} FAIL {summary}")
+
+    def print_integration(self, msg: str) -> None:
+        """Print an integration-phase message."""
+        ts = datetime.now(tz=timezone.utc).strftime("%H:%M:%S")
+        print(f"[{ts}] integ    {msg}")

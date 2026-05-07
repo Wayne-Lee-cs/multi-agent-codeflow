@@ -1,0 +1,6 @@
+#!/usr/bin/env python3
+"""cagent CLI entry point (Unix)."""
+import os, sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from cagent.cli import main
+main()
