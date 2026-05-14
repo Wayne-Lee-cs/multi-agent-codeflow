@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from cagent.memory import RunMemory
 from cagent.progress import Dashboard, EventParser
 from cagent.safety import prepare_sandbox
 from cagent.tasks import Task
@@ -30,6 +31,7 @@ class AgentResult:
     status: str  # "done", "failed", "noop"
     commit_sha: str | None = None
     fail_reason: str | None = None
+    output_summary: str = ""  # agent's key output text (for memory)
 
 
 async def run_agent(
@@ -39,18 +41,27 @@ async def run_agent(
     timeout: int = 1800,
     model_override: str | None = None,
     dashboard: Dashboard | None = None,
+    shared_context: str = "",
+    memory: RunMemory | None = None,
 ) -> AgentResult:
     """Run a claude -p subprocess for a single task in its worktree.
 
     Returns an AgentResult with the outcome.
     """
     parser = EventParser()
+    output_texts: list[str] = []  # accumulate text events for memory
 
     # 1. Inject safety sandbox
     prepare_sandbox(worktree_path)
 
     # 2. Build command
-    prompt = task.prompt
+    if shared_context:
+        prompt = (
+            f"[Shared context from previous tasks]\n{shared_context}\n\n"
+            f"[Your task]\n{task.prompt}"
+        )
+    else:
+        prompt = task.prompt
     use_stdin = len(prompt) > 8000 or '"' in prompt or '\\' in prompt or '\n' in prompt
 
     claude_bin = _resolve_claude()
@@ -122,12 +133,17 @@ async def run_agent(
                     for event in parser.feed(line):
                         if dashboard:
                             dashboard.update(task.id, event)
+                        if event.kind == "text" and event.summary:
+                            output_texts.append(event.summary)
     except TimeoutError:
         proc.kill()
         await proc.wait()
         if dashboard:
             dashboard.set_task_status(task.id, "failed", fail_reason="timeout")
-        return AgentResult(task_id=task.id, status="failed", fail_reason="timeout")
+        return AgentResult(
+            task_id=task.id, status="failed", fail_reason="timeout",
+            output_summary="\n".join(output_texts[-5:]),
+        )
 
     # 6. Wait for process to fully exit and check return code
     await proc.wait()
@@ -139,10 +155,20 @@ async def run_agent(
             fail_reason += f" — {tail[:200]}"
         if dashboard:
             dashboard.set_task_status(task.id, "failed", fail_reason=fail_reason)
-        return AgentResult(task_id=task.id, status="failed", fail_reason=fail_reason)
+        return AgentResult(
+            task_id=task.id, status="failed", fail_reason=fail_reason,
+            output_summary="\n".join(output_texts[-5:]),
+        )
 
     # 7. Commit changes
-    return await _commit_result(task, worktree_path, dashboard)
+    result = await _commit_result(task, worktree_path, dashboard)
+    result.output_summary = "\n".join(output_texts[-10:])
+
+    # 8. Write memory
+    if memory and result.output_summary:
+        memory.write(task.id, result.output_summary)
+
+    return result
 
 
 async def _commit_result(

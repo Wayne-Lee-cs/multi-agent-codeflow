@@ -271,13 +271,15 @@ def _execute_run(
     from cagent.dispatcher import run
     from cagent.integrator import integrate
     from cagent.log import LinePrinter
+    from cagent.memory import RunMemory
     from cagent.progress import Dashboard
     from cagent.tasks import dump_state
 
     run_start = time.time()
 
-    # Set up observability
+    # Set up observability and memory
     dashboard = Dashboard(run_dir)
+    memory = RunMemory(run_dir)
     printer = LinePrinter(dashboard, quiet=args.quiet)
     dashboard._on_event = printer.push
 
@@ -293,6 +295,7 @@ def _execute_run(
                 worker_model_override=args.worker_model,
                 timeout=args.timeout,
                 dashboard=dashboard,
+                memory=memory,
             )
 
             if merge_results:
@@ -310,6 +313,17 @@ def _execute_run(
             # Print per-task timing stats
             _print_task_timing(dashboard)
 
+            # Aggregate task memories into shared_context.md
+            all_memories = memory.read_all()
+            if all_memories:
+                summary_parts = [
+                    f"## Task {tid}\n{content}"
+                    for tid, content in all_memories.items()
+                ]
+                memory.write_shared(
+                    f"# Shared Context — Run {run_id}\n\n" + "\n\n".join(summary_parts)
+                )
+
             integration_sha = None
             if done_count > 0:
                 printer.print_integration("starting cherry-pick integration...")
@@ -323,6 +337,7 @@ def _execute_run(
                         integrator_model_override=args.integrator_model,
                         timeout=args.timeout,
                         dashboard=dashboard,
+                        memory=memory,
                     )
                     printer.print_integration(
                         f"done — branch cagent/{run_id}/integration  tip {integration_sha[:12]}"

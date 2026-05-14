@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from cagent.agent import _resolve_claude
+from cagent.memory import RunMemory
 from cagent.progress import Dashboard, Event, EventParser
 from cagent.tasks import Task
 
@@ -21,6 +22,7 @@ async def integrate(
     integrator_model_override: str | None = None,
     timeout: int = 1800,
     dashboard: Dashboard | None = None,
+    memory: RunMemory | None = None,
 ) -> str:
     """Cherry-pick all done task commits into an integration branch.
 
@@ -56,6 +58,7 @@ async def integrate(
                 integrator_model_override=integrator_model_override,
                 timeout=timeout,
                 dashboard=dashboard,
+                memory=memory,
             )
         except Exception:
             success = False
@@ -125,6 +128,7 @@ async def _cherry_pick_one(
     integrator_model_override: str | None,
     timeout: int,
     dashboard: Dashboard | None,
+    memory: RunMemory | None = None,
 ) -> bool:
     """Cherry-pick a single task commit. Returns True on success."""
     if not task.commit_sha:
@@ -164,6 +168,7 @@ async def _cherry_pick_one(
         integrator_model_override=integrator_model_override,
         timeout=timeout,
         dashboard=dashboard,
+        memory=memory,
     )
 
 
@@ -175,6 +180,7 @@ async def _resolve_conflicts(
     integrator_model_override: str | None,
     timeout: int,
     dashboard: Dashboard | None,
+    memory: RunMemory | None = None,
 ) -> bool:
     """Use an integrator agent to resolve cherry-pick conflicts."""
     # Get conflict file list using porcelain format
@@ -184,11 +190,17 @@ async def _resolve_conflicts(
         if len(line) >= 3 and ("U" in line[:2] or line[:2] in ("DD", "AA")):
             conflict_files.append(line[3:].strip())
 
-    # Build integrator prompt — only reference tasks already cherry-picked
-    merged_summaries = "\n".join(
-        f"  - task {t.id}: {t.prompt.split(chr(10))[0][:80]}"
-        for t in integrated_tasks if t != task
-    )
+    # Build integrator prompt — reference tasks already cherry-picked with memory
+    merged_summaries = ""
+    for t in integrated_tasks:
+        if t == task:
+            continue
+        task_memory = memory.read(t.id) if memory else ""
+        if task_memory:
+            merged_summaries += f"  - task {t.id} ({t.prompt[:50]}):\n    {task_memory[:300]}\n"
+        else:
+            merged_summaries += f"  - task {t.id}: {t.prompt.split(chr(10))[0][:80]}\n"
+
     conflict_list = "\n".join(f"  - {f}" for f in conflict_files)
 
     prompt = (
@@ -296,6 +308,15 @@ async def _resolve_conflicts(
     except RuntimeError:
         await _run_git("cherry-pick", "--abort", cwd=worktree_path, check=False)
         return False
+
+    # Write integrator memory
+    if memory:
+        memory.write("_integrator", (
+            f"Resolved conflict for task {task.id} ({task.prompt[:60]})\n"
+            f"Conflicting files: {', '.join(conflict_files)}\n"
+            f"Preserved intent of both sides."
+        ))
+
     return True
 
 

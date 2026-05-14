@@ -1,0 +1,68 @@
+"""Per-run memory manager — shared context between agents within a single run."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+
+class RunMemory:
+    """Manages per-run, per-agent memory files.
+
+    Directory layout:
+        <run_dir>/memory/
+            shared_context.md      # aggregated context for injection
+            task-001.md            # worker 001 output summary
+            task-002.md            # worker 002 output summary
+            _integrator.md         # integrator decisions
+    """
+
+    def __init__(self, run_dir: Path):
+        self._dir = run_dir / "memory"
+        self._dir.mkdir(parents=True, exist_ok=True)
+
+    def write(self, agent_id: str, content: str) -> None:
+        """Write memory for a specific agent (worker or integrator)."""
+        path = self._dir / f"{agent_id}.md"
+        path.write_text(content, encoding="utf-8")
+
+    def read(self, agent_id: str) -> str:
+        """Read memory for a specific agent. Returns empty string if not found."""
+        path = self._dir / f"{agent_id}.md"
+        if path.exists():
+            return path.read_text(encoding="utf-8")
+        return ""
+
+    def read_all(self) -> dict[str, str]:
+        """Read all agent memories. Returns {agent_id: content}."""
+        result = {}
+        for path in sorted(self._dir.glob("*.md")):
+            if path.name == "shared_context.md":
+                continue
+            agent_id = path.stem
+            result[agent_id] = path.read_text(encoding="utf-8")
+        return result
+
+    def build_shared_context(self, task_ids: list[str]) -> str:
+        """Build a shared context string from completed task memories.
+
+        Used to inject into worker prompts so later tasks can see what
+        earlier tasks accomplished.
+        """
+        parts = []
+        for tid in task_ids:
+            content = self.read(tid)
+            if content:
+                parts.append(f"[Task {tid}]\n{content}")
+        return "\n\n".join(parts)
+
+    def write_shared(self, content: str) -> None:
+        """Write the aggregated shared_context.md."""
+        path = self._dir / "shared_context.md"
+        path.write_text(content, encoding="utf-8")
+
+    def load_shared(self) -> str:
+        """Load the aggregated shared_context.md."""
+        path = self._dir / "shared_context.md"
+        if path.exists():
+            return path.read_text(encoding="utf-8")
+        return ""

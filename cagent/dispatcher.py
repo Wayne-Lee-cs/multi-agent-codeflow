@@ -6,6 +6,7 @@ import asyncio
 from pathlib import Path
 
 from cagent.agent import AgentResult, run_agent
+from cagent.memory import RunMemory
 from cagent.progress import Dashboard
 from cagent.tasks import Task, dump_state
 from cagent.worktree import create_worktree
@@ -20,6 +21,7 @@ async def run(
     worker_model_override: str | None = None,
     timeout: int = 1800,
     dashboard: Dashboard | None = None,
+    memory: RunMemory | None = None,
 ) -> list[AgentResult]:
     """Run all tasks concurrently with bounded parallelism.
 
@@ -56,6 +58,13 @@ async def run(
                     task.status = "running"
                     dump_state(run_dir, tasks)
 
+                # Build shared context from completed tasks
+                shared_ctx = ""
+                if memory:
+                    async with lock:
+                        completed_ids = [t.id for t in tasks if t.status in ("done", "noop")]
+                    shared_ctx = memory.build_shared_context(completed_ids)
+
                 # Run agent
                 result = await run_agent(
                     task=task,
@@ -64,6 +73,8 @@ async def run(
                     timeout=timeout,
                     model_override=worker_model_override,
                     dashboard=dashboard,
+                    shared_context=shared_ctx,
+                    memory=memory,
                 )
 
                 # Update task with result
