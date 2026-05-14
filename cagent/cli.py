@@ -141,25 +141,143 @@ def _find_run_dir(repo_root: Path, run_id: str | None) -> Path:
             sys.exit(1)
         return target
 
-    # Find latest
+    # Find latest — accept runs with dashboard.json or tasks.json
     dirs = sorted(runs_dir.iterdir(), reverse=True)
     for d in dirs:
-        if d.is_dir() and (d / "dashboard.json").exists():
+        if d.is_dir() and ((d / "dashboard.json").exists() or (d / "tasks.json").exists()):
             return d
     print("No completed runs found.", file=sys.stderr)
     sys.exit(1)
+
+
+def _execute_run(
+    all_tasks: list,
+    dispatch_tasks: list,
+    run_id: str,
+    run_dir: Path,
+    base_sha: str,
+    repo_root: Path,
+    args: argparse.Namespace,
+    merge_results: "Callable | None" = None,
+    retry_hint: str | None = None,
+) -> None:
+    """Shared run logic: dispatch → integrate → summary."""
+    from cagent.agent import AgentResult
+    from cagent.dispatcher import run
+    from cagent.integrator import integrate
+    from cagent.log import LinePrinter
+    from cagent.progress import Dashboard
+    from cagent.tasks import dump_state
+
+    run_start = time.time()
+
+    # Set up observability
+    dashboard = Dashboard(run_dir)
+    printer = LinePrinter(dashboard, quiet=args.quiet)
+    dashboard._on_event = printer.push
+
+    async def _run_all():
+        printer_task = asyncio.create_task(printer.run())
+        try:
+            results = await run(
+                tasks=dispatch_tasks,
+                concurrency=args.jobs,
+                run_dir=run_dir,
+                base_sha=base_sha,
+                repo_root=repo_root,
+                worker_model_override=args.worker_model,
+                timeout=args.timeout,
+                dashboard=dashboard,
+            )
+
+            if merge_results:
+                all_results = merge_results(all_tasks, results)
+            else:
+                all_results = results
+
+            done_count = sum(1 for r in all_results if r.status == "done")
+            failed_count = sum(1 for r in all_results if r.status == "failed")
+            noop_count = sum(1 for r in all_results if r.status == "noop")
+
+            print()
+            print(f"Dispatcher: {done_count} done, {failed_count} failed, {noop_count} noop")
+
+            integration_sha = None
+            if done_count > 0:
+                printer.print_integration("starting cherry-pick integration...")
+                try:
+                    integration_sha = await integrate(
+                        tasks=all_tasks,
+                        run_dir=run_dir,
+                        base_sha=base_sha,
+                        repo_root=repo_root,
+                        squash=args.squash,
+                        integrator_model_override=args.integrator_model,
+                        timeout=args.timeout,
+                        dashboard=dashboard,
+                    )
+                    printer.print_integration(
+                        f"done — branch cagent/{run_id}/integration  tip {integration_sha[:12]}"
+                    )
+                except Exception as e:
+                    printer.print_integration(f"FAILED: {e}")
+                    print(f"  Worktree preserved for manual inspection.")
+                    integration_sha = None
+
+            return all_results, integration_sha
+
+        finally:
+            dashboard.flush()
+            dashboard._on_event = None
+            printer_task.cancel()
+            try:
+                await printer_task
+            except asyncio.CancelledError:
+                pass
+
+    try:
+        results, integration_sha = asyncio.run(_run_all())
+    except KeyboardInterrupt:
+        elapsed = _fmt_elapsed(time.time() - run_start)
+        print(f"\n\nInterrupted after {elapsed}.")
+        dump_state(run_dir, all_tasks)
+        done = sum(1 for t in all_tasks if t.status == "done")
+        failed = sum(1 for t in all_tasks if t.status == "failed")
+        running = sum(1 for t in all_tasks if t.status == "running")
+        print(f"  {done} done, {failed} failed, {running} interrupted")
+        print(f"  State saved to {run_dir}")
+        if not args.keep_worktrees:
+            print("  Cleaning up worktrees...")
+            _clean_worktrees(repo_root, run_dir, all_tasks, [
+                AgentResult(task_id=t.id, status=t.status, commit_sha=t.commit_sha)
+                for t in all_tasks
+            ])
+        if retry_hint:
+            print(f"\n  {retry_hint}")
+        sys.exit(130)
+
+    elapsed = _fmt_elapsed(time.time() - run_start)
+    _write_summary(run_dir, all_tasks, results, base_sha, integration_sha, run_id, elapsed)
+
+    if not args.keep_worktrees:
+        _clean_worktrees(repo_root, run_dir, all_tasks, results)
+
+    print()
+    if integration_sha:
+        print(f"Done! ({elapsed})")
+        print(f"  Integration branch: cagent/{run_id}/integration")
+        print(f"  To merge:  git merge cagent/{run_id}/integration")
+        print(f"  To push:   cagent push cagent/{run_id}/integration")
+    else:
+        print(f"Run completed in {elapsed} with no successful tasks to integrate.")
 
 
 def _cmd_run(args: argparse.Namespace) -> None:
     """Execute the full run workflow: dispatch → integrate → summary."""
     _preflight_check()
 
-    from cagent.dispatcher import run
-    from cagent.integrator import integrate
-    from cagent.log import LinePrinter
-    from cagent.progress import Dashboard
-    from cagent.tasks import Task, dump_state, parse_tasks_file
-    from cagent.worktree import current_head, remove_worktree
+    from cagent.tasks import dump_state, parse_tasks_file
+    from cagent.worktree import current_head
 
     repo_root = _get_repo_root()
 
@@ -170,7 +288,6 @@ def _cmd_run(args: argparse.Namespace) -> None:
 
     # Resolve base SHA
     if args.base:
-        import subprocess
         result = subprocess.run(
             ["git", "rev-parse", args.base],
             cwd=repo_root, capture_output=True, text=True, check=True,
@@ -190,7 +307,9 @@ def _cmd_run(args: argparse.Namespace) -> None:
         t.log_path = run_dir / "logs" / f"task-{t.id}.log"
     dump_state(run_dir, tasks)
 
-    run_start = time.time()
+    # Store base SHA for --resume support
+    (run_dir / "base_sha").write_text(base_sha, encoding="utf-8")
+
     print(f"cagent run {run_id}")
     print(f"  base:     {base_sha[:12]}")
     print(f"  tasks:    {len(tasks)}")
@@ -198,120 +317,22 @@ def _cmd_run(args: argparse.Namespace) -> None:
     print(f"  timeout:  {args.timeout}s")
     print()
 
-    # Set up observability
-    dashboard = Dashboard(run_dir)
-    printer = LinePrinter(dashboard, quiet=args.quiet)
-
-    # Patch dashboard to also push events to printer
-    _original_update = dashboard.update
-    def _update_with_print(task_id: str, event):
-        _original_update(task_id, event)
-        printer.push(task_id, event)
-    dashboard.update = _update_with_print
-
-    # Run dispatcher + integrator in a single event loop
-    async def _run_all():
-        # Start printer as background task
-        printer_task = asyncio.create_task(printer.run())
-
-        try:
-            results = await run(
-                tasks=tasks,
-                concurrency=args.jobs,
-                run_dir=run_dir,
-                base_sha=base_sha,
-                repo_root=repo_root,
-                worker_model_override=args.worker_model,
-                timeout=args.timeout,
-                dashboard=dashboard,
-            )
-        finally:
-            printer_task.cancel()
-            try:
-                await printer_task
-            except asyncio.CancelledError:
-                pass
-
-        # Unpatch dashboard.update so integrator doesn't push to closed queue
-        dashboard.update = _original_update
-
-        # Integrate
-        done_count = sum(1 for r in results if r.status == "done")
-        failed_count = sum(1 for r in results if r.status == "failed")
-        noop_count = sum(1 for r in results if r.status == "noop")
-
-        print()
-        print(f"Dispatcher: {done_count} done, {failed_count} failed, {noop_count} noop")
-
-        integration_sha = None
-        if done_count > 0:
-            print("Integrating...")
-            try:
-                integration_sha = await integrate(
-                    tasks=tasks,
-                    run_dir=run_dir,
-                    base_sha=base_sha,
-                    repo_root=repo_root,
-                    squash=args.squash,
-                    integrator_model_override=args.integrator_model,
-                    timeout=args.timeout,
-                    dashboard=dashboard,
-                )
-                print(f"  integration branch: cagent/{run_id}/integration")
-                print(f"  integration tip:    {integration_sha[:12]}")
-            except Exception as e:
-                print(f"  Integration FAILED: {e}")
-                print(f"  Worktree preserved for manual inspection.")
-                integration_sha = None
-
-        return results, integration_sha
-
-    try:
-        results, integration_sha = asyncio.run(_run_all())
-    except KeyboardInterrupt:
-        from cagent.agent import AgentResult
-        elapsed = _fmt_elapsed(time.time() - run_start)
-        print(f"\n\nInterrupted after {elapsed}.")
-        # Write partial state
-        dump_state(run_dir, tasks)
-        done = sum(1 for t in tasks if t.status == "done")
-        failed = sum(1 for t in tasks if t.status == "failed")
-        running = sum(1 for t in tasks if t.status == "running")
-        print(f"  {done} done, {failed} failed, {running} interrupted")
-        print(f"  State saved to {run_dir}")
-        if not args.keep_worktrees:
-            print("  Cleaning up worktrees...")
-            _clean_worktrees(repo_root, run_dir, tasks, [AgentResult(task_id=t.id, status=t.status) for t in tasks])
-        print(f"\n  To retry: python -m cagent run {args.tasks_file}")
-        sys.exit(130)
-
-    elapsed = _fmt_elapsed(time.time() - run_start)
-
-    # Write summary
-    _write_summary(run_dir, tasks, results, base_sha, integration_sha, run_id, elapsed)
-
-    # Clean worktrees (unless --keep-worktrees)
-    if not args.keep_worktrees:
-        _clean_worktrees(repo_root, run_dir, tasks, results)
-
-    print()
-    if integration_sha:
-        print(f"Done! ({elapsed})")
-        print(f"  Integration branch: cagent/{run_id}/integration")
-        print(f"  To merge:  git merge cagent/{run_id}/integration")
-        print(f"  To push:   cagent push cagent/{run_id}/integration")
-    else:
-        print(f"Run completed in {elapsed} with no successful tasks to integrate.")
+    _execute_run(
+        all_tasks=tasks,
+        dispatch_tasks=tasks,
+        run_id=run_id,
+        run_dir=run_dir,
+        base_sha=base_sha,
+        repo_root=repo_root,
+        args=args,
+        retry_hint=f"To retry: python -m cagent run {args.tasks_file}",
+    )
 
 
 def _cmd_resume(args: argparse.Namespace, repo_root: Path) -> None:
     """Resume a previous run, skipping already-completed tasks."""
     from cagent.agent import AgentResult
-    from cagent.dispatcher import run
-    from cagent.integrator import integrate
-    from cagent.log import LinePrinter
-    from cagent.progress import Dashboard
-    from cagent.tasks import Task, dump_state, load_state, parse_tasks_file
+    from cagent.tasks import dump_state, load_state
     from cagent.worktree import current_head
 
     runs_dir = _get_runs_dir(repo_root)
@@ -347,107 +368,55 @@ def _cmd_resume(args: argparse.Namespace, repo_root: Path) -> None:
     print(f"  To run:       {len(pending_tasks)}")
     print()
 
-    # Reset pending tasks
+    # Reset pending tasks and clean stale worktrees
     for t in pending_tasks:
         t.status = "pending"
         t.commit_sha = None
+        wt_path = repo_root / ".cagent" / "worktrees" / run_id / f"task-{t.id}"
+        if wt_path.exists():
+            try:
+                subprocess.run(
+                    ["git", "worktree", "remove", "--force", str(wt_path)],
+                    cwd=repo_root, capture_output=True, check=True,
+                )
+            except subprocess.CalledProcessError:
+                pass
+        try:
+            subprocess.run(
+                ["git", "branch", "-D", t.branch],
+                cwd=repo_root, capture_output=True,
+            )
+        except subprocess.CalledProcessError:
+            pass
     dump_state(run_dir, tasks)
 
-    # Resolve base SHA from the original run
-    base_sha = current_head(repo_root)
-
-    # Set up observability
-    dashboard = Dashboard(run_dir)
-    printer = LinePrinter(dashboard, quiet=args.quiet)
-
-    _original_update = dashboard.update
-    def _update_with_print(task_id: str, event):
-        _original_update(task_id, event)
-        printer.push(task_id, event)
-    dashboard.update = _update_with_print
-
-    run_start = time.time()
-
-    async def _run_all():
-        printer_task = asyncio.create_task(printer.run())
-        try:
-            results = await run(
-                tasks=pending_tasks,
-                concurrency=args.jobs,
-                run_dir=run_dir,
-                base_sha=base_sha,
-                repo_root=repo_root,
-                worker_model_override=args.worker_model,
-                timeout=args.timeout,
-                dashboard=dashboard,
-            )
-        finally:
-            printer_task.cancel()
-            try:
-                await printer_task
-            except asyncio.CancelledError:
-                pass
-
-        dashboard.update = _original_update
-
-        # Merge results
-        all_results = []
-        result_map = {r.task_id: r for r in results}
-        for t in tasks:
-            if t.id in result_map:
-                all_results.append(result_map[t.id])
-            else:
-                all_results.append(AgentResult(task_id=t.id, status=t.status, commit_sha=t.commit_sha))
-
-        done_count = sum(1 for r in all_results if r.status == "done")
-        failed_count = sum(1 for r in all_results if r.status == "failed")
-        noop_count = sum(1 for r in all_results if r.status == "noop")
-
-        print()
-        print(f"Dispatcher: {done_count} done, {failed_count} failed, {noop_count} noop")
-
-        integration_sha = None
-        if done_count > 0:
-            print("Integrating...")
-            try:
-                integration_sha = await integrate(
-                    tasks=tasks,
-                    run_dir=run_dir,
-                    base_sha=base_sha,
-                    repo_root=repo_root,
-                    squash=args.squash,
-                    integrator_model_override=args.integrator_model,
-                    timeout=args.timeout,
-                    dashboard=dashboard,
-                )
-                print(f"  integration branch: cagent/{run_id}/integration")
-                print(f"  integration tip:    {integration_sha[:12]}")
-            except Exception as e:
-                print(f"  Integration FAILED: {e}")
-                integration_sha = None
-
-        return all_results, integration_sha
-
-    try:
-        results, integration_sha = asyncio.run(_run_all())
-    except KeyboardInterrupt:
-        elapsed = _fmt_elapsed(time.time() - run_start)
-        print(f"\n\nInterrupted after {elapsed}.")
-        dump_state(run_dir, tasks)
-        sys.exit(130)
-
-    elapsed = _fmt_elapsed(time.time() - run_start)
-    _write_summary(run_dir, tasks, results, base_sha, integration_sha, run_id, elapsed)
-
-    if not args.keep_worktrees:
-        _clean_worktrees(repo_root, run_dir, tasks, results)
-
-    print()
-    if integration_sha:
-        print(f"Done! ({elapsed})")
-        print(f"  Integration branch: cagent/{run_id}/integration")
+    # Resolve base SHA
+    base_sha_file = run_dir / "base_sha"
+    if base_sha_file.exists():
+        base_sha = base_sha_file.read_text(encoding="utf-8").strip()
     else:
-        print(f"Run completed in {elapsed}.")
+        base_sha = current_head(repo_root)
+
+    def _merge_resume_results(all_tasks: list, dispatch_results: list) -> list:
+        result_map = {r.task_id: r for r in dispatch_results}
+        merged = []
+        for t in all_tasks:
+            if t.id in result_map:
+                merged.append(result_map[t.id])
+            else:
+                merged.append(AgentResult(task_id=t.id, status=t.status, commit_sha=t.commit_sha))
+        return merged
+
+    _execute_run(
+        all_tasks=tasks,
+        dispatch_tasks=pending_tasks,
+        run_id=run_id,
+        run_dir=run_dir,
+        base_sha=base_sha,
+        repo_root=repo_root,
+        args=args,
+        merge_results=_merge_resume_results,
+    )
 
 
 def _write_summary(
@@ -478,6 +447,13 @@ def _write_summary(
         sha = f" `{t.commit_sha[:7]}`" if t.commit_sha else ""
         lines.append(f"- [{status_icon}] task {t.id}: {t.prompt[:60]}{sha}\n")
 
+    if integration_sha:
+        lines.append("\n## Next Steps\n")
+        lines.append(f"```\n")
+        lines.append(f"git merge cagent/{run_id}/integration\n")
+        lines.append(f"cagent push cagent/{run_id}/integration\n")
+        lines.append(f"```\n")
+
     (run_dir / "summary.md").write_text("".join(lines), encoding="utf-8")
 
 
@@ -486,11 +462,13 @@ def _clean_worktrees(repo_root: Path, run_dir: Path, tasks: list, results: list)
     import subprocess
 
     all_ok = all(r.status in ("done", "noop") for r in results)
+    result_map = {r.task_id: r for r in results}
 
-    for task, result in zip(tasks, results):
+    for task in tasks:
+        result = result_map.get(task.id)
         wt_path = repo_root / ".cagent" / "worktrees" / run_dir.name / f"task-{task.id}"
         if wt_path.exists():
-            if all_ok or result.status != "failed":
+            if all_ok or (result and result.status != "failed"):
                 # Delete worktree for successful tasks
                 try:
                     subprocess.run(
@@ -572,14 +550,16 @@ def _print_dashboard_table(run_id: str, data: dict) -> None:
         status = tp.get("status", "?")
         tool_count = str(tp.get("tool_count", 0))
 
-        # Status with color hints
-        status_display = status
+        # Status with color hints — pad BEFORE adding ANSI codes
+        status_padded = f"{status:<8}"
         if status == "done":
-            status_display = f"\033[32m{status}\033[0m"  # green
+            status_display = f"\033[32m{status_padded}\033[0m"
         elif status == "failed":
-            status_display = f"\033[31m{status}\033[0m"  # red
+            status_display = f"\033[31m{status_padded}\033[0m"
         elif status == "running":
-            status_display = f"\033[33m{status}\033[0m"  # yellow
+            status_display = f"\033[33m{status_padded}\033[0m"
+        else:
+            status_display = status_padded
 
         # Elapsed
         elapsed = ""
@@ -591,16 +571,17 @@ def _print_dashboard_table(run_id: str, data: dict) -> None:
             else:
                 elapsed = f"{secs}s"
 
-        # Activity
+        # Activity — pad before adding ANSI codes
         now = ""
         if tp.get("commit_sha"):
             now = f"commit {tp['commit_sha'][:7]}"
         elif tp.get("last_activity"):
             now = tp["last_activity"][:30]
         elif tp.get("fail_reason"):
-            now = f"\033[31m{tp['fail_reason'][:30]}\033[0m"
+            reason_padded = f"{tp['fail_reason'][:30]:<30}"
+            now = f"\033[31m{reason_padded}\033[0m"
 
-        print(f"│ {tid:<10} │ {status_display:<8} │ {elapsed:<8} │ {tool_count:<4} │ {now:<30} │")
+        print(f"│ {tid:<10} │ {status_display} │ {elapsed:<8} │ {tool_count:<4} │ {now:<30} │")
 
     print(f"└{'─'*12}┴{'─'*10}┴{'─'*10}┴{'─'*6}┴{'─'*32}┘")
 
@@ -642,7 +623,7 @@ def _print_events_formatted(path: Path, kind_filter: str | None) -> None:
 def _follow_events_formatted(path: Path, kind_filter: str | None) -> None:
     """Follow events file with human-readable output."""
     with open(path, "r", encoding="utf-8") as f:
-        f.seek(0, 2)
+        # Print existing content first, then follow
         try:
             while True:
                 line = f.readline()
@@ -689,8 +670,7 @@ def _print_event_line(line: str, kind_filter: str | None) -> None:
 def _follow_file(path: Path) -> None:
     """Tail-follow a file (like tail -f)."""
     with open(path, "r", encoding="utf-8") as f:
-        # Seek to end
-        f.seek(0, 2)
+        # Print existing content first, then follow
         try:
             while True:
                 line = f.readline()
@@ -721,12 +701,12 @@ def _cmd_clean(args: argparse.Namespace) -> None:
             print(f"Run not found: {args.run_id}", file=sys.stderr)
             sys.exit(1)
     else:
-        print("Specify a run ID or use --all", file=sys.stderr)
-        print("Available runs:")
-        for d in sorted(runs_dir.iterdir(), reverse=True):
-            if d.is_dir():
-                print(f"  {d.name}")
-        sys.exit(1)
+        # Default to latest run
+        dirs = sorted(runs_dir.iterdir(), reverse=True)
+        target_runs = [d for d in dirs if d.is_dir()][:1]
+        if not target_runs:
+            print("No runs found.", file=sys.stderr)
+            sys.exit(1)
 
     if not target_runs:
         print("Nothing to clean.")
@@ -741,7 +721,11 @@ def _cmd_clean(args: argparse.Namespace) -> None:
 
     # Confirm
     if not args.force:
-        response = input("\nProceed? [y/N] ").strip().lower()
+        try:
+            response = input("\nProceed? [y/N] ").strip().lower()
+        except EOFError:
+            print("Aborted.")
+            return
         if response not in ("y", "yes"):
             print("Aborted.")
             return
@@ -773,7 +757,7 @@ def _cmd_clean(args: argparse.Namespace) -> None:
                 cwd=repo_root, capture_output=True, text=True,
             )
             for branch in result.stdout.splitlines():
-                branch = branch.strip().lstrip("* ")
+                branch = branch.strip().removeprefix("* ")
                 if branch:
                     subprocess.run(
                         ["git", "branch", "-D", branch],
@@ -821,7 +805,11 @@ def _cmd_push(args: argparse.Namespace) -> None:
         print(result.stdout)
 
     # Confirm
-    response = input(f"\nPush {branch} to origin? [y/N] ").strip().lower()
+    try:
+        response = input(f"\nPush {branch} to origin? [y/N] ").strip().lower()
+    except EOFError:
+        print("Aborted.")
+        return
     if response not in ("y", "yes"):
         print("Aborted.")
         return
@@ -851,7 +839,7 @@ def _cmd_branches(args: argparse.Namespace) -> None:
         ["git", "branch", "--list", "cagent/*"],
         cwd=repo_root, capture_output=True, text=True,
     )
-    branches = [b.strip().lstrip("* ") for b in result.stdout.splitlines() if b.strip()]
+    branches = [b.strip().removeprefix("* ") for b in result.stdout.splitlines() if b.strip()]
     if not branches:
         print("No cagent branches found.")
         return

@@ -92,4 +92,7 @@ async def run(
             tg.create_task(_run_one(task))
 
     # Return results in the same order as input tasks
-    return [results[t.id] for t in tasks]
+    return [
+        results.get(t.id, AgentResult(task_id=t.id, status="failed", fail_reason="task was cancelled"))
+        for t in tasks
+    ]

@@ -46,7 +46,18 @@ and credentials automatically (including proxies like LiteLLM).
 --integrator-model <id>   Model override for integrator
 --timeout <sec>           Per-agent timeout (default: 1800)
 --quiet                   Only print START/DONE/FAIL events
+--resume <run-id>         Resume a previous run, skipping completed tasks
 ```
+
+### Resuming Failed Runs
+
+If a run is interrupted or has failures, resume it with:
+
+```bash
+python -m cagent run tasks/example.txt --resume 2026-05-06T15-22-58
+```
+
+Already-completed tasks are skipped. Use `cagent status` to find the run ID.
 
 ## Safety
 

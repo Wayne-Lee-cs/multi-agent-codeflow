@@ -1,0 +1,3 @@
+# Both tasks modify README.md — will trigger integrator conflict resolution
+Add a "## Status" section to README.md with content "Under active development."
+Add a "## License" section to README.md with content "MIT License."

@@ -62,12 +62,16 @@ class LinePrinter:
             print(f"[{ts}] {task_id} START {summary}")
         elif kind == "tool_use":
             print(f"[{ts}] {task_id} {summary}")
+        elif kind == "tool_result":
+            print(f"[{ts}] {task_id} result: {summary[:60]}")
         elif kind == "denied":
             print(f"[{ts}] {task_id} DENIED {summary}")
         elif kind == "text":
             # Only print non-trivial text
             if len(summary.strip()) > 10:
                 print(f"[{ts}] {task_id} text: {summary[:60]}")
+        elif kind == "thinking":
+            pass  # Folded — too noisy for console
         elif kind == "done":
             tp = self.dashboard.tasks.get(task_id)
             extra = ""

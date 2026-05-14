@@ -6,7 +6,7 @@ import json
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal
 
 from cagent.compat import atomic_write
 
@@ -39,24 +39,24 @@ class TaskProgress:
 class EventParser:
     """Parse stream-json output from `claude -p --output-format stream-json`."""
 
-    def feed(self, line: str) -> Event | None:
-        """Parse a single JSON line into an Event, or None if unparseable/irrelevant."""
+    def feed(self, line: str) -> list[Event]:
+        """Parse a single JSON line into zero or more Events."""
         line = line.strip()
         if not line:
-            return None
+            return []
         try:
             obj = json.loads(line)
         except json.JSONDecodeError:
-            return Event(
+            return [Event(
                 ts=time.time(),
                 kind="text",
                 summary=line[:80],
                 raw={"raw": line},
-            )
+            )]
 
         return self._parse_event(obj)
 
-    def _parse_event(self, obj: dict) -> Event | None:
+    def _parse_event(self, obj: dict) -> list[Event]:
         ts = time.time()
         typ = obj.get("type", "")
 
@@ -64,8 +64,8 @@ class EventParser:
             subtype = obj.get("subtype", "")
             if subtype == "init":
                 model = obj.get("model", "unknown")
-                return Event(ts=ts, kind="start", summary=f"start (model={model})", raw=obj)
-            return None
+                return [Event(ts=ts, kind="start", summary=f"start (model={model})", raw=obj)]
+            return []
 
         if typ == "assistant":
             return self._parse_assistant(obj, ts)
@@ -76,61 +76,54 @@ class EventParser:
         if typ == "result":
             subtype = obj.get("subtype", "")
             if subtype == "success":
-                return Event(ts=ts, kind="done", summary="done", raw=obj)
-            return Event(ts=ts, kind="error", summary=f"error: {subtype}", raw=obj)
+                return [Event(ts=ts, kind="done", summary="done", raw=obj)]
+            return [Event(ts=ts, kind="error", summary=f"error: {subtype}", raw=obj)]
 
-        return None
+        return []
 
-    def _parse_assistant(self, obj: dict, ts: float) -> Event | None:
+    def _parse_assistant(self, obj: dict, ts: float) -> list[Event]:
         message = obj.get("message", {})
         content = message.get("content", [])
-        if not content:
-            return None
+        if not isinstance(content, list) or not content:
+            return []
 
-        block = content[0] if isinstance(content, list) and content else {}
-        block_type = block.get("type", "")
+        events = []
+        for block in content:
+            block_type = block.get("type", "")
+            if block_type == "tool_use":
+                name = block.get("name", "unknown")
+                inp = block.get("input", {})
+                events.append(Event(ts=ts, kind="tool_use", summary=self._summarize_tool(name, inp), raw=obj))
+            elif block_type == "text":
+                events.append(Event(ts=ts, kind="text", summary=block.get("text", "")[:80], raw=obj))
+            elif block_type == "thinking":
+                events.append(Event(ts=ts, kind="thinking", summary="thinking...", raw=obj))
+        return events
 
-        if block_type == "tool_use":
-            name = block.get("name", "unknown")
-            inp = block.get("input", {})
-            summary = self._summarize_tool(name, inp)
-            return Event(ts=ts, kind="tool_use", summary=summary, raw=obj)
-
-        if block_type == "text":
-            text = block.get("text", "")
-            return Event(ts=ts, kind="text", summary=text[:80], raw=obj)
-
-        if block_type == "thinking":
-            return Event(ts=ts, kind="thinking", summary="thinking...", raw=obj)
-
-        return None
-
-    def _parse_user(self, obj: dict, ts: float) -> Event | None:
+    def _parse_user(self, obj: dict, ts: float) -> list[Event]:
         message = obj.get("message", {})
         content = message.get("content", [])
-        if not content:
-            return None
+        if not isinstance(content, list) or not content:
+            return []
 
-        block = content[0] if isinstance(content, list) and content else {}
-        block_type = block.get("type", "")
+        events = []
+        for block in content:
+            block_type = block.get("type", "")
+            if block_type == "tool_result":
+                result_content = block.get("content", "")
+                if isinstance(result_content, list):
+                    result_content = str(result_content[0].get("text", ""))[:80] if result_content else ""
+                elif isinstance(result_content, str):
+                    result_content = result_content[:80]
+                else:
+                    result_content = str(result_content)[:80]
 
-        if block_type == "tool_result":
-            result_content = block.get("content", "")
-            if isinstance(result_content, list):
-                result_content = str(result_content[0].get("text", ""))[:80]
-            elif isinstance(result_content, str):
-                result_content = result_content[:80]
-            else:
-                result_content = str(result_content)[:80]
-
-            # Check if this is a denial
-            is_error = block.get("is_error", False)
-            if is_error and ("denied" in result_content.lower() or "not allowed" in result_content.lower()):
-                return Event(ts=ts, kind="denied", summary=f"denied: {result_content}", raw=obj)
-
-            return Event(ts=ts, kind="tool_result", summary=result_content, raw=obj)
-
-        return None
+                is_error = block.get("is_error", False)
+                if is_error and ("denied" in result_content.lower() or "not allowed" in result_content.lower()):
+                    events.append(Event(ts=ts, kind="denied", summary=f"denied: {result_content}", raw=obj))
+                else:
+                    events.append(Event(ts=ts, kind="tool_result", summary=result_content, raw=obj))
+        return events
 
     @staticmethod
     def _summarize_tool(name: str, inp: dict) -> str:
@@ -153,6 +146,8 @@ class EventParser:
 class Dashboard:
     """Tracks progress of all tasks, persists to dashboard.json."""
 
+    _DASHBOARD_THROTTLE = 1.0  # seconds between dashboard.json writes
+
     def __init__(self, run_dir: Path):
         self.run_dir = run_dir
         self.tasks: dict[str, TaskProgress] = {}
@@ -160,6 +155,25 @@ class Dashboard:
         self._events_dir = run_dir / "events"
         self._progress_dir.mkdir(parents=True, exist_ok=True)
         self._events_dir.mkdir(parents=True, exist_ok=True)
+        self._on_event: Callable[[str, Event], None] | None = None
+        self._last_dashboard_write: float = 0.0
+        self._dashboard_dirty: bool = False
+
+        # Load existing dashboard data if present (for resume support)
+        dashboard_path = run_dir / "dashboard.json"
+        if dashboard_path.exists():
+            try:
+                data = json.loads(dashboard_path.read_text(encoding="utf-8"))
+                for tid, tp_dict in data.items():
+                    tp = TaskProgress(task_id=tid)
+                    for k, v in tp_dict.items():
+                        if k == "last_event" and v is not None:
+                            tp.last_event = Event(**v)
+                        elif hasattr(tp, k):
+                            setattr(tp, k, v)
+                    self.tasks[tid] = tp
+            except (json.JSONDecodeError, KeyError, TypeError):
+                pass  # Start fresh if data is corrupt
 
     def update(self, task_id: str, event: Event) -> None:
         """Update task progress with a new event and persist."""
@@ -178,11 +192,15 @@ class Dashboard:
             tp.tool_count += 1
             tp.last_activity = event.summary
 
+        if event.kind == "tool_result":
+            tp.last_activity = event.summary
+
         if event.kind == "text":
             tp.last_activity = event.summary
 
         if event.kind == "denied":
             tp.last_activity = f"DENIED: {event.summary}"
+            tp.status = "denied"
 
         if event.kind == "done":
             tp.status = "done"
@@ -206,25 +224,45 @@ class Dashboard:
             self.tasks[task_id] = TaskProgress(task_id=task_id)
         tp = self.tasks[task_id]
         tp.status = status  # type: ignore
+        if status in ("done", "failed", "noop", "denied") and tp.ended_at is None:
+            tp.ended_at = time.time()
         for k, v in kwargs.items():
             setattr(tp, k, v)
+
+        # Create a synthetic event for persistence + printer notification
+        if status == "done":
+            sha = kwargs.get("commit_sha", "")
+            summary = f"commit {sha[:7]}" if sha else "done"
+            event = Event(ts=time.time(), kind="done", summary=summary, raw={})
+        elif status == "failed":
+            reason = kwargs.get("fail_reason", "")
+            event = Event(ts=time.time(), kind="error", summary=reason, raw={})
+        elif status == "noop":
+            event = Event(ts=time.time(), kind="done", summary="no changes", raw={})
+        elif status == "denied":
+            reason = kwargs.get("fail_reason", "")
+            event = Event(ts=time.time(), kind="denied", summary=reason, raw={})
+        else:
+            event = None
+
+        if event is not None:
+            # Persist event + notify printer, but don't let update() overwrite status
+            self._append_event(task_id, event)
+            if self._on_event:
+                self._on_event(task_id, event)
+
         self._write_task_progress(tp)
-        self._write_dashboard()
+        self._write_dashboard(force=status in ("done", "failed", "noop", "denied"))
 
     def get_snapshot(self) -> dict:
         """Return a serializable snapshot of all task progress."""
         result = {}
         for tid, tp in self.tasks.items():
-            d = asdict(tp)
-            if d["last_event"]:
-                d["last_event"] = asdict(d["last_event"])
-            result[tid] = d
+            result[tid] = asdict(tp)
         return result
 
     def _write_task_progress(self, tp: TaskProgress) -> None:
         d = asdict(tp)
-        if d["last_event"]:
-            d["last_event"] = asdict(d["last_event"])
         target = self._progress_dir / f"task-{tp.task_id}.json"
         atomic_write(target, json.dumps(d, indent=2, ensure_ascii=False))
 
@@ -234,9 +272,21 @@ class Dashboard:
         with open(target, "a", encoding="utf-8") as f:
             f.write(line)
 
-    def _write_dashboard(self) -> None:
+    def _write_dashboard(self, force: bool = False) -> None:
+        """Write dashboard.json with time-based throttling."""
+        now = time.time()
+        if not force and (now - self._last_dashboard_write) < self._DASHBOARD_THROTTLE:
+            self._dashboard_dirty = True
+            return
+        self._dashboard_dirty = False
+        self._last_dashboard_write = now
         target = self.run_dir / "dashboard.json"
         atomic_write(
             target,
             json.dumps(self.get_snapshot(), indent=2, ensure_ascii=False),
         )
+
+    def flush(self) -> None:
+        """Force-write dashboard if dirty. Call when run completes."""
+        if self._dashboard_dirty:
+            self._write_dashboard(force=True)

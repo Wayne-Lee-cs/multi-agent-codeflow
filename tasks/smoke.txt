@@ -1,0 +1,2 @@
+Create file FOO.md with content "foo".
+Create file BAR.md with content "bar".

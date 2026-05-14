@@ -17,10 +17,10 @@ DENY_PATTERNS = [
     r"^\s*git\s+update-ref\b",
     r"^\s*git\s+remote\s+(set-url|add)\b",
     # Windows dangerous commands (PowerShell)
-    r"Remove-Item\s.*-Recurse.*-Force",
-    r"Remove-Item\s.*-Force.*-Recurse",
-    r"del\s+/[sS]",
-    r"rd\s+/[sS]",
+    r"^\s*Remove-Item\s.*-Recurse.*-Force",
+    r"^\s*Remove-Item\s.*-Force.*-Recurse",
+    r"^\s*del\s+/[sS]",
+    r"^\s*rd\s+/[sS]",
 ]
 
 # Generate the hook script content — a Python script that reads stdin JSON,

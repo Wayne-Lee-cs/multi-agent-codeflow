@@ -35,8 +35,10 @@ async def integrate(
     from cagent.worktree import create_worktree
     create_worktree(repo_root, worktree_path, integration_branch, base_sha)
 
-    # Inject safety sandbox
-    prepare_sandbox(worktree_path)
+    # NOTE: do NOT call prepare_sandbox here — task commits already contain
+    # .claude/ files from their own sandbox, and injecting before cherry-pick
+    # would cause conflicts. The sandbox is injected later in _resolve_conflicts
+    # when the integrator agent actually needs it.
 
     done_tasks = [t for t in tasks if t.status == "done" and t.commit_sha]
     if not done_tasks:
@@ -45,16 +47,19 @@ async def integrate(
     integrated = []
     failed = []
     for task in done_tasks:
-        success = await _cherry_pick_one(
-            task=task,
-            all_tasks=done_tasks,
-            worktree_path=worktree_path,
-            run_dir=run_dir,
-            repo_root=repo_root,
-            integrator_model_override=integrator_model_override,
-            timeout=timeout,
-            dashboard=dashboard,
-        )
+        try:
+            success = await _cherry_pick_one(
+                task=task,
+                integrated_tasks=integrated,
+                worktree_path=worktree_path,
+                run_dir=run_dir,
+                repo_root=repo_root,
+                integrator_model_override=integrator_model_override,
+                timeout=timeout,
+                dashboard=dashboard,
+            )
+        except Exception:
+            success = False
         if success:
             integrated.append(task)
         else:
@@ -88,7 +93,9 @@ async def integrate(
     # Squash if requested
     if squash:
         await _run_git("reset", "--soft", base_sha, cwd=worktree_path)
-        summary_parts = [f"task {t.id}: {t.prompt.split(chr(10))[0][:50]}" for t in done_tasks]
+        # Remove sandbox files from index (they may have been committed during conflict resolution)
+        await _run_git("rm", "--cached", "-r", ".claude/", cwd=worktree_path, check=False)
+        summary_parts = [f"task {t.id}: {t.prompt.split(chr(10))[0][:50]}" for t in integrated]
         commit_msg = "integrate:\n" + "\n".join(f"- {s}" for s in summary_parts)
         await _run_git("commit", "-m", commit_msg, cwd=worktree_path)
 
@@ -97,9 +104,22 @@ async def integrate(
     return result.stdout.strip()
 
 
+def _has_conflict_markers(status_output: str) -> bool:
+    """Check if git porcelain status contains any conflict markers."""
+    for line in status_output.splitlines():
+        if len(line) < 2:
+            continue
+        xy = line[:2]
+        # UU=both-modified, AA=both-added, DD=both-deleted
+        # AU=added-by-us, UA=added-by-them, UD=modified-us-deleted-them, DU=deleted-us-modified-them
+        if "U" in xy or xy in ("DD", "AA"):
+            return True
+    return False
+
+
 async def _cherry_pick_one(
     task: Task,
-    all_tasks: list[Task],
+    integrated_tasks: list[Task],
     worktree_path: Path,
     run_dir: Path,
     repo_root: Path,
@@ -125,9 +145,8 @@ async def _cherry_pick_one(
 
     # Check for conflicts using porcelain format
     status = await _run_git("status", "--porcelain", cwd=worktree_path, check=False)
-    has_conflicts = any(line.startswith("UU") or line.startswith("AA") for line in status.stdout.splitlines())
 
-    if not has_conflicts:
+    if not _has_conflict_markers(status.stdout):
         # Cherry-pick failed for non-conflict reason
         await _run_git("cherry-pick", "--abort", cwd=worktree_path, check=False)
         return False
@@ -135,7 +154,7 @@ async def _cherry_pick_one(
     # Resolve conflicts with integrator agent
     return await _resolve_conflicts(
         task=task,
-        all_tasks=all_tasks,
+        integrated_tasks=integrated_tasks,
         worktree_path=worktree_path,
         run_dir=run_dir,
         integrator_model_override=integrator_model_override,
@@ -146,7 +165,7 @@ async def _cherry_pick_one(
 
 async def _resolve_conflicts(
     task: Task,
-    all_tasks: list[Task],
+    integrated_tasks: list[Task],
     worktree_path: Path,
     run_dir: Path,
     integrator_model_override: str | None,
@@ -158,17 +177,13 @@ async def _resolve_conflicts(
     status = await _run_git("status", "--porcelain", cwd=worktree_path, check=False)
     conflict_files = []
     for line in status.stdout.splitlines():
-        # Porcelain format: XY <path> where X or Y is U for unmerged
-        if len(line) >= 3 and (line[0] == "U" or line[1] == "U"):
-            conflict_files.append(line[3:].strip())
-        elif line.startswith("AA"):
+        if len(line) >= 3 and ("U" in line[:2] or line[:2] in ("DD", "AA")):
             conflict_files.append(line[3:].strip())
 
-    # Build integrator prompt
-    already_merged = [t for t in all_tasks if t != task and t.status == "done"]
+    # Build integrator prompt — only reference tasks already cherry-picked
     merged_summaries = "\n".join(
         f"  - task {t.id}: {t.prompt.split(chr(10))[0][:80]}"
-        for t in already_merged
+        for t in integrated_tasks if t != task
     )
     conflict_list = "\n".join(f"  - {f}" for f in conflict_files)
 
@@ -180,8 +195,11 @@ async def _resolve_conflicts(
         f"Current task prompt: {task.prompt}\n\n"
         f"Please resolve ALL conflict markers in the conflicting files. "
         f"Preserve the intent of both sides. After resolving, the files should "
-        f"have no <<<<<< ======= >>>>>> markers."
+        f"have no <<<<<<< ======= >>>>>>> markers."
     )
+
+    # Inject safety sandbox before running integrator agent
+    prepare_sandbox(worktree_path)
 
     if dashboard:
         event = Event(
@@ -227,30 +245,28 @@ async def _resolve_conflicts(
                     line = raw_line.decode("utf-8", errors="replace")
                     f.write(line)
                     f.flush()
-                    event = parser.feed(line)
-                    if event and dashboard:
-                        dashboard.update("_integrator", event)
+                    for event in parser.feed(line):
+                        if dashboard:
+                            dashboard.update("_integrator", event)
     except TimeoutError:
         proc.kill()
         await proc.wait()
+        await _run_git("cherry-pick", "--abort", cwd=worktree_path, check=False)
         return False
 
     # Verify no conflict markers remain in porcelain status
     status = await _run_git("status", "--porcelain", cwd=worktree_path, check=False)
-    still_conflicted = any(line.startswith("UU") or line.startswith("AA") for line in status.stdout.splitlines())
-
-    if still_conflicted:
+    if _has_conflict_markers(status.stdout):
+        await _run_git("cherry-pick", "--abort", cwd=worktree_path, check=False)
         return False
 
     # Verify no conflict markers remain in file contents
-    # Check for standard and diff3-style conflict markers
     grep_result = await _run_git(
-        "grep", "-rl", "-E", r"^(<<<<<<<|=======|>>>>>>>|\|\|\|\|\|\|\|)",
+        "grep", "-rl", "-E", r"^(<{7}|={7}|\|{7}|>{7})",
         cwd=worktree_path,
         check=False,
     )
     if grep_result.returncode == 0:
-        # Conflict markers still present in files
         if dashboard:
             event = Event(
                 ts=time.time(),
@@ -259,13 +275,22 @@ async def _resolve_conflicts(
                 raw={},
             )
             dashboard.update("_integrator", event)
+        await _run_git("cherry-pick", "--abort", cwd=worktree_path, check=False)
         return False
 
     # Complete the cherry-pick
     env_continue = os.environ.copy()
     env_continue["GIT_EDITOR"] = "true"
-    await _run_git("add", "-A", cwd=worktree_path)
-    await _run_git("cherry-pick", "--continue", cwd=worktree_path, env=env_continue)
+    try:
+        await _run_git("add", "-A", cwd=worktree_path)
+    except RuntimeError:
+        await _run_git("cherry-pick", "--abort", cwd=worktree_path, check=False)
+        return False
+    try:
+        await _run_git("cherry-pick", "--continue", cwd=worktree_path, env=env_continue)
+    except RuntimeError:
+        await _run_git("cherry-pick", "--abort", cwd=worktree_path, check=False)
+        return False
     return True
 
 

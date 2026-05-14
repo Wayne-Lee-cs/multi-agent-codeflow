@@ -113,15 +113,23 @@ async def run_agent(
                     log_file.write(line)
                     log_file.flush()
 
-                    event = parser.feed(line)
-                    if event and dashboard:
-                        dashboard.update(task.id, event)
+                    for event in parser.feed(line):
+                        if dashboard:
+                            dashboard.update(task.id, event)
     except TimeoutError:
         proc.kill()
         await proc.wait()
         if dashboard:
             dashboard.set_task_status(task.id, "failed", fail_reason="timeout")
         return AgentResult(task_id=task.id, status="failed", fail_reason="timeout")
+
+    # 6. Wait for process to fully exit and check return code
+    await proc.wait()
+    if proc.returncode != 0:
+        fail_reason = f"claude exited with code {proc.returncode}"
+        if dashboard:
+            dashboard.set_task_status(task.id, "failed", fail_reason=fail_reason)
+        return AgentResult(task_id=task.id, status="failed", fail_reason=fail_reason)
 
     # 7. Commit changes
     return await _commit_result(task, worktree_path, dashboard)
@@ -161,6 +169,10 @@ async def _commit_result(
         stderr=asyncio.subprocess.PIPE,
     )
     await add_proc.wait()
+    if add_proc.returncode != 0:
+        if dashboard:
+            dashboard.set_task_status(task.id, "failed", fail_reason="git add -A failed")
+        return AgentResult(task_id=task.id, status="failed", fail_reason="git add -A failed")
 
     # git commit
     commit_proc = await asyncio.create_subprocess_exec(
@@ -172,10 +184,11 @@ async def _commit_result(
     commit_stdout, commit_stderr = await commit_proc.communicate()
 
     if commit_proc.returncode != 0:
-        err = commit_stderr.decode("utf-8", errors="replace")
+        err = commit_stderr.decode("utf-8", errors="replace").strip()
+        fail_reason = f"git commit failed: {err}" if err else "git commit failed"
         if dashboard:
-            dashboard.set_task_status(task.id, "failed", fail_reason=f"git commit failed: {err}")
-        return AgentResult(task_id=task.id, status="failed", fail_reason="git commit failed")
+            dashboard.set_task_status(task.id, "failed", fail_reason=fail_reason)
+        return AgentResult(task_id=task.id, status="failed", fail_reason=fail_reason)
 
     # Get commit SHA
     sha_proc = await asyncio.create_subprocess_exec(
@@ -184,7 +197,13 @@ async def _commit_result(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    sha_out, _ = await sha_proc.communicate()
+    sha_out, sha_err = await sha_proc.communicate()
+    if sha_proc.returncode != 0:
+        err = sha_err.decode("utf-8", errors="replace").strip()
+        fail_reason = f"git rev-parse HEAD failed: {err}" if err else "git rev-parse HEAD failed"
+        if dashboard:
+            dashboard.set_task_status(task.id, "failed", fail_reason=fail_reason)
+        return AgentResult(task_id=task.id, status="failed", fail_reason=fail_reason)
     commit_sha = sha_out.decode("utf-8").strip()
 
     if dashboard:
