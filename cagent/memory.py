@@ -42,17 +42,23 @@ class RunMemory:
             result[agent_id] = path.read_text(encoding="utf-8")
         return result
 
-    def build_shared_context(self, task_ids: list[str]) -> str:
+    def build_shared_context(self, task_ids: list[str], max_chars: int = 4000) -> str:
         """Build a shared context string from completed task memories.
 
         Used to inject into worker prompts so later tasks can see what
-        earlier tasks accomplished.
+        earlier tasks accomplished. Capped at max_chars to avoid exceeding
+        the model's context window.
         """
         parts = []
+        total = 0
         for tid in task_ids:
             content = self.read(tid)
             if content:
-                parts.append(f"[Task {tid}]\n{content}")
+                entry = f"[Task {tid}]\n{content}"
+                if total + len(entry) > max_chars:
+                    break
+                parts.append(entry)
+                total += len(entry)
         return "\n\n".join(parts)
 
     def write_shared(self, content: str) -> None:

@@ -95,7 +95,7 @@ class EventParser:
                 inp = block.get("input", {})
                 events.append(Event(ts=ts, kind="tool_use", summary=self._summarize_tool(name, inp), raw=obj))
             elif block_type == "text":
-                events.append(Event(ts=ts, kind="text", summary=block.get("text", "")[:80], raw=obj))
+                events.append(Event(ts=ts, kind="text", summary=block.get("text", "")[:500], raw=obj))
             elif block_type == "thinking":
                 events.append(Event(ts=ts, kind="thinking", summary="thinking...", raw=obj))
         return events
@@ -174,6 +174,10 @@ class Dashboard:
                     self.tasks[tid] = tp
             except (json.JSONDecodeError, KeyError, TypeError):
                 pass  # Start fresh if data is corrupt
+
+    def set_event_handler(self, handler: Callable[[str, Event], None] | None) -> None:
+        """Set or clear the event handler callback (used by LinePrinter)."""
+        self._on_event = handler
 
     def update(self, task_id: str, event: Event) -> None:
         """Update task progress with a new event and persist."""

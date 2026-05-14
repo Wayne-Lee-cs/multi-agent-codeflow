@@ -188,7 +188,10 @@ async def _resolve_conflicts(
     conflict_files = []
     for line in status.stdout.splitlines():
         if len(line) >= 3 and ("U" in line[:2] or line[:2] in ("DD", "AA")):
-            conflict_files.append(line[3:].strip())
+            raw = line[3:].strip()
+            if " -> " in raw:
+                raw = raw.split(" -> ", 1)[1]
+            conflict_files.append(raw)
 
     # Build integrator prompt — reference tasks already cherry-picked with memory
     merged_summaries = ""
@@ -269,6 +272,19 @@ async def _resolve_conflicts(
     except TimeoutError:
         proc.kill()
         await proc.wait()
+        await _run_git("cherry-pick", "--abort", cwd=worktree_path, check=False)
+        return False
+
+    await proc.wait()
+    if proc.returncode != 0:
+        if dashboard:
+            event = Event(
+                ts=time.time(),
+                kind="error",
+                summary=f"integrator agent exited with code {proc.returncode}",
+                raw={},
+            )
+            dashboard.update("_integrator", event)
         await _run_git("cherry-pick", "--abort", cwd=worktree_path, check=False)
         return False
 

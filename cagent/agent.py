@@ -202,10 +202,9 @@ async def _commit_result(
     # committed. We: (1) delete .claude/ from disk, (2) restore tracked
     # .claude/ files from base, (3) restore .gitignore from base.
     # This ensures clean task commits for cherry-pick compatibility.
-    import shutil as _shutil
     claude_dir = worktree_path / ".claude"
     if claude_dir.exists():
-        _shutil.rmtree(claude_dir, ignore_errors=True)
+        shutil.rmtree(claude_dir, ignore_errors=True)
     # Restore tracked .claude/ files from base (if any)
     checkout_claude = await asyncio.create_subprocess_exec(
         "git", "checkout", "HEAD", "--", ".claude/",

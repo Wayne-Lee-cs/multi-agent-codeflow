@@ -157,7 +157,7 @@
 ### Deferred (acceptable for v1)
 - [ ] **12.20** `integrator.py` — Empty prompt when first task conflicts with base (edge case)
 - [ ] **12.21** `integrator.py` — `_run_git` has no timeout (acceptable for CLI tool)
-- [ ] **12.22** `cli.py` — `lstrip("* ")` fragile branch parsing (works in practice)
+- [x] **12.22** `cli.py` — branch parsing uses `removeprefix("* ")` (Python >= 3.11 guaranteed)
 - [ ] **12.23** `cli.py` — `run_id` timestamp collision potential (1-second resolution sufficient)
 
 ---
@@ -233,6 +233,23 @@
 - [ ] **13.18** `test_progress.py` — 单元测试：EventParser 对各类 stream-json 事件的解析
 - [ ] **13.19** `test_compat.py` — 单元测试：atomic_write、is_tty
 - [ ] **13.20** `test_worktree.py` — 集成测试：worktree 创建/删除流程
+
+---
+
+## Phase 15: Code Review Fixes (2026-05-14)
+
+### MEDIUM severity
+- [x] **15.1** `cli.py` — `parse_tasks_file` exceptions caught, clean error messages (no traceback)
+- [x] **15.2** `integrator.py` — Conflict file parsing handles renamed files (`old -> new`)
+- [x] **15.3** `integrator.py` — `_resolve_conflicts` checks `proc.returncode` after integrator agent exits
+- [x] **15.4** `progress.py` — `Dashboard.set_event_handler()` public API replaces private `_on_event` access
+- [x] **15.5** `memory.py` — `build_shared_context` capped at 4000 chars to avoid context overflow
+- [x] **15.6** `progress.py` — Text event truncation increased from 80 to 500 chars for better memory quality
+- [x] **15.7** `agent.py` — Removed redundant `import shutil as _shutil`, uses existing `shutil`
+
+### LOW severity (deferred)
+- [ ] **15.8** `agent.py` — `_commit_result` Windows file locking: `.claude/` rmtree may fail silently
+- [ ] **15.9** `agent.py` — `git checkout HEAD -- .claude/` runs unconditionally (minor perf)
 
 ---
 

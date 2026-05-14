@@ -281,7 +281,7 @@ def _execute_run(
     dashboard = Dashboard(run_dir)
     memory = RunMemory(run_dir)
     printer = LinePrinter(dashboard, quiet=args.quiet)
-    dashboard._on_event = printer.push
+    dashboard.set_event_handler(printer.push)
 
     async def _run_all():
         printer_task = asyncio.create_task(printer.run())
@@ -351,7 +351,7 @@ def _execute_run(
 
         finally:
             dashboard.flush()
-            dashboard._on_event = None
+            dashboard.set_event_handler(None)
             printer_task.cancel()
             try:
                 await printer_task
@@ -430,7 +430,11 @@ def _cmd_run(args: argparse.Namespace) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
 
     # Parse tasks
-    tasks = parse_tasks_file(args.tasks_file, run_id)
+    try:
+        tasks = parse_tasks_file(args.tasks_file, run_id)
+    except (FileNotFoundError, ValueError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
     for t in tasks:
         t.log_path = run_dir / "logs" / f"task-{t.id}.log"
 
