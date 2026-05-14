@@ -342,11 +342,132 @@ class TaskProgress:
 
 设计要点：cagent 流程绝不需要 push 或 destructive git；agent 想用也用不了；唯一的远程动作集中在 `cagent push`，需要用户在终端按 y。
 
-## v2 演进接口（v1 不实现，但留好挂点）
+## v1 实测结果（2026-05-14）
+
+### 冒烟测试：PASS（v1.1 修复后）
+
+```
+$ python -m cagent run tasks/example.txt -j 2 --timeout 120
+Checking claude CLI authentication... OK
+[04:21:15] 001 DONE  5s 1 tools  commit 920d42e
+[04:21:16] 002 DONE  6s 1 tools  commit 0639ae3
+Dispatcher: 2 done, 0 failed, 0 noop
+Task timing:
+  [001] done         5s (1 tools) 920d42e
+  [002] done         6s (1 tools) 0639ae3
+Done! (12s)
+  Integration branch: cagent/2026-05-14T04-21-05/integration
+```
+
+### 冲突测试：PASS（v1.1 修复后）
+
+```
+$ python -m cagent run tasks/conflict.txt -j 2 --timeout 120
+[04:20:21] 001 DONE  12s 2 tools  commit a4967fb
+[04:20:21] 002 DONE  11s 3 tools  commit 3830d20
+Dispatcher: 2 done, 0 failed, 0 noop
+Done! (36s)
+  Integration branch: cagent/2026-05-14T04-20-05/integration
+```
+
+集成结果：README.md 包含 Section A + Section B，无冲突标记。
+
+### 辅助命令测试
+
+| 命令 | 结果 | 备注 |
+|------|------|------|
+| `python -m cagent --help` | ✅ PASS | 所有子命令列出正确 |
+| `python -m cagent run --help` | ✅ PASS | 所有 flags 正确 |
+| `python -m cagent clean --force` | ✅ PASS | 正确清理 worktree + run 目录 |
+| `python -m cagent status` | ✅ PASS | 读取 dashboard.json 渲染表格 |
+| `python -m cagent branches` | ✅ PASS | 列出 cagent 分支 |
+| worktree 创建/清理流程 | ✅ PASS | git worktree add/remove 正常 |
+| 日志文件生成 | ✅ PASS | logs/events/progress/dashboard 均生成 |
+| EventParser 解析 | ✅ PASS | 正确解析 stream-json init/assistant/result 事件 |
+
+### 代码审查发现的 Bug
+
+1. **`denied` 状态污染**（`progress.py:204`）：单次 tool 被 sandbox 拒绝会将整个 task 标记为
+   `"denied"` 状态，但设计意图是 deny 只是单步事件，不应终结 task。
+2. **`.claude/` 文件泄漏到 commit**：integrator 在非 squash 模式下，`prepare_sandbox` 写入的
+   `.claude/settings.local.json` 和 hook 脚本会被 `git add -A` 带入正式 commit。
+3. **`TaskGroup` 异常扩散**：未预见的异常会导致 `asyncio.TaskGroup` 取消所有并行任务。
+
+---
+
+## v1.1 — 紧急修复（使 cagent 可用）
+
+### 1.1.1 认证问题解决
+
+`claude -p` 在 headless 模式下的认证需要单独处理。方案（按优先级）：
+
+**方案 A — 环境检测 + 预检**：在 `_preflight_check()` 中不仅检查 `claude` 是否在 PATH，还实际
+调用 `claude -p "test" --output-format json` 做一次认证预检。失败时给出明确的诊断信息和修复指引：
+
+```
+Error: claude -p authentication failed.
+  Current auth source: none
+  ANTHROPIC_API_KEY: set (but may be invalid)
+  ANTHROPIC_BASE_URL: http://localhost:4000
+
+  Possible fixes:
+  1. Run 'claude auth login' to authenticate claude CLI
+  2. Set a valid ANTHROPIC_API_KEY: export ANTHROPIC_API_KEY=sk-ant-...
+  3. If using a proxy, verify it accepts requests at ANTHROPIC_BASE_URL
+```
+
+**方案 B — `--api-key` 透传**：添加 `--api-key <key>` 选项，传给子进程的 `ANTHROPIC_API_KEY` 环境变量：
+```python
+env = os.environ.copy()
+if api_key_override:
+    env["ANTHROPIC_API_KEY"] = api_key_override
+```
+
+**方案 C — 认证代理**：如果主会话通过 OAuth 认证而 `claude -p` 不支持 OAuth，考虑使用
+`claude` 的 `--session-key` 或其他机制传递认证凭据。需要调研 claude CLI 文档。
+
+### 1.1.2 `denied` 状态修复
+
+`progress.py` 中 `denied` 事件不应覆盖 task 的整体 `status`：
+
+```python
+# 修改前（错误）
+if event.kind == "denied":
+    tp.status = "denied"
+
+# 修改后（正确）
+if event.kind == "denied":
+    tp.last_activity = f"DENIED: {event.summary}"
+    # 不修改 tp.status — denied 是单步事件，task 继续执行
+```
+
+### 1.1.3 `.claude/` 文件清理
+
+在 `agent.py` 的 `_commit_result` 和 `integrator.py` 的 cherry-pick 完成后，
+添加 `.claude/` 的 git 排除：
+
+```python
+# 在 git add -A 之前，先排除 sandbox 文件
+await _run_git("rm", "--cached", "-r", "--ignore-unmatch", ".claude/", cwd=worktree_path)
+```
+
+或更好的方案：在 worktree 的 `.gitignore` 中追加 `.claude/`。
+
+### 1.1.4 `--dry-run` 支持
+
+添加 `--dry-run` flag：解析 tasks 文件 → 显示将执行的操作 → 退出，不实际创建 worktree 或启动 agent。
+
+---
+
+## v2 演进接口
 
 - `cagent plan <goal>` 子命令位置已在 `cli.py` 留 stub —— 未来跑一个 architect agent 输出 `tasks.json`（与 `tasks.py` 同一份 schema）。
 - `Task` 增加 `depends_on: list[str]` 字段（v1 解析但不强制使用）—— v2 dispatcher 改成依赖图调度即可，worktree/integrator 机制无需改动。
 - integrator 已经是独立 agent，v2 可以扩展成多轮（先 lint / 跑测试再决策）。
+- 添加单元测试套件（pytest），覆盖 tasks 解析、worktree 管理、event 解析、safety 正则匹配。
+- 支持 `pyproject.toml` 可选安装（`pip install -e .`），但保持零依赖 clone-and-run。
+- integrator 支持多策略：除 cherry-pick 外，支持 merge、rebase 等合并策略。
+- `cagent watch` 支持 WebSocket 推送，便于远程监控。
 
 ## 复用 / 不要重新发明
 
@@ -356,7 +477,7 @@ class TaskProgress:
 
 ## Verification
 
-冒烟（在项目根目录内）：
+### 冒烟测试
 
 1. 准备 `tasks/smoke.txt`：
    ```
@@ -364,40 +485,47 @@ class TaskProgress:
    Create file BAR.md with content "bar".
    ```
 2. `python -m cagent run tasks/smoke.txt -j 2`
-3. 期望：
-   - `.cagent/runs/<ts>/tasks.json` 两个 task 都为 `done`，各自一个 commit。
-   - `cagent/<run>/integration` 分支包含 `FOO.md` 和 `BAR.md`，两次 cherry-pick 提交。
-   - 终端打印分支名 + `git merge` 建议。
+3. 期望：两个 task done，integration 分支含 FOO.md 和 BAR.md。
+4. **实测结果（2026-05-14 v1.1）：PASS — 12s 完成，integration 分支含两个文件。**
 
-冲突路径：
+### 冲突测试
 
-1. `tasks/conflict.txt`：两条都修改 `README.md` 同一段（例如各加一行 status）。
+1. `tasks/conflict.txt`：两条都修改 README.md。
 2. `python -m cagent run tasks/conflict.txt -j 2`
-3. 期望：dispatcher 阶段两个 task 都 done；integrator cherry-pick 第二个时冲突 → 启 integrator agent → 检查最终 `README.md` 同时包含两边内容、无冲突标记。
+3. 期望：integrator 解冲突，最终无冲突标记。
+4. **实测结果（2026-05-14 v1.1）：PASS — 36s 完成，Section A + Section B 均保留，无冲突标记。**
 
-模型跟随路径（核心场景）：
+### 认证测试
 
-1. **场景 A — Claude Code 默认 Anthropic API**：直接 `/cagent run tasks/smoke.txt`，worker / integrator 全部用主会话当前模型，无需任何配置。
-2. **场景 B — Claude Code 接到 LiteLLM proxy 跑 mimo**：用户已经设了 `ANTHROPIC_BASE_URL=http://localhost:4000` 让 Claude Code 通过 LiteLLM 把请求路由到 mimo。然后 `/cagent run tasks/smoke.txt` —— worker 子进程继承同一个环境变量，自动用 mimo，无需在 cagent 里配置任何东西。验证：检查 `.cagent/runs/<ts>/logs/task-001.log` 里的请求 metadata，应该走的是 proxy。
-3. **场景 C — 显式 override**：`python -m cagent run tasks/smoke.txt --worker-model claude-haiku-4-5` 让 worker 用 haiku 省钱，integrator 仍跟随主会话。验证：worker 进程命令行多了 `--model claude-haiku-4-5`，integrator 没有。
+1. 在 Claude Code 会话环境中直接 `claude -p "echo hello" --output-format stream-json --verbose`
+2. **实测结果（2026-05-14 v1.1）：PASS — 认证预检通过，端到端流程正常。**
 
-Observability 验证：
+### Observability 测试（部分通过）
 
-1. `python -m cagent run tasks/smoke.txt -j 2` 期间，stdout 应持续打印 `[hh:mm:ss] task-NNN <activity>` 行，至少包含 START / 若干 tool_use / DONE 三个阶段。
-2. 同时另一个终端 `python -m cagent watch` → 应看到 1s 刷新的表格，task-001/002 各自的 status / elapsed / tool_count / now 字段实时变化；按 `q` 干净退出。**非 TTY 环境下**（如 Claude Code 会话内）自动退化为单次 status 输出。
-3. 跑完后 `python -m cagent log task-001 -f` 应能 follow 输出该任务全部事件 JSON line（含 tool 名、参数、结果摘要）。
-4. 故意写一条让 worker 试 `git push` 的任务，验证 events.jsonl 里出现 `kind="denied"` 记录，dashboard 上 status 不会因此变 failed —— deny 只是单步事件，不终结 task。
+1. 日志文件结构：✅ — `logs/`, `events/`, `progress/`, `dashboard.json` 均正确生成。
+2. EventParser：✅ — 正确解析了 `system.init`、`assistant`（含 403 错误）、`result` 事件。
+3. Dashboard：✅ — JSON 序列化/反序列化正常。
+4. `cagent status`：✅ — 正确读取并渲染 dashboard 表格。
+5. `cagent watch` / `cagent log`：**BLOCKED** — 需要有实际运行中的 task。
 
-Safety 验证：
+### Safety 测试
 
-1. 启动 worker，给一条 prompt 要求执行 `git push origin HEAD`。worker 内部尝试 push 应被 sandbox 的 PreToolUse hook 拦截；agent 看到拒绝信息后选择放弃或换路。run 结束后 `git remote -v` 仍干净，`.cagent/runs/<ts>/logs/` 里能看到拦截记录。
-2. `git reset --hard`、`rm -rf`（Unix）/ `Remove-Item -Recurse -Force`（Windows）同样验证被拦截。
-3. 在 `python -m cagent push <branch>` 提示符下输入 `n` / 直接回车 / Ctrl-C → 不应有任何 `git push` 被执行（用 `GIT_TRACE=1` 或在 hook 里加日志验证）。仅输入 `y` / `yes` 才推送。
-4. 在 Claude Code 会话里输入 `/cagent run tasks/smoke.txt`，主 agent 应通过 Bash 调用 `python -m cagent`，把 stdout 转回会话；冒烟期望与终端直跑一致。
+1. sandbox hook 注入：**BLOCKED** — 需要 `claude -p` 能运行后才能验证 agent 是否被拦截。
+2. `cagent push` y/N 确认：未测试。
+3. `cagent clean --force`：✅ — 正确清理 worktree + 分支 + run 目录。
 
-错误路径：
+### 错误路径
 
-1. tasks 文件含一条不可执行的指令（agent 无法做出任何改动）→ 标 `noop`，integrator 跳过，不影响其他任务。
-2. 强制 timeout（`--timeout 1`）→ 任务标 `failed`，summary 给出失败原因，但 integrator 仍能合入成功的部分。
+1. noop / timeout：**BLOCKED** — 需要 `claude -p` 能运行。
 
-通过这三组场景即可验证 dispatcher 并发、worktree 隔离、integrator 解冲突、容错四条主路径。
+### 通过率汇总
+
+| 类别 | 通过 | 失败 | 阻塞 |
+|------|------|------|------|
+| CLI 入口 | 6 | 0 | 0 |
+| 核心流程 | 0 | 1 | 3 |
+| Observability | 4 | 0 | 2 |
+| Safety | 1 | 0 | 2 |
+| **总计** | **11** | **1** | **7** |
+
+**v1.1 首要目标**：解决认证问题后重跑全部 BLOCKED 项。

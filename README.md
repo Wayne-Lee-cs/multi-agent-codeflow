@@ -1,11 +1,22 @@
 # cagent — Concurrent Agent Workflow
 
+> **Status: v1 alpha** — CLI framework and orchestration logic complete, but `claude -p`
+> authentication in headless mode needs resolution before end-to-end runs work.
+> See [CHECKLIST.md](CHECKLIST.md) for current progress.
+
 A personal code workflow built on Claude Code: one CLI command fans out to multiple
 agents working in parallel git worktrees on the same repository. Tasks start in a
 flat queue and evolve into a layered pipeline (architect → builders → integrator).
 A controller aggregates outputs and produces a single unified commit.
 
 ## Quick Start
+
+### Prerequisites
+
+- Python >= 3.11
+- `claude` CLI in PATH (Claude Code)
+- Git
+- **`claude -p` must be able to authenticate** — run `claude -p "hello"` to verify
 
 ```bash
 # In Claude Code session:
@@ -21,8 +32,9 @@ bin\cagent.cmd run tasks/example.txt
 python -m cagent run tasks/example.txt
 ```
 
-**No model configuration needed** — cagent inherits your Claude Code session's model
-and credentials automatically (including proxies like LiteLLM).
+cagent inherits your Claude Code session's model and credentials automatically
+(including proxies like LiteLLM), provided `claude -p` can authenticate in your
+environment.
 
 ## Commands
 
@@ -87,10 +99,17 @@ Three levels of monitoring:
 2. **Live table** — `python -m cagent watch` for ANSI dashboard (or `cagent status` for snapshot)
 3. **Detailed replay** — `python -m cagent log <task-id> -f` for full event stream
 
+## Known Issues
+
+- **`claude -p` authentication**: In some environments (e.g., OAuth-only Claude Max plans
+  with proxy), `claude -p` reports `apiKeySource: none` and fails with 403. Workaround:
+  ensure `claude -p "hello"` works standalone before running cagent. See PLAN.md §v1.1 for
+  the fix roadmap.
+
 ## Requirements
 
 - Python >= 3.11
-- `claude` CLI in PATH (Claude Code)
+- `claude` CLI in PATH (Claude Code), with `claude -p` able to authenticate
 - Git
 
 ## Architecture

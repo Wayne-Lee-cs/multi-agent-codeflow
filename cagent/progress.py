@@ -25,7 +25,7 @@ class Event:
 @dataclass
 class TaskProgress:
     task_id: str
-    status: Literal["pending", "running", "done", "failed", "noop", "denied"] = "pending"
+    status: Literal["pending", "running", "done", "failed", "noop"] = "pending"
     started_at: float | None = None
     ended_at: float | None = None
     last_event: Event | None = None
@@ -200,7 +200,6 @@ class Dashboard:
 
         if event.kind == "denied":
             tp.last_activity = f"DENIED: {event.summary}"
-            tp.status = "denied"
 
         if event.kind == "done":
             tp.status = "done"
@@ -224,7 +223,7 @@ class Dashboard:
             self.tasks[task_id] = TaskProgress(task_id=task_id)
         tp = self.tasks[task_id]
         tp.status = status  # type: ignore
-        if status in ("done", "failed", "noop", "denied") and tp.ended_at is None:
+        if status in ("done", "failed", "noop") and tp.ended_at is None:
             tp.ended_at = time.time()
         for k, v in kwargs.items():
             setattr(tp, k, v)
@@ -239,9 +238,6 @@ class Dashboard:
             event = Event(ts=time.time(), kind="error", summary=reason, raw={})
         elif status == "noop":
             event = Event(ts=time.time(), kind="done", summary="no changes", raw={})
-        elif status == "denied":
-            reason = kwargs.get("fail_reason", "")
-            event = Event(ts=time.time(), kind="denied", summary=reason, raw={})
         else:
             event = None
 
@@ -252,7 +248,7 @@ class Dashboard:
                 self._on_event(task_id, event)
 
         self._write_task_progress(tp)
-        self._write_dashboard(force=status in ("done", "failed", "noop", "denied"))
+        self._write_dashboard(force=status in ("done", "failed", "noop"))
 
     def get_snapshot(self) -> dict:
         """Return a serializable snapshot of all task progress."""

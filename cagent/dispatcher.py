@@ -86,10 +86,9 @@ async def run(
                         dashboard.set_task_status(task.id, "failed", fail_reason=str(e))
                     dump_state(run_dir, tasks)
 
-    # Use TaskGroup for structured concurrency
-    async with asyncio.TaskGroup() as tg:
-        for task in tasks:
-            tg.create_task(_run_one(task))
+    # Use gather(return_exceptions=True) so a single task failure
+    # does not cancel all other running tasks.
+    await asyncio.gather(*[_run_one(task) for task in tasks], return_exceptions=True)
 
     # Return results in the same order as input tasks
     return [

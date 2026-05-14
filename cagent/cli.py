@@ -33,6 +33,8 @@ def main() -> None:
     run_p.add_argument("--integrator-model", default=None, help="Model override for integrator")
     run_p.add_argument("--timeout", type=int, default=1800, help="Per-agent timeout in seconds")
     run_p.add_argument("--quiet", action="store_true", help="Only print START/DONE/FAIL events")
+    run_p.add_argument("--api-key", default=None, help="Explicit API key for claude -p subprocesses")
+    run_p.add_argument("--dry-run", action="store_true", help="Show plan without executing")
     run_p.add_argument("--resume", default=None, help="Resume from a previous run ID")
 
     # --- status ---
@@ -98,8 +100,11 @@ def _fmt_elapsed(seconds: float) -> str:
     return f"{hours}h{mins}m{secs}s"
 
 
-def _preflight_check() -> None:
-    """Verify required tools are available before running."""
+def _preflight_check(check_auth: bool = False) -> None:
+    """Verify required tools are available before running.
+
+    If check_auth=True, also verify that `claude -p` can authenticate.
+    """
     if not shutil.which("git"):
         print("Error: 'git' not found in PATH. Please install Git.", file=sys.stderr)
         sys.exit(1)
@@ -112,6 +117,85 @@ def _preflight_check() -> None:
             file=sys.stderr,
         )
         sys.exit(1)
+
+    if check_auth:
+        _auth_preflight_check(claude_bin)
+
+
+def _auth_preflight_check(claude_bin: str) -> None:
+    """Run a quick claude -p test to verify authentication works."""
+    import os
+
+    print("Checking claude CLI authentication... ", end="", flush=True)
+    try:
+        result = subprocess.run(
+            [claude_bin, "-p", "say hello", "--output-format", "json", "--max-turns", "1"],
+            capture_output=True,
+            timeout=30,
+            env=os.environ.copy(),
+        )
+        # Decode with error handling for Windows encoding issues
+        stdout = result.stdout.decode("utf-8", errors="replace") if result.stdout else ""
+        stderr = result.stderr.decode("utf-8", errors="replace") if result.stderr else ""
+    except subprocess.TimeoutExpired:
+        print("TIMEOUT")
+        _print_auth_diagnostics()
+        sys.exit(1)
+    except FileNotFoundError:
+        print("FAILED")
+        print(f"  Could not execute: {claude_bin}", file=sys.stderr)
+        sys.exit(1)
+
+    if result.returncode == 0:
+        print("OK")
+        return
+
+    # Authentication likely failed — print diagnostics
+    print("FAILED")
+
+    # Try to detect the failure reason
+    combined = stderr + stdout
+    if "apiKeySource" in combined or "403" in combined or "not allowed" in combined.lower():
+        print("\n  Authentication failed: claude -p cannot authenticate.", file=sys.stderr)
+    elif "not found" in combined.lower():
+        print(f"\n  claude CLI not found at: {claude_bin}", file=sys.stderr)
+    else:
+        print(f"\n  claude -p exited with code {result.returncode}", file=sys.stderr)
+        if stderr.strip():
+            print(f"  stderr: {stderr.strip()[:200]}", file=sys.stderr)
+
+    _print_auth_diagnostics()
+    sys.exit(1)
+
+
+def _print_auth_diagnostics() -> None:
+    """Print environment diagnostics for authentication troubleshooting."""
+    import os
+
+    print("\nAuth diagnostics:", file=sys.stderr)
+    env_vars = [
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_MODEL",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+    ]
+    for var in env_vars:
+        val = os.environ.get(var)
+        if val is None:
+            print(f"  {var}: not set", file=sys.stderr)
+        elif var == "ANTHROPIC_API_KEY":
+            # Mask the key
+            print(f"  {var}: {val[:8]}...{val[-4:]}" if len(val) > 12 else f"  {var}: (set, short)", file=sys.stderr)
+        else:
+            print(f"  {var}: {val}", file=sys.stderr)
+
+    print("\nPossible fixes:", file=sys.stderr)
+    print("  1. Run 'claude auth login' to authenticate via OAuth", file=sys.stderr)
+    print("  2. Set a valid API key: export ANTHROPIC_API_KEY=sk-ant-...", file=sys.stderr)
+    print("  3. If using a proxy, verify ANTHROPIC_BASE_URL is correct", file=sys.stderr)
+    print("  4. Use --api-key flag: cagent run --api-key sk-ant-... tasks.txt", file=sys.stderr)
 
 
 def _get_repo_root() -> Path:
@@ -148,6 +232,27 @@ def _find_run_dir(repo_root: Path, run_id: str | None) -> Path:
             return d
     print("No completed runs found.", file=sys.stderr)
     sys.exit(1)
+
+
+def _print_task_timing(dashboard: "Dashboard") -> None:
+    """Print per-task timing stats after a run completes."""
+    tasks = dashboard.tasks
+    if not tasks:
+        return
+    print()
+    print("Task timing:")
+    for tid in sorted(tasks.keys()):
+        tp = tasks[tid]
+        elapsed_str = ""
+        if tp.started_at and tp.ended_at:
+            secs = int(tp.ended_at - tp.started_at)
+            elapsed_str = _fmt_elapsed(secs)
+        elif tp.started_at:
+            elapsed_str = "still running"
+        status = tp.status
+        sha = f" {tp.commit_sha[:7]}" if tp.commit_sha else ""
+        tools = f" ({tp.tool_count} tools)" if tp.tool_count else ""
+        print(f"  [{tid}] {status:<6} {elapsed_str:>8}{tools}{sha}")
 
 
 def _execute_run(
@@ -201,6 +306,9 @@ def _execute_run(
 
             print()
             print(f"Dispatcher: {done_count} done, {failed_count} failed, {noop_count} noop")
+
+            # Print per-task timing stats
+            _print_task_timing(dashboard)
 
             integration_sha = None
             if done_count > 0:
@@ -274,10 +382,15 @@ def _execute_run(
 
 def _cmd_run(args: argparse.Namespace) -> None:
     """Execute the full run workflow: dispatch → integrate → summary."""
-    _preflight_check()
+    _preflight_check(check_auth=True)
 
     from cagent.tasks import dump_state, parse_tasks_file
     from cagent.worktree import current_head
+
+    # Inject --api-key into environment if provided
+    if args.api_key:
+        import os
+        os.environ["ANTHROPIC_API_KEY"] = args.api_key
 
     repo_root = _get_repo_root()
 
@@ -305,6 +418,25 @@ def _cmd_run(args: argparse.Namespace) -> None:
     tasks = parse_tasks_file(args.tasks_file, run_id)
     for t in tasks:
         t.log_path = run_dir / "logs" / f"task-{t.id}.log"
+
+    # Dry-run mode: show plan and exit
+    if args.dry_run:
+        print(f"Dry run — planned execution:")
+        print(f"  base:     {base_sha[:12]}")
+        print(f"  tasks:    {len(tasks)}")
+        print(f"  jobs:     {args.jobs}")
+        print(f"  timeout:  {args.timeout}s")
+        print(f"  squash:   {'yes' if args.squash else 'no'}")
+        print(f"  model:    {args.worker_model or '(inherit from Claude Code)'}")
+        print()
+        print("Tasks:")
+        for t in tasks:
+            prompt_preview = t.prompt.split("\n")[0][:60]
+            print(f"  [{t.id}] {prompt_preview}")
+        print()
+        print("Run with: python -m cagent run", args.tasks_file)
+        return
+
     dump_state(run_dir, tasks)
 
     # Store base SHA for --resume support
@@ -785,6 +917,16 @@ def _cmd_push(args: argparse.Namespace) -> None:
     )
     if check.returncode != 0:
         print(f"Error: branch '{branch}' not found.", file=sys.stderr)
+        # Suggest available cagent branches
+        result = subprocess.run(
+            ["git", "branch", "--list", "cagent/*"],
+            cwd=repo_root, capture_output=True, text=True,
+        )
+        branches = [b.strip().removeprefix("* ") for b in result.stdout.splitlines() if b.strip()]
+        if branches:
+            print("Available cagent branches:", file=sys.stderr)
+            for b in sorted(branches):
+                print(f"  {b}", file=sys.stderr)
         sys.exit(1)
 
     # Show what will be pushed

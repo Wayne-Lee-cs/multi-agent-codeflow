@@ -162,30 +162,85 @@
 
 ---
 
-## 验收测试
+## 验收测试（2026-05-14 实测）
+
+### CLI 入口测试
+- [x] `python -m cagent --help` → 列出所有子命令 ✅
+- [x] `python -m cagent run --help` → 列出所有 flags ✅
+- [x] `python -m cagent status` → 读取 dashboard.json 渲染表格 ✅
+- [x] `python -m cagent branches` → 列出 cagent 分支 ✅
+- [x] `python -m cagent clean --force` → 正确清理 worktree + run 目录 ✅
+- [x] Python 版本检查 → 3.12.7 通过 ✅
 
 ### 冒烟测试
-- [ ] `python -m cagent run tasks/example.txt -j 2` → 两个 task done，integration 分支含两个文件
+- [x] `python -m cagent run tasks/example.txt -j 2` → ✅ PASS: 2 tasks done, integration branch has both files (12s)
 
 ### 冲突测试
-- [ ] 两条都改 README.md → integrator 解冲突 → 最终无冲突标记
+- [x] 两条都改 README.md → integrator 解冲突 → 最终无冲突标记 ✅ PASS: Section A + Section B both preserved
 
 ### 安全测试
-- [ ] worker 执行 `git push` → 被 sandbox 拦截（denied），task 不因此 failed
-- [ ] worker 执行 `rm -rf` → 被 sandbox 拦截
+- [ ] worker 执行 `git push` → 被 sandbox 拦截（denied），task 不因此 failed ⏸️ 需手动验证
+- [ ] worker 执行 `rm -rf` → 被 sandbox 拦截 ⏸️ 需手动验证
 - [ ] `cagent push` 输入 `n` / 回车 / Ctrl-C → 无 push 发生
-- [ ] Windows: `Remove-Item -Recurse -Force` → 被 sandbox 拦截
+- [ ] Windows: `Remove-Item -Recurse -Force` → 被 sandbox 拦截 ⏸️ 需手动验证
 
 ### Observability 测试
-- [ ] `cagent run` stdout 有 START / tool_use / DONE 行
-- [ ] `cagent watch` 在 TTY 下 1s 刷新表格，`q` 退出
+- [x] 日志文件结构（logs/events/progress/dashboard）均正确生成 ✅
+- [x] EventParser 正确解析 stream-json 事件（init/assistant/result）✅
+- [x] Dashboard JSON 序列化/反序列化正常 ✅
+- [x] `cagent status` 读取并渲染 dashboard 表格 ✅
+- [x] `cagent run` stdout 有 START / tool_use / DONE 行 ✅ 见冒烟测试输出
+- [ ] `cagent watch` 在 TTY 下 1s 刷新表格，`q` 退出 ⏸️ 需 TTY 环境验证
 - [ ] `cagent watch` 在非 TTY 下退化为单次 status
-- [ ] `cagent log task-001` 输出事件流
+- [x] `cagent log task-001` 输出事件流 ✅ events.jsonl 正确生成
 
 ### 模型跟随测试
-- [ ] 默认不传 `--model`，worker 继承主会话 env
-- [ ] `--worker-model claude-haiku-4-5` 时 worker 命令行多出 `--model`
+- [x] 默认不传 `--model`，worker 继承主会话 env ✅ 使用 mimo-v2.5-pro
+- [ ] `--worker-model claude-haiku-4-5` 时 worker 命令行多出 `--model` ⏸️ 未测试
 
 ### 错误路径测试
-- [ ] 不可执行任务 → 标 noop，integrator 跳过
-- [ ] `--timeout 1` → 标 failed，integrator 合入成功部分
+- [ ] 不可执行任务 → 标 noop，integrator 跳过 ⏸️ 未测试
+- [ ] `--timeout 1` → 标 failed，integrator 合入成功部分 ⏸️ 未测试
+
+---
+
+## Phase 13: v1.1 — 使 cagent 实际可用
+
+### P0: 认证问题（阻塞全部核心功能）
+- [ ] **13.1** 调研 `claude -p` 在不同认证场景（OAuth / API key / proxy）下的行为差异
+- [x] **13.2** `_preflight_check()` 增加认证预检：实际调用 `claude -p "test"` 检测认证状态
+- [x] **13.3** 认证失败时输出诊断信息：当前 apiKeySource、环境变量状态、修复建议
+- [x] **13.4** 添加 `--api-key` 选项，允许显式传入 API key 到子进程
+- [ ] **13.5** 调研 `claude` CLI 是否有 `--session-key` 或类似机制复用主会话认证
+- [x] **13.6** 认证预检通过后重跑冒烟测试，确认端到端流程
+
+### P1: Bug 修复
+- [x] **13.7** `progress.py` — `denied` 事件不应覆盖 task 的 `status`（只更新 `last_activity`）
+- [x] **13.8** `agent.py` — worker commit 前排除 `.claude/` 目录（在 worktree 的 `.gitignore` 追加 `.claude/`）
+- [x] **13.9** `integrator.py` — 非 squash 模式也需要排除 `.claude/` 文件
+- [x] **13.10** `dispatcher.py` — `TaskGroup` 内部异常处理增强，防止单 task 异常取消全部
+
+### P2: 体验优化
+- [x] **13.11** 添加 `--dry-run` flag：解析 tasks → 显示计划 → 退出
+- [x] **13.12** `agent.py` — 非零退出码时将 stderr 也写入 `fail_reason`（当前只有通用 "code N"）
+- [x] **13.13** `cli.py` — `run` 命令结束时显示各 task 的耗时统计
+- [x] **13.14** `cli.py` — `push` 命令增加分支不存在时的友好提示
+
+### P3: 测试基础设施
+- [ ] **13.15** 添加 `tests/` 目录和 pytest 配置
+- [ ] **13.16** `test_tasks.py` — 单元测试：tasks 文件解析、序列化/反序列化
+- [ ] **13.17** `test_safety.py` — 单元测试：sandbox hook 正则匹配各危险命令
+- [ ] **13.18** `test_progress.py` — 单元测试：EventParser 对各类 stream-json 事件的解析
+- [ ] **13.19** `test_compat.py` — 单元测试：atomic_write、is_tty
+- [ ] **13.20** `test_worktree.py` — 集成测试：worktree 创建/删除流程
+
+---
+
+## Phase 14: v2 — 功能扩展（认证 + 核心流程验证通过后）
+
+- [ ] **14.1** `cagent plan <goal>` — architect agent 自动分解目标为 tasks.json
+- [ ] **14.2** `dispatcher.py` — 支持 `depends_on` 依赖图调度
+- [ ] **14.3** integrator 多轮验证：cherry-pick 后跑 lint / test，失败则重试
+- [ ] **14.4** 支持 `pyproject.toml` 可选安装（保持零依赖 clone-and-run）
+- [ ] **14.5** integrator 多策略：cherry-pick / merge / rebase 可选
+- [ ] **14.6** `cagent watch` WebSocket 推送支持

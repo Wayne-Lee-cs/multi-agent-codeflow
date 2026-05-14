@@ -95,3 +95,13 @@ def prepare_sandbox(worktree_path: str | Path) -> None:
 
     target = claude_dir / "settings.local.json"
     target.write_text(json.dumps(settings, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    # Exclude .claude/ from git commits (sandbox files should not be committed)
+    gitignore = worktree_path / ".gitignore"
+    entry = ".claude/\n"
+    if gitignore.exists():
+        content = gitignore.read_text(encoding="utf-8")
+        if ".claude/" not in content:
+            gitignore.write_text(content + entry, encoding="utf-8")
+    else:
+        gitignore.write_text(entry, encoding="utf-8")

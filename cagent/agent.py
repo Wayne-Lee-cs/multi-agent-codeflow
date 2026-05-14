@@ -105,6 +105,7 @@ async def run_agent(
     # 5. Stream stdout line by line (wrapped in timeout)
     if proc.stdout is None:
         raise RuntimeError("subprocess stdout pipe was not created")
+    last_lines: list[str] = []  # keep last N lines for error context
     try:
         async with asyncio.timeout(timeout):
             with open(log_path, "a", encoding="utf-8") as log_file:
@@ -112,6 +113,11 @@ async def run_agent(
                     line = raw_line.decode("utf-8", errors="replace")
                     log_file.write(line)
                     log_file.flush()
+                    stripped = line.strip()
+                    if stripped:
+                        last_lines.append(stripped)
+                        if len(last_lines) > 5:
+                            last_lines.pop(0)
 
                     for event in parser.feed(line):
                         if dashboard:
@@ -127,6 +133,10 @@ async def run_agent(
     await proc.wait()
     if proc.returncode != 0:
         fail_reason = f"claude exited with code {proc.returncode}"
+        if last_lines:
+            # Include last meaningful output for diagnostics
+            tail = "; ".join(last_lines[-3:])
+            fail_reason += f" — {tail[:200]}"
         if dashboard:
             dashboard.set_task_status(task.id, "failed", fail_reason=fail_reason)
         return AgentResult(task_id=task.id, status="failed", fail_reason=fail_reason)
@@ -160,6 +170,33 @@ async def _commit_result(
     # Stage and commit
     first_line = task.prompt.split("\n")[0][:72]
     commit_msg = f"task {task.id}: {first_line}"
+
+    # Exclude .claude/ sandbox files from commit. The sandbox creates
+    # .claude/settings.local.json and hook scripts that should not be
+    # committed. We: (1) delete .claude/ from disk, (2) restore tracked
+    # .claude/ files from base, (3) restore .gitignore from base.
+    # This ensures clean task commits for cherry-pick compatibility.
+    import shutil as _shutil
+    claude_dir = worktree_path / ".claude"
+    if claude_dir.exists():
+        _shutil.rmtree(claude_dir, ignore_errors=True)
+    # Restore tracked .claude/ files from base (if any)
+    checkout_claude = await asyncio.create_subprocess_exec(
+        "git", "checkout", "HEAD", "--", ".claude/",
+        cwd=str(worktree_path),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    await checkout_claude.wait()
+
+    # Restore .gitignore to base (sandbox may have modified it)
+    checkout_gitignore = await asyncio.create_subprocess_exec(
+        "git", "checkout", "HEAD", "--", ".gitignore",
+        cwd=str(worktree_path),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    await checkout_gitignore.wait()
 
     # git add -A
     add_proc = await asyncio.create_subprocess_exec(
