@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -67,6 +68,141 @@ def parse_tasks_file(path: str | Path, run_id: str) -> list[Task]:
         )
 
     return tasks
+
+
+def parse_tasks_md(path: str | Path, run_id: str) -> tuple[list[Task], str]:
+    """Parse a Markdown tasks file into (tasks, conventions).
+
+    Supports the format:
+        ### Task 001
+        - **depends_on**: none (or 001, 002)
+        - **files**: src/foo.py
+
+        Task prompt text here...
+
+    Conventions are read from conventions.md in the same directory,
+    or from an inline ## Conventions section.
+    """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Tasks file not found: {path}")
+
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        raise ValueError(f"Tasks file is not valid UTF-8: {path}")
+
+    # Try to load conventions from conventions.md in same directory
+    conventions = ""
+    conv_path = path.parent / "conventions.md"
+    if conv_path.exists():
+        conventions = conv_path.read_text(encoding="utf-8").strip()
+    else:
+        # Check for inline ## Conventions section
+        conv_match = _extract_section(raw, "Conventions")
+        if conv_match:
+            conventions = conv_match
+
+    # Parse task blocks
+    tasks: list[Task] = []
+    task_blocks = _split_task_blocks(raw)
+
+    for block in task_blocks:
+        # Extract task ID from ### Task NNN heading
+        id_match = re.search(r"###\s+Task\s+(\d+)", block)
+        if not id_match:
+            continue
+        task_id = id_match.group(1).zfill(3)
+
+        depends_on_str = _extract_field(block, "depends_on") or "none"
+        depends_on = []
+        if depends_on_str.lower() != "none":
+            depends_on = [d.strip() for d in depends_on_str.split(",") if d.strip()]
+
+        # Extract files field (for prompt injection, not stored in Task)
+        _files = _extract_field(block, "files") or ""
+
+        # Remaining lines after fields = prompt
+        prompt = _extract_prompt(block)
+        if not prompt:
+            continue
+
+        tasks.append(
+            Task(
+                id=task_id,
+                prompt=prompt,
+                branch=f"cagent/{run_id}/task-{task_id}",
+                depends_on=depends_on,
+            )
+        )
+
+    if not tasks:
+        raise ValueError(
+            f"No tasks found in {path}\n"
+            f"  Expected ### Task NNN blocks."
+        )
+
+    return tasks, conventions
+
+
+def _extract_section(markdown: str, heading: str) -> str:
+    """Extract content under a ## heading."""
+    lines = markdown.splitlines()
+    in_section = False
+    result = []
+    for line in lines:
+        if line.strip().lower().startswith(f"## {heading.lower()}"):
+            in_section = True
+            continue
+        if in_section:
+            if line.strip().lower().startswith("## "):
+                break
+            result.append(line)
+    return "\n".join(result).strip()
+
+
+def _split_task_blocks(markdown: str) -> list[str]:
+    """Split markdown into task blocks starting with ### Task."""
+    blocks = []
+    current = []
+    for line in markdown.splitlines():
+        if line.strip().startswith("### Task"):
+            if current:
+                blocks.append("\n".join(current))
+            current = [line]
+        elif current:
+            current.append(line)
+    if current:
+        blocks.append("\n".join(current))
+    return blocks
+
+
+def _extract_field(block: str, field_name: str) -> str | None:
+    """Extract a **field**: value line from a task block."""
+    pattern = rf"\*\*{re.escape(field_name)}\*\*\s*:\s*(.+)"
+    match = re.search(pattern, block, re.IGNORECASE)
+    return match.group(1).strip() if match else None
+
+
+def _extract_prompt(block: str) -> str:
+    """Extract prompt text from a task block (lines after field declarations)."""
+    lines = block.splitlines()
+    prompt_lines = []
+    past_fields = False
+    for line in lines:
+        stripped = line.strip()
+        # Skip the ### Task header
+        if stripped.startswith("### Task"):
+            continue
+        # Skip field lines like **depends_on**: ...
+        if re.match(r"^\s*-\s*\*\*\w+\*\*\s*:", stripped):
+            continue
+        # Once we hit non-field content, collect it
+        if stripped:
+            past_fields = True
+        if past_fields:
+            prompt_lines.append(line)
+    return "\n".join(prompt_lines).strip()
 
 
 def dump_state(run_dir: Path, tasks: list[Task]) -> None:

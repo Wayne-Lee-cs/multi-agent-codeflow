@@ -1,8 +1,7 @@
 """Safety sandbox — inject PreToolUse hooks to deny dangerous commands in worktrees.
 
-Known limitation: the hook only inspects the top-level Bash command string.
-Indirect execution patterns like `echo "git push" > x.sh && bash x.sh` or
-`python -c "import subprocess; subprocess.run(['git','push'])"` can bypass
+Known limitation: indirect execution via compiled binaries or non-Bash
+interpreters (e.g., a Go program calling exec("git push")) can bypass
 the regex check. This is acceptable for v1 since claude -p in acceptEdits
 mode does not intentionally circumvent hooks, and worktrees lack push
 credentials. v2 may explore stronger sandboxing (seccomp/namespaces/Docker).
@@ -16,19 +15,32 @@ from pathlib import Path
 
 # Patterns that should never run inside a cagent worktree.
 # Each entry is a regex string; the hook script checks Bash tool_input.command.
+# Uses \b word boundary instead of ^ anchor to catch commands in chains like
+# `cd /tmp && git push` or `mkdir dir && cd dir && git push`.
 DENY_PATTERNS = [
-    # Unix dangerous commands
-    r"^\s*git\s+push\b",
-    r"^\s*git\s+reset\s+--hard\b",
-    r"^\s*git\s+clean\s+-[a-z]*f",
-    r"^\s*rm\s+-[a-z]*[rR]",
-    r"^\s*git\s+update-ref\b",
-    r"^\s*git\s+remote\s+(set-url|add)\b",
+    # Unix dangerous commands (word boundary anchored, matches in command chains)
+    r"\bgit\s+push\b",
+    r"\bgit\s+reset\s+--hard\b",
+    r"\bgit\s+clean\s+-[a-z]*f",
+    # rm with recursive flag: -rf, -fr, -r, -R, --recursive, and variants.
+    # Uses a single pattern to avoid gaps between separate rf/fr/r patterns.
+    # Matches: rm -rf, rm -fr, rm -Rf, rm -r, rm --recursive, rm -r/tmp, etc.
+    r"\brm\s+-(?:[a-z]*[rRfF]){2}[a-z]*|\brm\s+-(?:[a-z]*[rR])\b|\brm\s+--recursive\b",
+    r"\bgit\s+update-ref\b",
+    r"\bgit\s+remote\s+(set-url|add)\b",
     # Windows dangerous commands (PowerShell)
-    r"^\s*Remove-Item\s.*-Recurse.*-Force",
-    r"^\s*Remove-Item\s.*-Force.*-Recurse",
-    r"^\s*del\s+/[sS]",
-    r"^\s*rd\s+/[sS]",
+    r"Remove-Item\s.*-Recurse.*-Force",
+    r"Remove-Item\s.*-Force.*-Recurse",
+    r"\bdel\s+/[sS]",
+    r"\brd\s+/[sS]",
+    # Command chain / indirect execution patterns.
+    # Note: bash -c / sh -c are intentionally broad — even "bash -c 'echo hello'"
+    # is blocked. This is acceptable for cagent's headless worker context where
+    # inline shell scripts are unnecessary and potentially dangerous.
+    r"\bbash\s+-c\b",
+    r"\bsh\s+-c\b",
+    r"python[3]?\s*-c.*subprocess",
+    r"\|\s*(ba)?sh\b",
 ]
 
 # Generate the hook script content — a Python script that reads stdin JSON,

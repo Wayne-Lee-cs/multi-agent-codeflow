@@ -1,3 +1,11 @@
+[project]
+name = "cagent"
+version = "2.1.0"
+description = "Concurrent agent workflow dispatcher — run multiple claude -p workers in parallel git worktrees"
+requires-python = ">=3.11"
+dependencies = []
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+asyncio_mode = "auto"

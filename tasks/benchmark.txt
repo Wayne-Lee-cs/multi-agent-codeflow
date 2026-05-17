@@ -1,0 +1,4 @@
+Create file bench_a.md with content "# Benchmark Task A\n\nThis file was created by task A of the benchmark test.\n\n## Steps\n1. Created this file\n2. Wrote markdown content\n3. Done"
+Create file bench_b.md with content "# Benchmark Task B\n\nThis file was created by task B of the benchmark test.\n\n## Steps\n1. Created this file\n2. Wrote markdown content\n3. Done"
+Create file bench_c.md with content "# Benchmark Task C\n\nThis file was created by task C of the benchmark test.\n\n## Steps\n1. Created this file\n2. Wrote markdown content\n3. Done"
+Create file bench_d.md with content "# Benchmark Task D\n\nThis file was created by task D of the benchmark test.\n\n## Steps\n1. Created this file\n2. Wrote markdown content\n3. Done"

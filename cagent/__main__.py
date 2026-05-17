@@ -11,8 +11,8 @@ def _check_version():
         )
 
 
-_check_version()
+if __name__ == "__main__":
+    _check_version()
+    from cagent.cli import main
 
-from cagent.cli import main  # noqa: E402
-
-main()
+    main()

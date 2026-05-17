@@ -6,6 +6,16 @@ from pathlib import Path
 
 import pytest
 
+from cagent.agent import _resolve_claude
+
+
+@pytest.fixture(autouse=True)
+def _clear_resolve_claude_cache():
+    """Clear lru_cache on _resolve_claude between tests to ensure isolation."""
+    _resolve_claude.cache_clear()
+    yield
+    _resolve_claude.cache_clear()
+
 
 @pytest.fixture
 def tmp_repo(tmp_path):

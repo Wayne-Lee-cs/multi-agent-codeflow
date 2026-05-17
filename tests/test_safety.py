@@ -17,6 +17,8 @@ class TestDenyPatterns:
         "git push origin main",
         "git push -u origin HEAD",
         "  git push origin main",
+        "cd /tmp && git push",
+        "mkdir dir && cd dir && git push origin main",
     ])
     def test_git_push_blocked(self, cmd):
         assert any(re.search(p, cmd, re.IGNORECASE) for p in DENY_PATTERNS)
@@ -47,6 +49,10 @@ class TestDenyPatterns:
         "rm -r /tmp/test",
         "rm -R /tmp/test",
         "rm -r .",
+        "rm -r/tmp/test",         # no space before path
+        "rm -rf/tmp/test",        # no space before path
+        "rm --recursive --force /tmp/test",
+        "rm --recursive -f /tmp/test",
     ])
     def test_rm_recursive_blocked(self, cmd):
         assert any(re.search(p, cmd, re.IGNORECASE) for p in DENY_PATTERNS)
@@ -75,6 +81,18 @@ class TestDenyPatterns:
         assert any(re.search(p, cmd, re.IGNORECASE) for p in DENY_PATTERNS)
 
     @pytest.mark.parametrize("cmd", [
+        "bash -c 'git push'",
+        "bash -c \"rm -rf /\"",
+        "sh -c 'git reset --hard'",
+        "python -c \"import subprocess; subprocess.run(['git','push'])\"",
+        "python3 -c \"import subprocess; subprocess.run(['git','push'])\"",
+        "echo 'test' | sh",
+        "echo 'test' | bash",
+    ])
+    def test_command_chain_blocked(self, cmd):
+        assert any(re.search(p, cmd, re.IGNORECASE) for p in DENY_PATTERNS)
+
+    @pytest.mark.parametrize("cmd", [
         "git add .",
         "git commit -m 'test'",
         "git status",
@@ -83,6 +101,8 @@ class TestDenyPatterns:
         "ls -la",
         "cat file.txt",
         "git pushpin",  # word boundary check
+        "python script.py",  # not python -c
+        "echo hello",  # no pipe to sh
     ])
     def test_safe_commands_allowed(self, cmd):
         assert not any(re.search(p, cmd, re.IGNORECASE) for p in DENY_PATTERNS)
@@ -155,3 +175,31 @@ class TestPrepareSandbox:
         )
         assert result.returncode == 0
         assert result.stdout.strip() == ""  # no deny output
+
+    def test_hook_script_blocks_command_chains(self, tmp_path):
+        """End-to-end: hook script blocks dangerous commands in chains."""
+        prepare_sandbox(tmp_path)
+        hook_script = tmp_path / ".claude" / "hooks" / "cagent-guard.py"
+
+        import subprocess
+        import sys
+
+        # Test blocking bash -c with dangerous command
+        inp = json.dumps({"tool_input": {"command": "bash -c 'git push'"}})
+        result = subprocess.run(
+            [sys.executable, str(hook_script)],
+            input=inp, capture_output=True, text=True,
+        )
+        assert result.returncode == 0
+        output = json.loads(result.stdout)
+        assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+        # Test blocking command chain with &&
+        inp = json.dumps({"tool_input": {"command": "cd /tmp && git push origin main"}})
+        result = subprocess.run(
+            [sys.executable, str(hook_script)],
+            input=inp, capture_output=True, text=True,
+        )
+        assert result.returncode == 0
+        output = json.loads(result.stdout)
+        assert output["hookSpecificOutput"]["permissionDecision"] == "deny"

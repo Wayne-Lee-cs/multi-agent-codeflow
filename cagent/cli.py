@@ -74,8 +74,11 @@ def main() -> None:
     # --- branches ---
     sub.add_parser("branches", help="List cagent branches")
 
-    # --- plan (v2 stub) ---
-    sub.add_parser("plan", help="(Coming in v2) Generate tasks from a goal")
+    # --- plan ---
+    plan_p = sub.add_parser("plan", help="Generate conflict-free tasks from a goal using an architect agent")
+    plan_p.add_argument("goal", help="Natural language description of what to build")
+    plan_p.add_argument("--ref", help="Reference file to include (e.g. design.md)")
+    plan_p.add_argument("--model", help="Model override for the architect agent")
 
     args = parser.parse_args()
 
@@ -221,6 +224,30 @@ def _get_runs_dir(repo_root: Path) -> Path:
     return repo_root / ".cagent" / "runs"
 
 
+def _scan_dir_tree(path: Path, max_depth: int = 2, _depth: int = 0) -> str:
+    """Build a text representation of directory tree (for architect prompt)."""
+    if _depth >= max_depth:
+        return ""
+    skip = {".git", ".cagent", "__pycache__", "node_modules", ".venv", ".idea", ".vscode"}
+    lines = []
+    try:
+        entries = sorted(path.iterdir(), key=lambda p: (not p.is_dir(), p.name))
+    except PermissionError:
+        return ""
+    for entry in entries:
+        if entry.name in skip or entry.name.startswith("."):
+            continue
+        indent = "  " * _depth
+        if entry.is_dir():
+            lines.append(f"{indent}{entry.name}/")
+            sub = _scan_dir_tree(entry, max_depth, _depth + 1)
+            if sub:
+                lines.append(sub)
+        else:
+            lines.append(f"{indent}{entry.name}")
+    return "\n".join(lines)
+
+
 def _find_run_dir(repo_root: Path, run_id: str | None) -> Path:
     """Find a run directory by ID, or the latest one."""
     runs_dir = _get_runs_dir(repo_root)
@@ -291,6 +318,7 @@ def _execute_run(
     args: argparse.Namespace,
     merge_results: Callable | None = None,
     retry_hint: str | None = None,
+    conventions: str = "",
 ) -> None:
     """Shared run logic: dispatch → integrate → summary."""
     from cagent.agent import AgentResult
@@ -322,6 +350,7 @@ def _execute_run(
                 timeout=args.timeout,
                 dashboard=dashboard,
                 memory=memory,
+                conventions=conventions,
             )
 
             if merge_results:
@@ -466,8 +495,13 @@ def _cmd_run(args: argparse.Namespace) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
 
     # Parse tasks
+    conventions = ""
     try:
-        tasks = parse_tasks_file(args.tasks_file, run_id)
+        if args.tasks_file.endswith(".md"):
+            from cagent.tasks import parse_tasks_md
+            tasks, conventions = parse_tasks_md(args.tasks_file, run_id)
+        else:
+            tasks = parse_tasks_file(args.tasks_file, run_id)
     except (FileNotFoundError, ValueError) as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -513,6 +547,7 @@ def _cmd_run(args: argparse.Namespace) -> None:
         repo_root=repo_root,
         args=args,
         retry_hint=f"To retry: python -m cagent run {args.tasks_file}",
+        conventions=conventions,
     )
 
 
@@ -1084,9 +1119,154 @@ def _cmd_push(args: argparse.Namespace) -> None:
 
 
 def _cmd_plan(args: argparse.Namespace) -> None:
-    """v2 stub."""
-    print("cagent plan — coming in v2!")
-    print("For now, create a tasks file manually with one task per line.")
+    """Use an architect agent to generate tasks.md + conventions.md from a goal."""
+    import shutil as _shutil
+
+    _preflight_check(check_auth=True)
+
+    goal = args.goal
+    ref_content = ""
+    if args.ref:
+        ref_path = Path(args.ref)
+        if not ref_path.is_file():
+            print(f"Error: reference file not found: {args.ref}", file=sys.stderr)
+            sys.exit(1)
+        ref_content = ref_path.read_text(encoding="utf-8", errors="replace")
+
+    # Scan current directory structure (top 2 levels)
+    dir_tree = _scan_dir_tree(Path("."), max_depth=2)
+
+    # Build architect prompt
+    prompt = f"""You are a project architect. Your job is to break down a goal into multiple independent, conflict-free tasks that can run in parallel.
+
+## Goal
+{goal}
+"""
+    if ref_content:
+        prompt += f"""
+## Reference Document
+```
+{ref_content[:4000]}
+```
+"""
+    prompt += f"""
+## Current Project Structure
+```
+{dir_tree}
+```
+
+## Requirements
+
+1. **File boundary isolation**: Each task must ONLY create/modify its own files. No two tasks should touch the same file.
+2. **Shared interfaces first**: If tasks need shared types/interfaces/contracts, put them in a separate task with `depends_on: none` that runs first.
+3. **Clear dependencies**: Use `depends_on` to mark tasks that need output from other tasks.
+4. **Global conventions**: Define coding standards (language, style, naming, docstrings) that all tasks must follow.
+
+## Output
+
+Create TWO files:
+
+### 1. tasks.md
+Format:
+```markdown
+# Task Plan
+
+## Tasks
+
+### Task 001
+- **depends_on**: none
+- **files**: path/to/file.py
+
+Description of what to create/modify...
+
+### Task 002
+- **depends_on**: 001
+- **files**: path/to/another.py
+
+Description...
+```
+
+### 2. conventions.md
+Format:
+```markdown
+# Global Conventions
+
+## Language & Runtime
+- Python 3.11+, stdlib only
+- Type hints on all functions
+
+## Code Style
+- Functions: snake_case
+- Classes: PascalCase
+- Google-style docstrings
+
+## Constraints
+- Do NOT modify files belonging to other tasks
+- Each module is self-contained
+```
+
+Create both files now. Make tasks granular enough for parallel execution but not too fine-grained (3-8 tasks is ideal).
+"""
+
+    from cagent.agent import _resolve_claude
+    claude_bin = _resolve_claude()
+
+    # Use stdin to avoid command-line length limits on Windows (~8191 chars)
+    cmd = [claude_bin, "-p", "-", "--permission-mode", "acceptEdits"]
+    if args.model:
+        cmd.extend(["--model", args.model])
+
+    print(f"Planning: {goal}")
+    print(f"  Scanning project structure...")
+    print(f"  Running architect agent...")
+    print()
+
+    try:
+        result = subprocess.run(
+            cmd,
+            input=prompt,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=300,  # 5 minute timeout for architect
+        )
+    except subprocess.TimeoutExpired:
+        print("Error: architect agent timed out (5 min limit).", file=sys.stderr)
+        sys.exit(1)
+
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or "").strip()
+        print(f"Architect agent failed: {err[:500]}", file=sys.stderr)
+        sys.exit(1)
+
+    # Check if files were created
+    tasks_path = Path("tasks.md")
+    conv_path = Path("conventions.md")
+
+    if not tasks_path.exists():
+        print("Error: architect agent did not create tasks.md", file=sys.stderr)
+        sys.exit(1)
+
+    # Parse and display the plan
+    try:
+        from cagent.tasks import parse_tasks_md
+        tasks, conventions = parse_tasks_md(tasks_path, "preview")
+    except (ValueError, FileNotFoundError) as e:
+        print(f"Error parsing generated tasks: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Generated {len(tasks)} tasks:")
+    for t in tasks:
+        deps = f" (depends on: {', '.join(t.depends_on)})" if t.depends_on else ""
+        first_line = t.prompt.split("\n")[0][:72]
+        print(f"  [{t.id}] {first_line}{deps}")
+
+    if conv_path.exists():
+        print(f"\nConventions: {conv_path}")
+    print(f"\nNext step: cagent run tasks.md")
+    if conventions:
+        print(f"  Conventions will be automatically injected into each worker.")
 
 
 def _cmd_branches(args: argparse.Namespace) -> None:

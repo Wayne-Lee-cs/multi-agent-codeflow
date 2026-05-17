@@ -259,9 +259,12 @@ async def _resolve_conflicts(
 
     if proc.stdin is None:
         raise RuntimeError("subprocess stdin pipe was not created")
-    proc.stdin.write(prompt.encode("utf-8"))
-    await proc.stdin.drain()
-    proc.stdin.close()
+    try:
+        proc.stdin.write(prompt.encode("utf-8"))
+        await proc.stdin.drain()
+    finally:
+        proc.stdin.close()
+        await proc.stdin.wait_closed()
 
     # Drain output (log it) with timeout
     log_path = run_dir / "logs" / "task-_integrator.log"

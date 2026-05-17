@@ -21,6 +21,7 @@ class Event:
     summary: str
     raw: dict = field(default_factory=dict)
     raw_line_len: int = 0  # character length of stripped JSON line (avoids re-serialization)
+    usage: dict | None = None  # token usage from result events
 
 
 @dataclass
@@ -206,7 +207,10 @@ class Dashboard:
 
         tp = self.tasks[task_id]
         tp.last_event = event
-        tp.bytes_seen += event.raw_line_len if event.raw_line_len else len(json.dumps(event.raw))
+        if event.raw_line_len:
+            tp.bytes_seen += event.raw_line_len
+        elif event.raw:
+            tp.bytes_seen += len(json.dumps(event.raw))
 
         if event.kind == "start" and tp.status == "pending":
             tp.status = "running"

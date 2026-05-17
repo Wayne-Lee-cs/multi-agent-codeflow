@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from cagent.tasks import Task, dump_state, load_state, parse_tasks_file
+from cagent.tasks import Task, dump_state, load_state, parse_tasks_file, parse_tasks_md
 
 
 class TestParseTasksFile:
@@ -123,3 +123,117 @@ class TestDumpLoadState:
         tasks = load_state(tmp_path)
         assert len(tasks) == 1
         assert tasks[0].log_path == Path(os.devnull)
+
+
+class TestParseTasksMd:
+    def test_basic_parsing(self, tmp_path):
+        f = tmp_path / "tasks.md"
+        f.write_text(
+            "# Task Plan\n\n"
+            "### Task 001\n"
+            "- **depends_on**: none\n"
+            "- **files**: src/a.py\n\n"
+            "Create src/a.py with function foo().\n\n"
+            "### Task 002\n"
+            "- **depends_on**: 001\n"
+            "- **files**: src/b.py\n\n"
+            "Create src/b.py importing from src/a.py.\n",
+            encoding="utf-8",
+        )
+        tasks, conv = parse_tasks_md(f, "run-001")
+        assert len(tasks) == 2
+        assert tasks[0].id == "001"
+        assert tasks[0].depends_on == []
+        assert "foo()" in tasks[0].prompt
+        assert tasks[1].id == "002"
+        assert tasks[1].depends_on == ["001"]
+        assert conv == ""
+
+    def test_conventions_from_file(self, tmp_path):
+        f = tmp_path / "tasks.md"
+        f.write_text(
+            "# Task Plan\n\n"
+            "### Task 001\n"
+            "- **depends_on**: none\n\n"
+            "Do something.\n",
+            encoding="utf-8",
+        )
+        conv_file = tmp_path / "conventions.md"
+        conv_file.write_text(
+            "# Global Conventions\n\n- Python 3.11+\n- Type hints\n",
+            encoding="utf-8",
+        )
+        tasks, conv = parse_tasks_md(f, "run-001")
+        assert len(tasks) == 1
+        assert "Python 3.11+" in conv
+
+    def test_inline_conventions(self, tmp_path):
+        f = tmp_path / "tasks.md"
+        f.write_text(
+            "# Task Plan\n\n"
+            "## Conventions\n"
+            "- Use snake_case\n"
+            "- Google-style docstrings\n\n"
+            "### Task 001\n"
+            "- **depends_on**: none\n\n"
+            "Do something.\n",
+            encoding="utf-8",
+        )
+        tasks, conv = parse_tasks_md(f, "run-001")
+        assert "snake_case" in conv
+
+    def test_multiple_depends_on(self, tmp_path):
+        f = tmp_path / "tasks.md"
+        f.write_text(
+            "### Task 003\n"
+            "- **depends_on**: 001, 002\n\n"
+            "Merge results from 001 and 002.\n",
+            encoding="utf-8",
+        )
+        tasks, _ = parse_tasks_md(f, "run-001")
+        assert tasks[0].depends_on == ["001", "002"]
+
+    def test_no_tasks_raises(self, tmp_path):
+        f = tmp_path / "empty.md"
+        f.write_text("# Just a heading\n\nNo tasks here.\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="No tasks found"):
+            parse_tasks_md(f, "run-001")
+
+    def test_missing_file_raises(self, tmp_path):
+        f = tmp_path / "nonexistent.md"
+        with pytest.raises(FileNotFoundError):
+            parse_tasks_md(f, "run-001")
+
+    def test_case_insensitive_section_extraction(self, tmp_path):
+        """_extract_section should handle mixed-case headings."""
+        f = tmp_path / "tasks.md"
+        f.write_text(
+            "# Task Plan\n\n"
+            "## CONVENTIONS\n"
+            "- Use snake_case\n\n"
+            "## TASKS\n\n"
+            "### Task 001\n"
+            "- **depends_on**: none\n\n"
+            "Do something.\n",
+            encoding="utf-8",
+        )
+        tasks, conv = parse_tasks_md(f, "run-001")
+        assert len(tasks) == 1
+        assert "snake_case" in conv
+
+    def test_uppercase_conventions_section(self, tmp_path):
+        """Uppercase ## CONVENTIONS heading should be extracted."""
+        f = tmp_path / "tasks.md"
+        f.write_text(
+            "# Plan\n\n"
+            "## CONVENTIONS\n"
+            "- Python 3.11+\n\n"
+            "## DETAILS\n\n"
+            "### Task 001\n"
+            "- **depends_on**: none\n\n"
+            "Create module.\n",
+            encoding="utf-8",
+        )
+        tasks, conv = parse_tasks_md(f, "run-001")
+        assert "Python 3.11+" in conv
+        assert len(tasks) == 1

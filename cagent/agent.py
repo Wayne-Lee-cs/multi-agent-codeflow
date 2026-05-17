@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import os
 import shutil
 import subprocess
@@ -16,6 +17,7 @@ from cagent.safety import prepare_sandbox
 from cagent.tasks import Task
 
 
+@functools.lru_cache(maxsize=1)
 def _resolve_claude() -> str:
     """Find the claude CLI executable, handling Windows .cmd extension."""
     for name in ("claude", "claude.cmd", "claude.exe"):
@@ -43,6 +45,7 @@ async def run_agent(
     dashboard: Dashboard | None = None,
     shared_context: str = "",
     memory: RunMemory | None = None,
+    conventions: str = "",
 ) -> AgentResult:
     """Run a claude -p subprocess for a single task in its worktree.
 
@@ -54,23 +57,21 @@ async def run_agent(
     # 1. Inject safety sandbox
     prepare_sandbox(worktree_path)
 
-    # 2. Build command
+    # 2. Build command — always use stdin pipe for prompt delivery.
+    # This eliminates command-line length limits (Windows 8191 chars),
+    # avoids shell escaping issues, and simplifies the code path.
+    parts = []
+    if conventions:
+        parts.append(f"[Global Conventions]\n{conventions}")
     if shared_context:
-        prompt = (
-            f"[Shared context from previous tasks]\n{shared_context}\n\n"
-            f"[Your task]\n{task.prompt}"
-        )
-    else:
-        prompt = task.prompt
-    use_stdin = len(prompt) > 8000 or '\n' in prompt
+        parts.append(f"[Shared context from previous tasks]\n{shared_context}")
+    parts.append(f"[Your task]\n{task.prompt}")
+    prompt = "\n\n".join(parts)
 
     claude_bin = _resolve_claude()
-    cmd: list[str] = [claude_bin, "-p"]
-    if use_stdin:
-        cmd.append("-")
-    else:
-        cmd.append(prompt)
-    cmd.extend(["--permission-mode", "acceptEdits", "--output-format", "stream-json", "--verbose"])
+    cmd: list[str] = [claude_bin, "-p", "-",
+                       "--permission-mode", "acceptEdits",
+                       "--output-format", "stream-json", "--verbose"]
 
     if model_override:
         cmd.extend(["--model", model_override])
@@ -81,7 +82,7 @@ async def run_agent(
     log_path = log_dir / f"task-{task.id}.log"
     task.log_path = log_path
 
-    # 4. Launch process
+    # 4. Launch process — stdin always piped for prompt delivery
     env = os.environ.copy()
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -90,7 +91,7 @@ async def run_agent(
             env=env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
-            stdin=asyncio.subprocess.PIPE if use_stdin else asyncio.subprocess.DEVNULL,
+            stdin=asyncio.subprocess.PIPE,
         )
     except FileNotFoundError:
         return AgentResult(
@@ -105,16 +106,15 @@ async def run_agent(
             fail_reason=f"failed to launch claude: {e}",
         )
 
-    # Send prompt via stdin if needed
-    if use_stdin:
-        if proc.stdin is None:
-            raise RuntimeError("subprocess stdin pipe was not created")
-        try:
-            proc.stdin.write(prompt.encode("utf-8"))
-            await proc.stdin.drain()
-        finally:
-            proc.stdin.close()
-            await proc.stdin.wait_closed()
+    # Send prompt via stdin pipe
+    if proc.stdin is None:
+        raise RuntimeError("subprocess stdin pipe was not created")
+    try:
+        proc.stdin.write(prompt.encode("utf-8"))
+        await proc.stdin.drain()
+    finally:
+        proc.stdin.close()
+        await proc.stdin.wait_closed()
 
     # 5. Stream stdout line by line (wrapped in timeout)
     if proc.stdout is None:
@@ -212,14 +212,22 @@ async def _commit_result(
     commit_msg = f"task {task.id}: {first_line}"
 
     # Exclude .claude/ sandbox files from commit. The sandbox creates
-    # .claude/settings.local.json and hook scripts that should not be
-    # committed. We: (1) delete .claude/ from disk, (2) restore tracked
-    # .claude/ files from base, (3) restore .gitignore from base.
-    # This ensures clean task commits for cherry-pick compatibility.
+    # .claude/settings.local.json and .claude/hooks/cagent-guard.py that
+    # should not be committed. We only delete these known sandbox artifacts,
+    # preserving any other legitimate .claude/ files (settings.json, commands/).
     claude_dir = worktree_path / ".claude"
-    if claude_dir.exists():
-        shutil.rmtree(claude_dir, ignore_errors=True)
-    # Restore tracked .claude/ files from base (if any)
+    sandbox_files = [
+        claude_dir / "settings.local.json",
+        claude_dir / "hooks" / "cagent-guard.py",
+    ]
+    for f in sandbox_files:
+        if f.exists():
+            f.unlink()
+    # Remove hooks dir if empty
+    hooks_dir = claude_dir / "hooks"
+    if hooks_dir.exists() and not any(hooks_dir.iterdir()):
+        hooks_dir.rmdir()
+    # Restore tracked .claude/ files from base (if any were deleted)
     checkout_claude = await asyncio.create_subprocess_exec(
         "git", "checkout", "HEAD", "--", ".claude/",
         cwd=str(worktree_path),

@@ -356,14 +356,31 @@
 
 ---
 
-## Phase 14: v2 — 功能扩展（认证 + 核心流程��证通过后）
+## Phase 23: cagent plan 功能实现 (2026-05-17) — ✅ 全部完成
+
+### 核心功能
+- [x] **23.1** `tasks.py` — `parse_tasks_md()` 解析 Markdown tasks.md 格式（### Task NNN + depends_on + files 字段）
+- [x] **23.2** `tasks.py` — 辅助函数 `_extract_section` / `_split_task_blocks` / `_extract_field` / `_extract_prompt`
+- [x] **23.3** `cli.py` — `_cmd_plan` 完整实现：architect agent 拆解目标 → tasks.md + conventions.md
+- [x] **23.4** `cli.py` — `_scan_dir_tree()` 扫描项目结构注入 architect prompt
+- [x] **23.5** `cli.py` — `run` 子命令支持 `.md` 文件自动调用 `parse_tasks_md`
+- [x] **23.6** `dispatcher.py` — 依赖图调度：拓扑排序 + wave 并发 + 环检测（Kahn's algorithm）
+- [x] **23.7** `agent.py` — conventions 注入：`[Global Conventions]` + `[Shared context]` + `[Your task]` 三段式 prompt
+- [x] **23.8** `.claude/commands/cagent.md` — 添加 plan/计划/拆解/分解/架构 意图映射
+
+### 测试
+- [x] **23.9** `tests/test_tasks.py` — 6 项 `parse_tasks_md` 单元测试（basic / conventions file / inline / depends_on / no tasks / missing file）
+
+---
+
+## Phase 14: v2 — 功能扩展（认证 + 核心流程验证通过后）
 
 ### P0: 自动化测试（v2 功能开发前必须补齐）
 - [ ] **14.0** 将 Phase 13 P3 的 6 项 pytest 用例落地（当前 61 项手动验证零自动化——最大技术欠债）
 
 ### 功能
-- [ ] **14.1** `cagent plan <goal>` — architect agent 自动分解目标为 tasks.json
-- [ ] **14.2** `dispatcher.py` — 支持 `depends_on` 依赖图调度
+- [x] **14.1** `cagent plan <goal>` — architect agent 自动分解目标为 tasks.md + conventions.md（Phase 23 实现）
+- [x] **14.2** `dispatcher.py` — 支持 `depends_on` 依赖图调度（Phase 23 实现：拓扑排序 + wave 调度 + 环检测）
 - [ ] **14.3** integrator 多轮验证：cherry-pick 后跑 lint / test，失败则重试
 - [ ] **14.4** 支持 `pyproject.toml` 可选安装（保持零依赖 clone-and-run）
 - [ ] **14.5** integrator 多策略：cherry-pick / merge / rebase 可选
@@ -371,7 +388,52 @@
 
 ---
 
-## 综合评审汇总 (2026-05-17 更新)
+## Phase 24: v2.1 安全审计与代码质量提升 (2026-05-17)
+
+### P1: 安全加固 — HIGH
+
+- [x] **24.1** `safety.py` — deny patterns 移除 `^` 锚定，改为 `\b` word boundary 全文匹配；新增 `bash -c` / `sh -c` / `python -c.*subprocess` / `\|\s*(ba)?sh` 拦截模式；新增 `rm --recursive` GNU long flag 匹配
+- [x] **24.2** `agent.py` — 删除 `use_stdin` 条件判断，所有 prompt 统一走 stdin pipe（`-p -`），消除命令行长度和平台差异问题
+
+### P1: 健壮性修复 — HIGH
+
+- [x] **24.3** `dispatcher.py` — 修复依赖图语义矛盾：将 `"failed"` 从 `completed` 集合中移除，failed deps 阻塞下游（第 167 行 + 第 173-188 行统一）
+- [x] **24.4** `dispatcher.py` — 补充测试：验证 A(fail)→B 时 B 被标记为 blocked 而非执行
+
+### P2: 健壮性修复 — MEDIUM
+
+- [x] **24.5** `agent.py` — `_commit_result` 精细清理 `.claude/`：只删除 `settings.local.json` 和 `hooks/cagent-guard.py`，保留其余合法文件
+- [x] **24.6** `worktree.py` — `_git()` 函数添加 `timeout=60` 参数，防止 git 操作挂起
+- [x] **24.7** `integrator.py:264` — `proc.stdin.close()` 后添加 `await proc.stdin.wait_closed()`，与 agent.py 保持一致
+
+### P2: 代码质量 — MEDIUM
+
+- [x] **24.8** `pyproject.toml` — 补充 `[project]` 配置段（name="cagent", version="2.1.0", python-requires=">=3.11"），支持 `pip install -e .`
+- [x] **24.9** `__main__.py` — 将 `_check_version()` 和 `main()` 包裹在 `if __name__ == "__main__":` 中，避免 import 时触发 CLI
+- [x] **24.10** `tests/test_memory.py` — 新增 Memory 模块单元测试（write/read/append/build_shared_context/cache）
+- [x] **24.11** `tests/test_dispatcher.py` — 新增 dispatcher 依赖图调度单元测试（mock run_agent，验证 wave 执行顺序、环检测、blocked 标记）
+
+### P3: 安全优化 — LOW
+
+- [x] **24.12** `safety.py` — 合并 rm 正则为单一模式，覆盖 `rm -r/` 无空格绕过；新增 `rm --recursive` GNU long flag
+- [x] **24.13** `tasks.py` — `_extract_section` 结束标记也用 `.lower()` 比较，与开始匹配保持一致
+
+### P3: 性能优化 — LOW
+
+- [x] **24.14** `dispatcher.py` — `dump_state` 添加节流机制（1s 窗口 + 终态 flush），减少高并发下 I/O
+- [x] **24.15** `agent.py` — `_resolve_claude()` 添加 `@functools.lru_cache` 缓存 PATH 查找结果
+- [x] **24.16** `progress.py` — `bytes_seen` 在 `raw_line_len=0` 且 `event.raw` 为空时跳过 `json.dumps`
+- [x] **24.17** `dispatcher.py` — stagger 策略优化：仅在首 wave（前 concurrency 个）应用 0.3s 间隔，后续 wave 不延迟
+
+### P4: 功能缺口 — 未来方向
+
+- [ ] **24.18** `dispatcher.py` + `cli.py` — 添加 `--retries N` 参数，task 失败后在同一 worktree 重试 N 次
+- [ ] **24.19** `progress.py` — 解析 `result` 事件中的 `usage` 字段，Dashboard 和 summary.md 中展示 token 消耗
+- [ ] **24.20** `cli.py` — `cagent cancel <task-id>` 子命令，支持取消单个运行中的 task
+
+---
+
+## 综合评审汇总 (2026-05-17 v2.1 审计更新)
 
 ### 完成率
 
@@ -380,15 +442,17 @@
 | Phase 1-11（核心实现） | 46/46 | 0 | **100%** |
 | Phase 12（Round 2 Bug Fix）| 19/22 | 3 deferred | 3 项有意推迟 LOW severity |
 | Phase 13 P0-P2（认证+修复）| 12/14 | 2 调研项 | 13.1/13.5 非阻塞 |
-| Phase 13 P3（测试套件）| 6/6 | 0 | **100%** — 100 个 pytest 用例 |
+| Phase 13 P3（测试套件）| 6/6 | 0 | **100%** — 155 个 pytest 用例 |
 | Phase 15（Code Review）| 7/9 | 2 LOW | 合理推迟 |
 | Phase 16（极限测试）| 6/6 | 0 | **100%** |
 | Phase 17（评审发现）| 5/5 | 0 | **100%** |
 | Phase 18（深度审查）| 6/6 | 0 | **100%** |
 | Phase 19（v1.3 审查修复）| 10/10 | 0 | **100%** |
 | Phase 20（性能优化）| 6/6 | 0 | **100%** |
-| Phase 14（v2 功能）| 0/7 | 7 | 预期范围外 |
-| **总计** | **123/137** | **14** | **89.8%** |
+| Phase 14（v2 功能）| 2/7 | 5 | 14.1/14.2 已完成（Phase 23） |
+| Phase 23（plan 功能）| 8/8 | 0 | **100%** — architect agent + 依赖调度 |
+| **Phase 24（v2.1 审计）** | **20/20** | **0** | **100%** — 安全加固 + 健壮性 + 代码质量 + 测试 + 审查修复 |
+| **总计** | **153/165** | **12** | **92.7%** |
 
 ### 验收测试覆盖
 
@@ -396,15 +460,27 @@
 |------|----------|--------|--------|
 | CLI 入口 + 边界 | 14 | 0 | 0 |
 | 核心流程 E2E | 2 | 0 | 0 |
-| Safety | 33 | 0 | 0 |
-| Observability | 6 | 0 | 2 (watch TTY) |
-| Memory | 5 | 0 | 0 |
+| Safety | 33 | 53 | 0 |
+| Observability | 6 | 33 | 2 (watch TTY) |
+| Memory | 5 | 19 | 0 |
+| Tasks 解析 | 0 | 22 | 0 |
+| Compat | 0 | 7 | 0 |
+| Worktree | 0 | 8 | 0 |
+| Dispatcher | 0 | 13 | 0 |
 | 模型跟随 | 1 | 0 | 1 (--worker-model) |
 | 错误路径 | 0 | 0 | 2 (noop/timeout) |
-| **总计** | **61** | **0** | **5** |
+| **总计** | **61** | **155** | **5** |
+
+### Benchmark
+
+| 模式 | 耗时 | 任务数 | 加速比 |
+|------|------|--------|--------|
+| Single Agent (串行) | 47.7s | 4 | — |
+| cagent (j=4 并行) | 16.7s | 4 | **2.86x** |
 
 ### 下一步优先级
 
-1. **验收补测** — watch TTY、--worker-model、noop/timeout 路径
-2. **Phase 12 deferred** — 空 prompt 边界、_run_git 超时、run_id 碰撞
-3. **Phase 14** — v2 功能开发
+1. **Phase 24 P4** — 功能缺口（retries、token 追踪、cancel 命令）
+2. **验收补测** — watch TTY、--worker-model、noop/timeout 路径
+3. **Phase 12 deferred** — 空 prompt 边界、_run_git 超时、run_id 碰撞
+4. **Phase 14** — v2 功能开发

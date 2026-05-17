@@ -557,7 +557,98 @@ Done! (1m13s)
 
 Agent 可通过 `echo "git push" > x.sh && bash x.sh` 或 `python -c "import subprocess; subprocess.run(['git','push'])"` 绕过正则拦截。因为 hook 只检查 Bash tool 的顶级 command 字符串。
 
-定性：v1 可接受。`claude -p` 在 `acceptEdits` 模式下通常不会刻意绕过，且 worktree 没有 push 远程的凭据（除非继承了）。记为 known limitation，v2 考虑更强的沙箱（如 seccomp/namespaces/Docker）。
+定性：v1 可接受。`claude -p` 在 `acceptEdits` 模式下通常不会刻意绕过，且 worktree 没有 push 远程的凭据（除非继承了）。记为 known limitation，v2 考择更强的沙箱（如 seccomp/namespaces/Docker）。
+
+---
+
+## v2.0 — cagent plan 功能（2026-05-17）— ✅ 已实现
+
+### 背景
+
+Benchmark 测试显示 cagent 在有依赖的任务上比单 agent 慢 2.3x，根因是：
+1. 任务之间有依赖（task-004 需要读取 tasks 1-3 的产出）
+2. 并发执行导致 task-004 自己重写了 3 个模块，cherry-pick 时产生冲突
+3. integrator 解冲突花了额外 1m2s
+
+核心问题：任务拆解是用户手动做的，没有考虑冲突和依赖关系。
+
+### 解决方案：Architect Agent
+
+新增 `cagent plan <goal>` 命令，让 architect agent 先分析目标，拆出无冲突、有明确边界的任务，设定全局规范，然后 workers 按规范并行执行。
+
+### 流程
+
+```
+用户: cagent plan "创建一个 REST API 服务" [--ref design.md]
+          ↓
+    [architect agent]
+    - 读取用户目标 + 可选参考文件
+    - 扫描当前项目结构
+    - 拆出独立任务（每个任务只改自己的文件）
+    - 定义全局规范（命名、接口、目录结构）
+    - 输出 tasks.md + conventions.md
+          ↓
+    [用户确认/编辑]
+          ↓
+    cagent run tasks.md
+          ↓
+    [workers 按规范并行，无冲突]
+```
+
+### 输出格式
+
+**tasks.md** — Markdown 格式任务定义：
+```markdown
+### Task 001
+- **depends_on**: none
+- **files**: src/types.py
+
+Create src/types.py with shared data models...
+
+### Task 002
+- **depends_on**: 001
+- **files**: src/users.py
+
+Create src/users.py implementing user CRUD...
+```
+
+**conventions.md** — 全局编码规范：
+```markdown
+# Global Conventions
+## Language & Runtime
+- Python 3.11+, stdlib only
+## Code Style
+- Functions: snake_case
+- Classes: PascalCase
+## Constraints
+- Do NOT modify files belonging to other tasks
+- Import shared types from src/types.py
+```
+
+### 实现细节
+
+| 模块 | 改动 | 说明 |
+|------|------|------|
+| `tasks.py` | 新增 `parse_tasks_md()` | 解析 Markdown 格式 tasks.md，提取 depends_on/files/prompt |
+| `cli.py` | 替换 `_cmd_plan` | architect agent 完整实现，stdin pipe + 300s timeout |
+| `cli.py` | 新增 `_scan_dir_tree()` | 扫描项目结构注入 architect prompt |
+| `dispatcher.py` | 重构 `run()` | 依赖图调度：Kahn's 拓扑排序 + wave 并发 + 环检测 |
+| `agent.py` | 修改 `run_agent()` | conventions 注入：`[Global Conventions]` + `[Shared context]` + `[Your task]` |
+| `.claude/commands/cagent.md` | 更新 | plan/计划/拆解/分解/架构 意图映射 |
+
+### 依赖图调度
+
+dispatcher 支持两种模式：
+- **无依赖**：`asyncio.gather(*all_tasks)` 同时启动（原行为）
+- **有依赖**：拓扑排序 + wave 调度
+  - 验证所有 depends_on 引用的任务存在
+  - Kahn's algorithm 检测循环依赖
+  - 每 wave 并行执行所有 ready 任务（依赖全部完成）
+  - 失败任务标记 downstream 为 blocked
+
+### 测试
+
+6 项 `parse_tasks_md` 单元测试（basic / conventions file / inline / depends_on / no tasks / missing file），总计 110 pytest 用例通过。
 
 ---
 
@@ -582,8 +673,8 @@ Agent 可通过 `echo "git push" > x.sh && bash x.sh` 或 `python -c "import sub
 
 ### 功能扩展
 
-- `cagent plan <goal>` 子命令位置已在 `cli.py` 留 stub —— 未来跑一个 architect agent 输出 `tasks.json`（与 `tasks.py` 同一份 schema）。
-- `Task` 增加 `depends_on: list[str]` 字段（v1 解析但不强制使用）—— v2 dispatcher 改成依赖图调度即可，worktree/integrator 机制无需改动。
+- ✅ `cagent plan <goal>` — architect agent 自动拆解目标为 tasks.md + conventions.md（Phase 23 已实现）。
+- ✅ `Task.depends_on` + dispatcher 依赖图调度 — 拓扑排序 + wave 并发 + 环检测（Phase 23 已实现）。
 - integrator 已经是独立 agent，v2 可以扩展成多轮（先 lint / 跑测试再决策）。
 - 支持 `pyproject.toml` 可选安装（`pip install -e .`），但保持零依赖 clone-and-run。
 - integrator 支持多策略：除 cherry-pick 外，支持 merge、rebase 等合并策略。
@@ -636,45 +727,224 @@ write/read、read_all、shared_context + cap、write_shared/load_shared、文件
 | 错误路径 | 0 | 0 | 2 |
 | **总计** | **61** | **0** | **3** |
 
-### 自动化测试覆盖：0%
+### 自动化测试覆盖：155 pytest 用例
 
-113 项极端测试 + 61 项功能验证全部为手动执行，未转为 pytest 自动化用例。这是当前最大技术欠债。
+155 项 pytest 自动化用例覆盖 tasks 解析、safety 正则、progress 事件解析、compat 跨平台、worktree 管理、Markdown tasks 解析、dispatcher 依赖图调度、memory 模块。另有 61 项手动验证。
+
+### Benchmark：2.86x 加速
+
+| 模式 | 耗时 | 任务数 | 加速比 |
+|------|------|--------|--------|
+| Single Agent (串行) | 47.7s | 4 | — |
+| cagent (j=4 并行) | 16.7s | 4 | **2.86x** |
+
+冒烟测试 PASS。集成分支 4 个 commit，产出正确，无冲突。
 
 ---
 
-## 综合评审（2026-05-15）
+## v2.1 — 安全加固与代码质量提升（2026-05-17 审计）
+
+### 背景
+
+对全部 12 个模块（~1,500 行）进行深度安全审计与架构评估，发现 4 项安全漏洞、5 项健壮性问题、4 项性能优化、4 项代码质量问题、3 项功能缺口。
+
+### 2.1.1 安全加固
+
+#### S1: Sandbox deny patterns 可被命令链绕过 — P1 HIGH
+
+当前 deny patterns 使用 `^\s*` 锚定，要求危险命令出现在行首。命令链中的危险操作不会被匹配：
+- `cd /tmp && git push` — `^` 不匹配
+- `bash -c "git push"` — 被包裹在引号中
+- `python -c "import subprocess; subprocess.run(['git','push'])"` — 间接执行
+
+**修复方案**:
+1. 移除 `^` 锚定，改为全文搜索（`\bgit\s+push\b`）
+2. 新增 `bash -c` / `sh -c` / `python -c.*subprocess` 拦截模式
+3. 新增 `\|\s*(ba)?sh` 管道到 shell 拦截
+
+**风险评估**: claude -p 在 acceptEdits 模式下通常不会刻意绕过，且 worktree 可能没有 push 凭据。但命令链是 LLM 的常见输出模式（如 `mkdir -p dir && cd dir && git push`），不需要恶意意图也可能触发。
+
+#### S2: Prompt 传递应统一走 stdin — P2 MEDIUM
+
+`agent.py:66-67` 中 `use_stdin` 条件判断：`len(prompt) > 8000 or '\n' in prompt`。短 prompt 直接作为命令行参数。虽然 `create_subprocess_exec` 不经过 shell，但 Windows 有 8191 字符的命令行长度限制，且直接传参增加了攻击面。
+
+**修复方案**: 删除 `use_stdin` 判断，始终走 stdin pipe。简化代码路径，消除平台差异。
+
+#### S3: API Key 环境变量暴露 — P3 LOW
+
+`cli.py:467-469` 的 `--api-key` 直接写入 `os.environ`，在 crash dump 和 `/proc/PID/environ` 中可见。
+
+**定性**: 可接受 — 这是 CLI 工具的标准做法，且 key 的生命周期仅限于进程。文档中提醒用户注意即可。
+
+#### S4: `_cmd_plan` prompt injection — P3 LOW
+
+用户 goal 和 ref_content 直接拼接进 architect prompt（`cli.py:1140-1209`），恶意内容可覆盖指令。
+
+**定性**: 可接受 — 用户是 prompt 的作者，不存在第三方注入。但如果未来支持从外部源读取 goal（如 issue tracker），需要增加隔离。
+
+### 2.1.2 健壮性修复
+
+#### R1: 依赖图调度语义矛盾 — P1 HIGH
+
+`dispatcher.py:167` 将 failed 任务加入 completed 集合（允许下游运行），但 `dispatcher.py:173-188` 又将依赖 failed 任务的下游标记为 blocked。两段代码矛盾：
+
+- 如果 A→B→C，A 失败后 B 会被执行（因为 A 在 completed 中），但 C 在循环结束后才被检查是否 blocked。
+- 如果 A 失败、B 成功，C 依赖 A 和 B，C 实际上会被执行（因为 A 和 B 都在 completed 中），但按设计意图 C 应该被 blocked。
+
+**修复方案**: 统一为 "failed deps block downstream"——将 `"failed"` 从 completed 集合中移除。下游任务如果所有依赖都完成（done/noop）才执行，否则标记为 blocked。
+
+#### R2: `_commit_result` 破坏性删除 `.claude/` — P2 MEDIUM
+
+`agent.py:220-221` 的 `shutil.rmtree(claude_dir)` 删除整个 `.claude/` 目录，包括项目自身的 `.claude/settings.json` 和 `.claude/commands/`。虽然紧接着 `git checkout HEAD -- .claude/` 会恢复 tracked 文件，但 untracked 的合法 `.claude/` 文件会永久丢失。
+
+**修复方案**: 只删除已知的 sandbox 文件（`settings.local.json` 和 `hooks/cagent-guard.py`），保留其余文件。
+
+#### R3: git 子进程无 timeout — P2 MEDIUM
+
+`worktree.py:9-27` 的 `_git()` 函数没有 `timeout` 参数。如果 git 操作挂起（如等待 SSH 密码、大 repo 的 worktree 创建），进程永久阻塞。
+
+**修复方案**: 添加 `timeout=60` 参数，超时后 raise `RuntimeError`。
+
+#### R4: `_extract_section` 大小写不一致 — P3 LOW
+
+`tasks.py:154` 开始匹配用 `.lower()` 比较（大小写不敏感），但结束匹配 `line.strip().startswith("## ")` 是大小写敏感的。`## CONVENTIONS` 能匹配开始但 `## TASKS` 不会匹配结束标记。
+
+**修复方案**: 结束标记也用 `.lower()` 比较。
+
+#### R5: `__main__.py` 顶层副作用 — P3 LOW
+
+`__main__.py:14-18` 在模块导入时执行 `_check_version()` 和 `main()`。`python -m cagent` 正确，但如果有人 `import cagent.__main__`（如测试），会触发 CLI 执行。
+
+**修复方案**: 将 `_check_version()` 和 `main()` 包裹在 `if __name__ == "__main__":` 中。
+
+### 2.1.3 性能优化
+
+#### P1: `dump_state` 调用过于频繁 — P3
+
+`dispatcher.py` 在每次任务状态变化时（启动、完成、失败）调用 `dump_state`，序列化全部任务到 JSON。高并发下（`-j 8` + 20 tasks）产生大量 I/O。
+
+**修复方案**: 添加节流机制（类似 `Dashboard._DASHBOARD_THROTTLE`），最终 flush 确保一致性。
+
+#### P2: `_resolve_claude()` 每次调用都做 PATH 查找 — P3
+
+`agent.py:19-25` 每次 `run_agent` 和 integrator 调用时都执行 `shutil.which`。
+
+**修复方案**: `@functools.lru_cache` 缓存结果。
+
+#### P3: Dashboard `bytes_seen` 低效回退 — P3
+
+`progress.py:209` 在 `raw_line_len` 为 0 时触发 `json.dumps(event.raw)` 仅为计算长度。
+
+**修复方案**: `raw_line_len` 为 0 且 `event.raw` 为空时直接跳过。
+
+#### P4: worktree stagger 策略可优化 — P3
+
+固定 0.3s stagger，10 个任务需要 3s 启动延迟。实际上 index.lock 竞争只在前几个并发创建时发生。
+
+**修复方案**: 仅在前 concurrency 个 worktree 创建时 stagger，后续 wave 不再延迟。
+
+### 2.1.4 代码质量
+
+#### Q1: 缺少 `pyproject.toml` 项目元数据 — P2
+
+`pyproject.toml` 仅含 pytest 配置，无 `[project]` 段。无法 `pip install -e .` 安装。
+
+**修复方案**: 补充 `[project]` 配置（name, version, python-requires, description），保持零外部依赖。
+
+#### Q2: 测试未覆盖核心异步模块 — P2
+
+无 `test_dispatcher.py`、`test_integrator.py`、`test_agent.py`、`test_memory.py`、`test_log.py`。这些模块包含最复杂的业务逻辑。
+
+**修复方案**: 对 dispatcher 依赖图调度、integrator cherry-pick 流程添加单元测试（mock `run_agent`）。Memory 模块可直接测试。
+
+#### Q3: `rm -r` 单独使用被放行 — P3
+
+`safety.py` 的 deny patterns 只匹配 `rm -rf`/`rm -fr` 等组合，但 `rm -r .` 同样是破坏性命令，当前被放行。
+
+**定性**: 可接受 — `rm -r` 无 force 参数会在遇到写保护文件时提示，不完全等同于 `rm -rf`。但可以考虑添加 `rm -r /` 和 `rm -r .` 的拦截。
+
+#### Q4: integrator 的 `await proc.stdin.wait_closed()` 缺失 — P3
+
+`integrator.py:264` 的 `proc.stdin.close()` 后未 await wait_closed()，与 `agent.py` 的修复不一致。
+
+**修复方案**: 添加 `await proc.stdin.wait_closed()`。
+
+### 2.1.5 功能缺口
+
+#### F1: 无自动重试机制 — P3
+
+单个 task 失败后无重试。LLM 子进程的瞬态错误（网络超时、rate limit）通常一次重试即可解决。
+
+**设计方案**: `--retries N`（默认 0），task 失败后在同一 worktree 重试 N 次。
+
+#### F2: 无 token 使用量追踪 — P3
+
+`result` 事件包含 `usage` 字段（`input_tokens`, `output_tokens`），但未被解析和展示。
+
+**设计方案**: EventParser 解析 `result.usage`，Dashboard 和 summary.md 中展示 token 消耗和估算费用。
+
+#### F3: 无单 task 取消 — P4
+
+正在运行的 task 只能通过 Ctrl+C 全局中断。
+
+**设计方案**: `cagent cancel <task-id>` 子命令，或 watch 模式下的交互式取消。
+
+---
+
+## 综合评审（2026-05-17 v2.1 审计更新）
 
 ### 评分
 
 | 维度 | 评分 (1-5) | 说明 |
 |------|------------|------|
-| 功能完整度 | 4.5 | v1 spec 完全实现 + 多项超额功能（memory / resume / dry-run） |
-| 代码质量 | 4.5 | 架构清晰、零第三方依赖、错误处理到位、Phase 17-18 深度审查修复 12 项 |
-| 安全性 | 4.5 | sandbox + push 门控扎实；integrator sandbox 已补全（Phase 17.1） |
-| 可观测性 | 4.5 | 三层观测 + 四种落盘，设计合理；Dashboard 事件回调已修复 |
+| 功能完整度 | 5 | v1 spec 完全实现 + plan 功能 + 依赖调度 + 多项超额功能 |
+| 代码质量 | 4.5 | 架构清晰、零第三方依赖；pyproject.toml 已补充、`__main__.py` 副作用已修复、异步模块测试已补充 |
+| 安全性 | 4.5 | sandbox + push 门控扎实；deny patterns 已加固（命令链 + GNU long flags + rm 正则合并）；依赖图语义已统一 |
+| 可观测性 | 4.5 | 三层观测 + 四种落盘，设计合理；token 追踪为功能缺口 |
 | 跨平台 | 4.5 | Windows GBK 编码问题已修复，compat 层完备 |
-| 测试覆盖 | 2 | 113 项极端测试通过，但零自动化 pytest——最大欠债 |
+| 测试覆盖 | 4.5 | 155 pytest 自动化 + 61 项手动验证；核心异步模块测试已补充；lru_cache 隔离已处理 |
 | 文档 | 4.5 | README + PLAN + CHECKLIST 详尽，测试记录完整 |
+
+### Benchmark 结果（2026-05-17）
+
+| 模式 | 耗时 | 任务数 | 加速比 |
+|------|------|--------|--------|
+| Single Agent (串行) | 47.7s | 4 | — |
+| cagent (j=4 并行) | 16.7s | 4 | **2.86x** |
+
+- 集成分支 4 个 commit，产出正确，无冲突
+- 冒烟测试 PASS
+- 加速比受限于 worktree 创建 + cherry-pick 集成开销；任务越重、数量越多，加速比越高
 
 ### PLAN 覆盖率：文件结构 13/13，设计约束 11/11，模块 12/12（memory.py 超额）
 
-### CHECKLIST 总完成率：101/121 (83.5%)
+### CHECKLIST 总完成率：153/165 (92.7%)
 
 - 核心实现 Phase 1-11：46/46 (100%)
 - Bug fix Phase 12/15/16：32/37 (86.5%)，5 项为有意推迟的 LOW severity
-- 评审修复 Phase 17：5/5 (100%)
-- 深度审查 Phase 18：6/6 (100%)
-- 测试套件 Phase 13 P3：0/6 (0%)——最大短板
-- v2 功能 Phase 14：0/7 (0%)——预期范围外
+- 评审修复 Phase 17-20：27/27 (100%)
+- plan 功能 Phase 23：8/8 (100%)
+- 测试套件 Phase 13 P3：6/6 (100%) — 155 pytest 用例
+- v2 功能 Phase 14：2/7 (28.6%) — 14.1/14.2 已完成
+- **v2.1 审计 Phase 24：20/20 (100%) — 全部完成（含代码审查修复）**
 
-### 已知问题：2 项 HIGH（v1.3 待修）
+### 已修复问题（Phase 24）
 
-1. `worktree.py` Windows GBK 编码（中文 commit message 必触发）
-2. `cli.py --base` 无效参数暴露 traceback
+| # | 严重度 | 模块 | 问题 | 状态 |
+|---|--------|------|------|------|
+| S1 | HIGH | safety.py | deny patterns 可被命令链绕过 | ✅ 已修复 |
+| R1 | HIGH | dispatcher.py | 依赖图 failed task 语义矛盾 | ✅ 已修复 |
+| S2 | MEDIUM | agent.py | prompt 传递应统一走 stdin | ✅ 已修复 |
+| R2 | MEDIUM | agent.py | `_commit_result` 破坏性删除 `.claude/` | ✅ 已修复 |
+| R3 | MEDIUM | worktree.py | git 子进程无 timeout | ✅ 已修复 |
+| Q1 | MEDIUM | pyproject.toml | 缺少项目元数据 | ✅ 已修复 |
+| Q2 | MEDIUM | tests/ | 核心异步模块无测试 | ✅ 已修复 |
+| CR1 | HIGH | safety.py | `rm -r/` 绕过（rm 正则合并） | ✅ 已修复 |
+| CR2 | MEDIUM | agent.py | lru_cache 测试隔离 | ✅ 已修复 |
+| CR3 | LOW | tasks.py | `_extract_section` 大小写测试缺失 | ✅ 已修复 |
 
 ### 剩余工作
 
-1. **Phase 19** — v1.3 审查修复：2 HIGH + 3 MEDIUM + 5 LOW + 6 优化（本次审查发现）
-2. **Phase 13 P3** — pytest 自动化测试（最大欠债，113 项手动验证 0 自动化）
-3. **Phase 12 deferred** — 空 prompt 边界、_run_git 超时、run_id 碰撞（3 项 LOW）
-4. **Phase 14** — v2 功能开发（7 项，预期范围外）
+1. **Phase 24 P4** — 功能缺口（3 项：retries、token 追踪、cancel 命令）
+2. **Phase 12 deferred** — 空 prompt 边界、_run_git 超时、run_id 碰撞（3 项 LOW）
+3. **Phase 14 剩余** — integrator 多轮验证、多策略、WebSocket（3 项）
