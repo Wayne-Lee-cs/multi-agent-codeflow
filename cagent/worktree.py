@@ -14,6 +14,8 @@ def _git(*args: str, cwd: str | Path | None = None) -> subprocess.CompletedProce
             cwd=cwd,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=True,
         )
     except FileNotFoundError:

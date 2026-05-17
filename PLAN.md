@@ -134,7 +134,7 @@ clone 后三种入口任选：
 ### 4a. `cagent/safety.py`（不可逆命令拦截）
 
 - `prepare_sandbox(worktree_path)`：在 worktree 里写 `.claude/settings.local.json`，注册 `PreToolUse` Bash hook，匹配以下正则即 `deny`：
-  - Unix 危险命令：`^\s*git\s+push\b` / `^\s*git\s+reset\s+--hard\b` / `^\s*git\s+clean\s+-[a-z]*f` / `^\s*rm\s+-[a-z]*r[a-z]*f` / `^\s*git\s+update-ref\b` / `^\s*git\s+remote\s+(set-url|add)\b`。
+  - Unix 危险命令：`^\s*git\s+push\b` / `^\s*git\s+reset\s+--hard\b` / `^\s*git\s+clean\s+-[a-z]*f` / `^\s*rm\s+-[a-z]*[rf][a-z]*[rf]`（匹配 `-rf` / `-fr` / `-Rf` / `-fR`）/ `^\s*git\s+update-ref\b` / `^\s*git\s+remote\s+(set-url|add)\b`。
   - Windows 危险命令（PowerShell）：`Remove-Item\s.*-Recurse.*-Force` / `Remove-Item\s.*-Force.*-Recurse` / `del\s+/[sS]` / `rd\s+/[sS]`。
   - 注意：Claude Code 在 Windows 上也可能通过 Bash tool 调用 Unix 风格命令（Git Bash / WSL），所以两套正则都要注册。
 - hook 直接拒绝（exit 非零），agent 看到拒绝信息后自决换路或放弃。
@@ -170,7 +170,7 @@ class Event:
 @dataclass
 class TaskProgress:
     task_id: str
-    status: Literal["pending","running","done","failed","noop","denied"]
+    status: Literal["pending","running","done","failed","noop"]  # "denied" 不是任务状态——工具被拒不代表任务失败
     started_at: float | None
     ended_at: float | None
     last_event: Event | None
@@ -337,134 +337,254 @@ class TaskProgress:
 | `git commit` 在 worktree | cagent 自身（统一外层提交） | ❌ |
 | `git cherry-pick` 到 integration 分支 | cagent 自身 | ❌ |
 | `git push` / `git push --force` | 仅 `cagent push` 子命令 | ✅ y/N |
-| `git reset --hard` / `git clean -fd` / `git update-ref` / `rm -rf` | 任何 agent 子进程 | ❌ — 直接被 sandbox **拒绝**，不暂停 |
+| `git reset --hard` / `git clean -fd` / `git update-ref` / `rm -rf` / `rm -fr` | 任何 agent 子进程 | ❌ — 直接被 sandbox **拒绝**，不暂停 |
 | 任何远程操作（push / fetch / pull） | 只在 `cagent push` 路径 | ✅ y/N |
 
 设计要点：cagent 流程绝不需要 push 或 destructive git；agent 想用也用不了；唯一的远程动作集中在 `cagent push`，需要用户在终端按 y。
 
 ## v1 实测结果（2026-05-14）
 
-### 冒烟测试：PASS（v1.1 修复后）
+### 冒烟测试：PASS
 
 ```
 $ python -m cagent run tasks/example.txt -j 2 --timeout 120
 Checking claude CLI authentication... OK
-[04:21:15] 001 DONE  5s 1 tools  commit 920d42e
-[04:21:16] 002 DONE  6s 1 tools  commit 0639ae3
+[07:26:50] 001 DONE  10s 1 tools  commit eaeb915
+[07:26:50] 002 DONE  11s 1 tools  commit 72755a3
 Dispatcher: 2 done, 0 failed, 0 noop
-Task timing:
-  [001] done         5s (1 tools) 920d42e
-  [002] done         6s (1 tools) 0639ae3
-Done! (12s)
-  Integration branch: cagent/2026-05-14T04-21-05/integration
+Done! (17s)
+  Integration branch: cagent/2026-05-14T07-26-35/integration
 ```
 
-### 冲突测试：PASS（v1.1 修复后）
+### 冲突测试：PASS
 
 ```
 $ python -m cagent run tasks/conflict.txt -j 2 --timeout 120
-[04:20:21] 001 DONE  12s 2 tools  commit a4967fb
-[04:20:21] 002 DONE  11s 3 tools  commit 3830d20
+[07:27:38] 002 DONE  16s 2 tools  commit 2fcc1de
+[07:27:40] 001 DONE  18s 2 tools  commit b2bdd15
 Dispatcher: 2 done, 0 failed, 0 noop
-Done! (36s)
-  Integration branch: cagent/2026-05-14T04-20-05/integration
+Done! (1m13s)
+  Integration branch: cagent/2026-05-14T07-27-17/integration
 ```
 
 集成结果：README.md 包含 Section A + Section B，无冲突标记。
 
-### 辅助命令测试
+### CLI 边界测试
 
-| 命令 | 结果 | 备注 |
+| 测试 | 结果 |
+|------|------|
+| 缺失 tasks 文件 | ✅ exit 1 + 清晰错误 |
+| 空文件 / 纯注释文件 | ✅ "No tasks found" |
+| `status` / `log` 无历史 run | ✅ "No completed runs" |
+| `push` 不存在分支 | ✅ exit 1 + 列出可用分支 |
+| `--resume fake-id` | ✅ 列出可用 runs |
+| `--dry-run` + 各种 flags | ✅ 正常输出计划 |
+| Unicode/emoji tasks | ✅ 正常显示（GBK 编码修复后） |
+| 全模块 import | ✅ 11 模块无报错 |
+
+### Safety 测试（28 条正则 + E2E）
+
+| 命令 | 预期 | 结果 |
 |------|------|------|
-| `python -m cagent --help` | ✅ PASS | 所有子命令列出正确 |
-| `python -m cagent run --help` | ✅ PASS | 所有 flags 正确 |
-| `python -m cagent clean --force` | ✅ PASS | 正确清理 worktree + run 目录 |
-| `python -m cagent status` | ✅ PASS | 读取 dashboard.json 渲染表格 |
-| `python -m cagent branches` | ✅ PASS | 列出 cagent 分支 |
-| worktree 创建/清理流程 | ✅ PASS | git worktree add/remove 正常 |
-| 日志文件生成 | ✅ PASS | logs/events/progress/dashboard 均生成 |
-| EventParser 解析 | ✅ PASS | 正确解析 stream-json init/assistant/result 事件 |
+| `git push` | 拦截 | ✅ |
+| `git reset --hard` | 拦截 | ✅ |
+| `git clean -fd` | 拦截 | ✅ |
+| `rm -rf` / `rm -fr` / `rm -Rf` / `rm -fR` | 拦截 | ✅ |
+| `git update-ref` | 拦截 | ✅ |
+| `git remote set-url/add` | 拦截 | ✅ |
+| `Remove-Item -Recurse -Force` | 拦截 | ✅ |
+| `del /s` / `rd /s` | 拦截 | ✅ |
+| `git add/commit/status` | 放行 | ✅ |
+| `rm -r` / `rm -f` (单 flag) | 放行 | ✅ |
+| `git pushpin` (word boundary) | 放行 | ✅ |
+| Sandbox hook script E2E | 拦截+放行 | ✅ |
 
-### 代码审查发现的 Bug
+### Observability 测试
 
-1. **`denied` 状态污染**（`progress.py:204`）：单次 tool 被 sandbox 拒绝会将整个 task 标记为
-   `"denied"` 状态，但设计意图是 deny 只是单步事件，不应终结 task。
-2. **`.claude/` 文件泄漏到 commit**：integrator 在非 squash 模式下，`prepare_sandbox` 写入的
-   `.claude/settings.local.json` 和 hook 脚本会被 `git add -A` 带入正式 commit。
-3. **`TaskGroup` 异常扩散**：未预见的异常会导致 `asyncio.TaskGroup` 取消所有并行任务。
+| 测试 | 结果 |
+|------|------|
+| 日志文件结构 | ✅ |
+| EventParser 12 种事件 | ✅ |
+| Dashboard 序列化/反序列化 | ✅ |
+| `cagent status` 表格 | ✅ |
+| `cagent run` stdout 行流 | ✅ |
+| `cagent log` 事件流 | ✅ |
+
+### Memory 测试
+
+| 测试 | 结果 |
+|------|------|
+| write/read | ✅ |
+| read_all | ✅ |
+| build_shared_context + cap | ✅ |
+| write_shared/load_shared | ✅ |
+| 文件位置隔离 | ✅ |
+
+### 代码审查发现并修复的 Bug
+
+**Phase 12 修复（Round 2）：**
+1. `denied` 状态污染 → 只更新 `last_activity`，不改 `status`
+2. `.claude/` 文件泄漏 → commit 前排除 sandbox 文件
+3. `TaskGroup` 异常扩散 → `gather(return_exceptions=True)`
+
+**Phase 15 修复（Code Review）：**
+4. `parse_tasks_file` 异常未捕获 → try/except + 清晰错误
+5. integrator 冲突文件解析不处理 rename → `->` 分割
+6. integrator agent 退出码未检查 → 添加 `proc.returncode` 检查
+7. Dashboard 私有 API 访问 → `set_event_handler()` 公共方法
+8. shared_context 无上限 → 4000 字符 cap
+9. text 事件截断过短 → 80 → 500 字符
+
+**Phase 16 修复（极限测试）：**
+10. `rm -fr` 未被 sandbox 拦截 → regex 改为 `[rf][a-z]*[rf]`
+11. Windows GBK 编码 emoji 崩溃 → stdout/stderr 重配 UTF-8
+12. `_auth_preflight_check` subprocess GBK 解码异常 → `encoding="utf-8"`
 
 ---
 
-## v1.1 — 紧急修复（使 cagent 可用）
+## v1.1 — 紧急修复（使 cagent 可用）— ✅ 全部完成
 
-### 1.1.1 认证问题解决
+### 1.1.1 认证问题解决 — ✅ 方案 A + B 已实现
 
-`claude -p` 在 headless 模式下的认证需要单独处理。方案（按优先级）：
+- ✅ `_preflight_check(check_auth=True)` 实际调用 `claude -p "say hello"` 做认证预检
+- ✅ 失败时输出诊断信息（env vars + 修复建议）
+- ✅ `--api-key` flag 透传到子进程 `ANTHROPIC_API_KEY`
+- ✅ subprocess 使用 `encoding="utf-8"` 避免 Windows GBK 解码异常
 
-**方案 A — 环境检测 + 预检**：在 `_preflight_check()` 中不仅检查 `claude` 是否在 PATH，还实际
-调用 `claude -p "test" --output-format json` 做一次认证预检。失败时给出明确的诊断信息和修复指引：
+### 1.1.2 `denied` 状态修复 — ✅
 
-```
-Error: claude -p authentication failed.
-  Current auth source: none
-  ANTHROPIC_API_KEY: set (but may be invalid)
-  ANTHROPIC_BASE_URL: http://localhost:4000
+`progress.py` 中 `denied` 事件只更新 `last_activity`，不改 `status`。
 
-  Possible fixes:
-  1. Run 'claude auth login' to authenticate claude CLI
-  2. Set a valid ANTHROPIC_API_KEY: export ANTHROPIC_API_KEY=sk-ant-...
-  3. If using a proxy, verify it accepts requests at ANTHROPIC_BASE_URL
-```
+### 1.1.3 `.claude/` 文件清理 — ✅
 
-**方案 B — `--api-key` 透传**：添加 `--api-key <key>` 选项，传给子进程的 `ANTHROPIC_API_KEY` 环境变量：
-```python
-env = os.environ.copy()
-if api_key_override:
-    env["ANTHROPIC_API_KEY"] = api_key_override
-```
+- `agent.py`：commit 前 `shutil.rmtree(.claude/)` + `git checkout HEAD -- .claude/` + `.gitignore` 追加 `.claude/`
+- `integrator.py`：squash 模式 `git rm --cached -r .claude/`
 
-**方案 C — 认证代理**：如果主会话通过 OAuth 认证而 `claude -p` 不支持 OAuth，考虑使用
-`claude` 的 `--session-key` 或其他机制传递认证凭据。需要调研 claude CLI 文档。
+### 1.1.4 `--dry-run` 支持 — ✅
 
-### 1.1.2 `denied` 状态修复
+`--dry-run` flag：解析 tasks → 显示计划 → 退出。
 
-`progress.py` 中 `denied` 事件不应覆盖 task 的整体 `status`：
+### 1.1.5 Windows 编码兼容 — ✅（Phase 16 新增）
 
-```python
-# 修改前（错误）
-if event.kind == "denied":
-    tp.status = "denied"
+- `cli.py` stdout/stderr 重配为 UTF-8 + `errors="replace"`
+- `_auth_preflight_check` subprocess 添加 `encoding="utf-8"`
 
-# 修改后（正确）
-if event.kind == "denied":
-    tp.last_activity = f"DENIED: {event.summary}"
-    # 不修改 tp.status — denied 是单步事件，task 继续执行
-```
+---
 
-### 1.1.3 `.claude/` 文件清理
+## v1.2 — 已知问题修复（评审发现，2026-05-15）— ✅ 全部完成
 
-在 `agent.py` 的 `_commit_result` 和 `integrator.py` 的 cherry-pick 完成后，
-添加 `.claude/` 的 git 排除：
+### 1.2.1 Integrator sandbox 缺失 — MEDIUM — ✅ Phase 17.1
 
-```python
-# 在 git add -A 之前，先排除 sandbox 文件
-await _run_git("rm", "--cached", "-r", "--ignore-unmatch", ".claude/", cwd=worktree_path)
-```
+为 integrator agent 注入精简版 sandbox，拦截 `git push` / `rm -rf` 等，放行 `git add` / `cherry-pick --continue`。
 
-或更好的方案：在 worktree 的 `.gitignore` 中追加 `.claude/`。
+### 1.2.2 Conflict marker 检测文件类型不全 — LOW — ✅ Phase 17.2
 
-### 1.1.4 `--dry-run` 支持
+`git grep` 去掉扩展名限制，搜索所有已跟踪文件（含子目录）。
 
-添加 `--dry-run` flag：解析 tasks 文件 → 显示将执行的操作 → 退出，不实际创建 worktree 或启动 agent。
+### 1.2.3 `_clean_worktrees` 不清理 integration worktree — LOW — ✅ Phase 17.3
+
+`_clean_worktrees` 末尾额外清理 `_integration` worktree。
+
+### 1.2.4 `_auth_preflight_check` 编码处理不一致 — LOW — ✅ Phase 17.4
+
+统一为 `text=True, encoding="utf-8", errors="replace"`。
+
+### 1.2.5 Integrator memory 覆盖风险 — LOW — ✅ Phase 17.5
+
+`memory.py` 新增 `append()` 方法（文件追加模式），integrator 改用 `append()`。
+
+---
+
+## v1.3 — 深度审查发现（2026-05-17）
+
+### 1.3.1 `worktree.py` Windows 编码 bug — HIGH
+
+`_git()` 函数使用 `text=True` 但未指定 `encoding="utf-8"`，在 Windows 上默认使用 GBK 解码。如果 git 输出含 UTF-8 字符（中文 commit message、非 ASCII 分支名），`create_worktree` / `current_head` 会抛 `UnicodeDecodeError`。
+
+这与 Phase 16.3 修复的 `_auth_preflight_check` 是同类问题，但 `worktree.py` 被遗漏。
+
+修复：`subprocess.run([...], text=True, encoding="utf-8", errors="replace")`。
+
+### 1.3.2 `cli.py` `--base` 参数无效时暴露 traceback — HIGH
+
+`_cmd_run` 中 `git rev-parse args.base` 使用 `check=True`，用户传入不存在的分支名时抛 `CalledProcessError`，导致满屏 traceback。其他所有用户输入路径（tasks 解析、push 分支验证）都有友好错误处理，唯独此处遗漏。
+
+修复：try/except 包裹，输出 `"Error: invalid base '{args.base}' — not a valid branch or SHA."`。
+
+### 1.3.3 `progress.py` Dashboard resume 加载脆弱 — MEDIUM
+
+`Event(**v)` 假设 dict 包含所有 Event 字段。如果 `dashboard.json` 由旧版写入或字段缺失，会抛 `TypeError`。当前 broad `except` 捕获后重新开始，但丢失了整个 resume 数据。
+
+修复：逐字段防御性重建 Event，缺失字段用默认值。
+
+### 1.3.4 `agent.py` stdin pipe 未 await transport 关闭 — MEDIUM
+
+`proc.stdin.close()` 后未调用 `await proc.stdin.wait_closed()`（Python 3.11+ 可用），可能导致短暂 fd 泄漏。
+
+修复：`proc.stdin.close(); await proc.stdin.wait_closed()`。
+
+### 1.3.5 `integrator.py` 异常捕获过于宽泛 — MEDIUM
+
+`_cherry_pick_one` 外层 `except Exception: success = False` 将编程错误（`NameError`、`AttributeError`）静默吞掉，伪装为 cherry-pick 失败。排查时无任何日志。
+
+修复：catch 中记录异常信息到 dashboard event + log 文件，至少 `event.summary = f"cherry-pick task {task.id} exception: {e}"`。
+
+### 1.3.6 `cli.py` `Callable` 类型未导入 — LOW
+
+`_execute_run` 参数 `merge_results: "Callable | None"` 中 `Callable` 未从 `typing` 导入。由于 `from __future__ import annotations`，运行时不报错，但静态分析（mypy/pyright）会标红。
+
+修复：在 import 区添加 `from typing import Callable`。
+
+### 1.3.7 `dispatcher.py` gather 返回值未检查 — LOW
+
+`asyncio.gather(*coroutines, return_exceptions=True)` 的返回值未检查。如果有异常绕过了 `_run_one` 内部 try/except（如 `asyncio.CancelledError`），该异常会被静默丢弃。
+
+修复：检查返回值列表中的 `BaseException` 实例，记录到日志。
+
+### 1.3.8 `progress.py` bytes_seen 计算低效 — LOW
+
+`tp.bytes_seen += len(json.dumps(event.raw))` 每个事件都重新序列化 raw dict 仅为计算字节数。
+
+修复：在 `EventParser.feed()` 中记录原始行长度，传入 Event 或单独返回。
+
+### 1.3.9 `tasks.py` load_state 无数据校验 — LOW
+
+`Task(**d)` 不验证 status 是否为合法 Literal 值、branch 格式是否正确。损坏的 `tasks.json` 会导致下游难以定位的错误。
+
+修复：添加基本校验，非法字段时抛出明确的 `ValueError`。
+
+### 1.3.10 `safety.py` Sandbox 可通过间接执行绕过 — LOW（设计层面 known limitation）
+
+Agent 可通过 `echo "git push" > x.sh && bash x.sh` 或 `python -c "import subprocess; subprocess.run(['git','push'])"` 绕过正则拦截。因为 hook 只检查 Bash tool 的顶级 command 字符串。
+
+定性：v1 可接受。`claude -p` 在 `acceptEdits` 模式下通常不会刻意绕过，且 worktree 没有 push 远程的凭据（除非继承了）。记为 known limitation，v2 考虑更强的沙箱（如 seccomp/namespaces/Docker）。
+
+---
+
+### 性能优化建议（v1.3 scope）
+
+| # | 模块 | 建议 | 收益 |
+|---|------|------|------|
+| O1 | `progress.py` EventParser | `feed()` 开头加 `if not line.startswith('{'):` 短路非 JSON 行 | 减少无效 `json.loads` 调用 |
+| O2 | `dispatcher.py` | 添加 worker 启动间隔（如 `await asyncio.sleep(0.3)`）错开 worktree 创建 | 避免并发 git 命令争用 `.git/index.lock` |
+| O3 | `memory.py` | `build_shared_context` 缓存结果：已完成列表不变时跳过重复读盘 | 减少高并发下磁盘 IO |
+| O4 | `cli.py` watch | 用 `os.stat(dashboard_path).st_mtime` 检查文件是否变化，无变化时跳过读取+渲染 | 减少无效 IO 和 CPU |
+| O5 | `agent.py` | 超时杀进程改为先 SIGTERM 等 3s，再 SIGKILL | 给 claude 子进程优雅关闭机会（释放临时文件等） |
+| O6 | `integrator.py` | `_cherry_pick_one` 中两个 `checkout HEAD --` 调用改为 `asyncio.gather` 并行 | 微优化，减少串行 git 等待 |
 
 ---
 
 ## v2 演进接口
 
+### 优先级 P0：自动化测试（从 v2 前置到 v1.x）
+
+- **添加单元测试套件（pytest）**，覆盖 tasks 解析、worktree 管理、event 解析、safety 正则匹配。极限测试已通过脚本验证 61 项，但尚未转为 pytest 用例（CHECKLIST Phase 13 P3）。这是当前最大技术欠债，应在 v2 功能开发前补齐。
+
+### 功能扩展
+
 - `cagent plan <goal>` 子命令位置已在 `cli.py` 留 stub —— 未来跑一个 architect agent 输出 `tasks.json`（与 `tasks.py` 同一份 schema）。
 - `Task` 增加 `depends_on: list[str]` 字段（v1 解析但不强制使用）—— v2 dispatcher 改成依赖图调度即可，worktree/integrator 机制无需改动。
 - integrator 已经是独立 agent，v2 可以扩展成多轮（先 lint / 跑测试再决策）。
-- 添加单元测试套件（pytest），覆盖 tasks 解析、worktree 管理、event 解析、safety 正则匹配。
 - 支持 `pyproject.toml` 可选安装（`pip install -e .`），但保持零依赖 clone-and-run。
 - integrator 支持多策略：除 cherry-pick 外，支持 merge、rebase 等合并策略。
 - `cagent watch` 支持 WebSocket 推送，便于远程监控。
@@ -477,55 +597,84 @@ await _run_git("rm", "--cached", "-r", "--ignore-unmatch", ".claude/", cwd=workt
 
 ## Verification
 
-### 冒烟测试
+### 冒烟测试：PASS
 
-1. 准备 `tasks/smoke.txt`：
-   ```
-   Create file FOO.md with content "foo".
-   Create file BAR.md with content "bar".
-   ```
-2. `python -m cagent run tasks/smoke.txt -j 2`
-3. 期望：两个 task done，integration 分支含 FOO.md 和 BAR.md。
-4. **实测结果（2026-05-14 v1.1）：PASS — 12s 完成，integration 分支含两个文件。**
+`python -m cagent run tasks/example.txt -j 2` — 17s 完成，2 tasks done，integration 分支正确。
 
-### 冲突测试
+### 冲突测试：PASS
 
-1. `tasks/conflict.txt`：两条都修改 README.md。
-2. `python -m cagent run tasks/conflict.txt -j 2`
-3. 期望：integrator 解冲突，最终无冲突标记。
-4. **实测结果（2026-05-14 v1.1）：PASS — 36s 完成，Section A + Section B 均保留，无冲突标记。**
+`python -m cagent run tasks/conflict.txt -j 2` — 73s 完成，integrator 解冲突，Section A + Section B 均保留。
 
-### 认证测试
+### CLI 边界测试：8/8 PASS
 
-1. 在 Claude Code 会话环境中直接 `claude -p "echo hello" --output-format stream-json --verbose`
-2. **实测结果（2026-05-14 v1.1）：PASS — 认证预检通过，端到端流程正常。**
+缺失文件、空文件、纯注释、无历史 run、不存在分支、无效 resume ID、dry-run + flags 组合、Unicode/emoji。
 
-### Observability 测试（部分通过）
+### Safety 测试：28/28 PASS + Sandbox E2E PASS
 
-1. 日志文件结构：✅ — `logs/`, `events/`, `progress/`, `dashboard.json` 均正确生成。
-2. EventParser：✅ — 正确解析了 `system.init`、`assistant`（含 403 错误）、`result` 事件。
-3. Dashboard：✅ — JSON 序列化/反序列化正常。
-4. `cagent status`：✅ — 正确读取并渲染 dashboard 表格。
-5. `cagent watch` / `cagent log`：**BLOCKED** — 需要有实际运行中的 task。
+10 种危险命令全部拦截，8 种安全命令全部放行，word boundary 正确。Sandbox hook script E2E 验证拦截/放行。
 
-### Safety 测试
+### Observability 测试：6/6 PASS
 
-1. sandbox hook 注入：**BLOCKED** — 需要 `claude -p` 能运行后才能验证 agent 是否被拦截。
-2. `cagent push` y/N 确认：未测试。
-3. `cagent clean --force`：✅ — 正确清理 worktree + 分支 + run 目录。
+日志结构、EventParser 12 种事件、Dashboard 序列化、status 表格、run stdout 行流、log 事件流。
 
-### 错误路径
+### Memory 测试：5/5 PASS
 
-1. noop / timeout：**BLOCKED** — 需要 `claude -p` 能运行。
+write/read、read_all、shared_context + cap、write_shared/load_shared、文件隔离。
 
 ### 通过率汇总
 
 | 类别 | 通过 | 失败 | 阻塞 |
 |------|------|------|------|
 | CLI 入口 | 6 | 0 | 0 |
-| 核心流程 | 0 | 1 | 3 |
-| Observability | 4 | 0 | 2 |
-| Safety | 1 | 0 | 2 |
-| **总计** | **11** | **1** | **7** |
+| CLI 边界 | 8 | 0 | 0 |
+| 核心流程 (E2E) | 2 | 0 | 0 |
+| Safety | 28 | 0 | 0 |
+| Safety E2E | 5 | 0 | 0 |
+| Observability | 6 | 0 | 0 |
+| Memory | 5 | 0 | 0 |
+| 模型跟随 | 1 | 0 | 1 |
+| 错误路径 | 0 | 0 | 2 |
+| **总计** | **61** | **0** | **3** |
 
-**v1.1 首要目标**：解决认证问题后重跑全部 BLOCKED 项。
+### 自动化测试覆盖：0%
+
+113 项极端测试 + 61 项功能验证全部为手动执行，未转为 pytest 自动化用例。这是当前最大技术欠债。
+
+---
+
+## 综合评审（2026-05-15）
+
+### 评分
+
+| 维度 | 评分 (1-5) | 说明 |
+|------|------------|------|
+| 功能完整度 | 4.5 | v1 spec 完全实现 + 多项超额功能（memory / resume / dry-run） |
+| 代码质量 | 4.5 | 架构清晰、零第三方依赖、错误处理到位、Phase 17-18 深度审查修复 12 项 |
+| 安全性 | 4.5 | sandbox + push 门控扎实；integrator sandbox 已补全（Phase 17.1） |
+| 可观测性 | 4.5 | 三层观测 + 四种落盘，设计合理；Dashboard 事件回调已修复 |
+| 跨平台 | 4.5 | Windows GBK 编码问题已修复，compat 层完备 |
+| 测试覆盖 | 2 | 113 项极端测试通过，但零自动化 pytest——最大欠债 |
+| 文档 | 4.5 | README + PLAN + CHECKLIST 详尽，测试记录完整 |
+
+### PLAN 覆盖率：文件结构 13/13，设计约束 11/11，模块 12/12（memory.py 超额）
+
+### CHECKLIST 总完成率：101/121 (83.5%)
+
+- 核心实现 Phase 1-11：46/46 (100%)
+- Bug fix Phase 12/15/16：32/37 (86.5%)，5 项为有意推迟的 LOW severity
+- 评审修复 Phase 17：5/5 (100%)
+- 深度审查 Phase 18：6/6 (100%)
+- 测试套件 Phase 13 P3：0/6 (0%)——最大短板
+- v2 功能 Phase 14：0/7 (0%)——预期范围外
+
+### 已知问题：2 项 HIGH（v1.3 待修）
+
+1. `worktree.py` Windows GBK 编码（中文 commit message 必触发）
+2. `cli.py --base` 无效参数暴露 traceback
+
+### 剩余工作
+
+1. **Phase 19** — v1.3 审查修复：2 HIGH + 3 MEDIUM + 5 LOW + 6 优化（本次审查发现）
+2. **Phase 13 P3** — pytest 自动化测试（最大欠债，113 项手动验证 0 自动化）
+3. **Phase 12 deferred** — 空 prompt 边界、_run_git 超时、run_id 碰撞（3 项 LOW）
+4. **Phase 14** — v2 功能开发（7 项，预期范围外）

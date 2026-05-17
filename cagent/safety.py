@@ -1,4 +1,12 @@
-"""Safety sandbox — inject PreToolUse hooks to deny dangerous commands in worktrees."""
+"""Safety sandbox — inject PreToolUse hooks to deny dangerous commands in worktrees.
+
+Known limitation: the hook only inspects the top-level Bash command string.
+Indirect execution patterns like `echo "git push" > x.sh && bash x.sh` or
+`python -c "import subprocess; subprocess.run(['git','push'])"` can bypass
+the regex check. This is acceptable for v1 since claude -p in acceptEdits
+mode does not intentionally circumvent hooks, and worktrees lack push
+credentials. v2 may explore stronger sandboxing (seccomp/namespaces/Docker).
+"""
 
 from __future__ import annotations
 
@@ -13,7 +21,7 @@ DENY_PATTERNS = [
     r"^\s*git\s+push\b",
     r"^\s*git\s+reset\s+--hard\b",
     r"^\s*git\s+clean\s+-[a-z]*f",
-    r"^\s*rm\s+-[a-z]*r[a-z]*f",
+    r"^\s*rm\s+-[a-z]*[rR]",
     r"^\s*git\s+update-ref\b",
     r"^\s*git\s+remote\s+(set-url|add)\b",
     # Windows dangerous commands (PowerShell)

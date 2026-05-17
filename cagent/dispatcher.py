@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 
 from cagent.agent import AgentResult, run_agent
@@ -32,7 +33,10 @@ async def run(
     results: dict[str, AgentResult] = {}
     lock = asyncio.Lock()
 
-    async def _run_one(task: Task) -> None:
+    async def _run_one(task: Task, stagger: int) -> None:
+        # Stagger worktree creation to avoid concurrent git index.lock contention
+        if stagger > 0:
+            await asyncio.sleep(stagger * 0.3)
         async with sem:
             try:
                 # Create worktree
@@ -99,7 +103,15 @@ async def run(
 
     # Use gather(return_exceptions=True) so a single task failure
     # does not cancel all other running tasks.
-    await asyncio.gather(*[_run_one(task) for task in tasks], return_exceptions=True)
+    gather_results = await asyncio.gather(
+        *[_run_one(task, i) for i, task in enumerate(tasks)],
+        return_exceptions=True,
+    )
+
+    # Check for unexpected exceptions that escaped _run_one's try/except
+    for i, result in enumerate(gather_results):
+        if isinstance(result, BaseException):
+            logging.warning("Task %s gather returned exception: %s", tasks[i].id, result)
 
     # Return results in the same order as input tasks
     return [

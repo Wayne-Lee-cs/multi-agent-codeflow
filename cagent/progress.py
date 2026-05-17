@@ -20,6 +20,7 @@ class Event:
     ]
     summary: str
     raw: dict = field(default_factory=dict)
+    raw_line_len: int = 0  # character length of stripped JSON line (avoids re-serialization)
 
 
 @dataclass
@@ -44,6 +45,15 @@ class EventParser:
         line = line.strip()
         if not line:
             return []
+        if not line.startswith('{'):
+            return [Event(
+                ts=time.time(),
+                kind="text",
+                summary=line[:80],
+                raw={"raw": line},
+                raw_line_len=len(line),
+            )]
+        line_len = len(line)
         try:
             obj = json.loads(line)
         except json.JSONDecodeError:
@@ -52,9 +62,13 @@ class EventParser:
                 kind="text",
                 summary=line[:80],
                 raw={"raw": line},
+                raw_line_len=line_len,
             )]
 
-        return self._parse_event(obj)
+        events = self._parse_event(obj)
+        for ev in events:
+            ev.raw_line_len = line_len
+        return events
 
     def _parse_event(self, obj: dict) -> list[Event]:
         ts = time.time()
@@ -168,7 +182,13 @@ class Dashboard:
                     tp = TaskProgress(task_id=tid)
                     for k, v in tp_dict.items():
                         if k == "last_event" and v is not None:
-                            tp.last_event = Event(**v)
+                            # Defensive rebuild: handle missing fields gracefully
+                            tp.last_event = Event(
+                                ts=v.get("ts", 0.0),
+                                kind=v.get("kind", "text"),
+                                summary=v.get("summary", ""),
+                                raw=v.get("raw", {}),
+                            )
                         elif hasattr(tp, k):
                             setattr(tp, k, v)
                     self.tasks[tid] = tp
@@ -186,7 +206,7 @@ class Dashboard:
 
         tp = self.tasks[task_id]
         tp.last_event = event
-        tp.bytes_seen += len(json.dumps(event.raw))
+        tp.bytes_seen += event.raw_line_len if event.raw_line_len else len(json.dumps(event.raw))
 
         if event.kind == "start" and tp.status == "pending":
             tp.status = "running"
@@ -218,6 +238,9 @@ class Dashboard:
         self._write_task_progress(tp)
         # Append to events.jsonl
         self._append_event(task_id, event)
+        # Notify event handler (LinePrinter)
+        if self._on_event:
+            self._on_event(task_id, event)
         # Update dashboard
         self._write_dashboard()
 

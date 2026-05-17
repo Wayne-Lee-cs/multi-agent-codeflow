@@ -19,11 +19,21 @@ class RunMemory:
     def __init__(self, run_dir: Path):
         self._dir = run_dir / "memory"
         self._dir.mkdir(parents=True, exist_ok=True)
+        self._cached_ids: tuple[str, ...] | None = None
+        self._cached_context: str = ""
 
     def write(self, agent_id: str, content: str) -> None:
         """Write memory for a specific agent (worker or integrator)."""
         path = self._dir / f"{agent_id}.md"
         path.write_text(content, encoding="utf-8")
+
+    def append(self, agent_id: str, content: str) -> None:
+        """Append memory for a specific agent (preserves previous entries)."""
+        path = self._dir / f"{agent_id}.md"
+        with open(path, "a", encoding="utf-8") as f:
+            if f.tell() > 0:
+                f.write("\n\n---\n\n")
+            f.write(content)
 
     def read(self, agent_id: str) -> str:
         """Read memory for a specific agent. Returns empty string if not found."""
@@ -49,6 +59,9 @@ class RunMemory:
         earlier tasks accomplished. Capped at max_chars to avoid exceeding
         the model's context window.
         """
+        ids_tuple = tuple(sorted(task_ids))
+        if ids_tuple == self._cached_ids:
+            return self._cached_context
         parts = []
         total = 0
         for tid in task_ids:
@@ -59,7 +72,10 @@ class RunMemory:
                     break
                 parts.append(entry)
                 total += len(entry)
-        return "\n\n".join(parts)
+        result = "\n\n".join(parts)
+        self._cached_ids = ids_tuple
+        self._cached_context = result
+        return result
 
     def write_shared(self, content: str) -> None:
         """Write the aggregated shared_context.md."""

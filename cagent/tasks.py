@@ -81,6 +81,9 @@ def dump_state(run_dir: Path, tasks: list[Task]) -> None:
     atomic_write(target, json.dumps(data, indent=2, ensure_ascii=False))
 
 
+_VALID_STATUSES = {"pending", "running", "done", "failed", "noop"}
+
+
 def load_state(run_dir: Path) -> list[Task]:
     """Load task state from tasks.json."""
     target = run_dir / "tasks.json"
@@ -88,7 +91,20 @@ def load_state(run_dir: Path) -> list[Task]:
         raise FileNotFoundError(f"No tasks.json in {run_dir}")
     data = json.loads(target.read_text(encoding="utf-8"))
     tasks = []
+    valid_keys = {f.name for f in Task.__dataclass_fields__.values()}
     for d in data:
-        d["log_path"] = Path(d["log_path"])
-        tasks.append(Task(**d))
+        # Validate required fields
+        status = d.get("status", "pending")
+        if status not in _VALID_STATUSES:
+            raise ValueError(f"Invalid status '{status}' for task {d.get('id', '?')}")
+        branch = d.get("branch", "")
+        if not branch:
+            raise ValueError(f"Missing branch for task {d.get('id', '?')}")
+        if "log_path" in d:
+            d["log_path"] = Path(d["log_path"])
+        else:
+            d["log_path"] = Path(os.devnull)
+        # Filter out unknown keys (forward-compat: new fields from newer versions)
+        filtered = {k: v for k, v in d.items() if k in valid_keys}
+        tasks.append(Task(**filtered))
     return tasks

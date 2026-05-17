@@ -62,7 +62,7 @@ async def run_agent(
         )
     else:
         prompt = task.prompt
-    use_stdin = len(prompt) > 8000 or '"' in prompt or '\\' in prompt or '\n' in prompt
+    use_stdin = len(prompt) > 8000 or '\n' in prompt
 
     claude_bin = _resolve_claude()
     cmd: list[str] = [claude_bin, "-p"]
@@ -109,9 +109,12 @@ async def run_agent(
     if use_stdin:
         if proc.stdin is None:
             raise RuntimeError("subprocess stdin pipe was not created")
-        proc.stdin.write(prompt.encode("utf-8"))
-        await proc.stdin.drain()
-        proc.stdin.close()
+        try:
+            proc.stdin.write(prompt.encode("utf-8"))
+            await proc.stdin.drain()
+        finally:
+            proc.stdin.close()
+            await proc.stdin.wait_closed()
 
     # 5. Stream stdout line by line (wrapped in timeout)
     if proc.stdout is None:
@@ -136,13 +139,21 @@ async def run_agent(
                         if event.kind == "text" and event.summary:
                             output_texts.append(event.summary)
     except TimeoutError:
-        proc.kill()
-        await proc.wait()
+        proc.terminate()
+        try:
+            async with asyncio.timeout(3):
+                await proc.wait()
+        except TimeoutError:
+            proc.kill()
+            await proc.wait()
+        summary = "\n".join(output_texts[-5:])
+        if memory and summary:
+            memory.write(task.id, summary)
         if dashboard:
             dashboard.set_task_status(task.id, "failed", fail_reason="timeout")
         return AgentResult(
             task_id=task.id, status="failed", fail_reason="timeout",
-            output_summary="\n".join(output_texts[-5:]),
+            output_summary=summary,
         )
 
     # 6. Wait for process to fully exit and check return code
@@ -153,11 +164,14 @@ async def run_agent(
             # Include last meaningful output for diagnostics
             tail = "; ".join(last_lines[-3:])
             fail_reason += f" — {tail[:200]}"
+        summary = "\n".join(output_texts[-5:])
+        if memory and summary:
+            memory.write(task.id, summary)
         if dashboard:
             dashboard.set_task_status(task.id, "failed", fail_reason=fail_reason)
         return AgentResult(
             task_id=task.id, status="failed", fail_reason=fail_reason,
-            output_summary="\n".join(output_texts[-5:]),
+            output_summary=summary,
         )
 
     # 7. Commit changes
@@ -212,7 +226,7 @@ async def _commit_result(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    await checkout_claude.wait()
+    await checkout_claude.communicate()
 
     # Restore .gitignore to base (sandbox may have modified it)
     checkout_gitignore = await asyncio.create_subprocess_exec(
@@ -221,7 +235,7 @@ async def _commit_result(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    await checkout_gitignore.wait()
+    await checkout_gitignore.communicate()
 
     # git add -A
     add_proc = await asyncio.create_subprocess_exec(
@@ -230,7 +244,7 @@ async def _commit_result(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    await add_proc.wait()
+    await add_proc.communicate()
     if add_proc.returncode != 0:
         if dashboard:
             dashboard.set_task_status(task.id, "failed", fail_reason="git add -A failed")

@@ -11,11 +11,18 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 from cagent.compat import enable_ansi, is_tty, stdin_has_key, read_key
 
 
 def main() -> None:
+    # Ensure stdout/stderr handle UTF-8 on Windows (GBK console can't encode emoji)
+    if sys.platform == "win32":
+        import io
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+
     parser = argparse.ArgumentParser(
         prog="cagent",
         description="Concurrent agent workflow dispatcher",
@@ -54,10 +61,11 @@ def main() -> None:
     log_p.add_argument("--kind", default=None, help="Filter by event kind (tool_use, error, denied, text)")
 
     # --- clean ---
-    clean_p = sub.add_parser("clean", help="Clean up worktrees and branches")
+    clean_p = sub.add_parser("clean", help="Clean up worktrees and branches (memory preserved by default)")
     clean_p.add_argument("run_id", nargs="?", default=None, help="Run ID (default: all)")
     clean_p.add_argument("--all", action="store_true", help="Clean all runs")
     clean_p.add_argument("--force", "-f", action="store_true", help="Skip confirmation")
+    clean_p.add_argument("--memory", action="store_true", help="Also delete memory files (preserved by default)")
 
     # --- push ---
     push_p = sub.add_parser("push", help="Push a branch to origin (requires y/N confirmation)")
@@ -131,12 +139,14 @@ def _auth_preflight_check(claude_bin: str) -> None:
         result = subprocess.run(
             [claude_bin, "-p", "say hello", "--output-format", "json", "--max-turns", "1"],
             capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=30,
             env=os.environ.copy(),
         )
-        # Decode with error handling for Windows encoding issues
-        stdout = result.stdout.decode("utf-8", errors="replace") if result.stdout else ""
-        stderr = result.stderr.decode("utf-8", errors="replace") if result.stderr else ""
+        stdout = result.stdout or ""
+        stderr = result.stderr or ""
     except subprocess.TimeoutExpired:
         print("TIMEOUT")
         _print_auth_diagnostics()
@@ -255,6 +265,22 @@ def _print_task_timing(dashboard: "Dashboard") -> None:
         print(f"  [{tid}] {status:<6} {elapsed_str:>8}{tools}{sha}")
 
 
+def _prompt_clean_memory(memory_dir: Path) -> None:
+    """Ask user whether to keep or delete subagent memory files."""
+    import shutil
+
+    try:
+        response = input("  Delete memory files? [y/N] ").strip().lower()
+    except EOFError:
+        print("  Memory preserved.")
+        return
+    if response in ("y", "yes"):
+        shutil.rmtree(memory_dir, ignore_errors=True)
+        print("  Memory deleted.")
+    else:
+        print("  Memory preserved.")
+
+
 def _execute_run(
     all_tasks: list,
     dispatch_tasks: list,
@@ -263,7 +289,7 @@ def _execute_run(
     base_sha: str,
     repo_root: Path,
     args: argparse.Namespace,
-    merge_results: "Callable | None" = None,
+    merge_results: Callable | None = None,
     retry_hint: str | None = None,
 ) -> None:
     """Shared run logic: dispatch → integrate → summary."""
@@ -394,6 +420,12 @@ def _execute_run(
     else:
         print(f"Run completed in {elapsed} with no successful tasks to integrate.")
 
+    # Prompt to keep or delete memory
+    memory_dir = run_dir / "memory"
+    if memory_dir.exists() and any(memory_dir.iterdir()):
+        print(f"\n  Subagent memory: {memory_dir}")
+        _prompt_clean_memory(memory_dir)
+
 
 def _cmd_run(args: argparse.Namespace) -> None:
     """Execute the full run workflow: dispatch → integrate → summary."""
@@ -416,11 +448,15 @@ def _cmd_run(args: argparse.Namespace) -> None:
 
     # Resolve base SHA
     if args.base:
-        result = subprocess.run(
-            ["git", "rev-parse", args.base],
-            cwd=repo_root, capture_output=True, text=True, check=True,
-        )
-        base_sha = result.stdout.strip()
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", args.base],
+                cwd=repo_root, capture_output=True, text=True, check=True,
+            )
+            base_sha = result.stdout.strip()
+        except subprocess.CalledProcessError:
+            print(f"Error: invalid base '{args.base}' — not a valid branch or SHA.", file=sys.stderr)
+            sys.exit(1)
     else:
         base_sha = current_head(repo_root)
 
@@ -630,6 +666,18 @@ def _clean_worktrees(repo_root: Path, run_dir: Path, tasks: list, results: list)
                     pass  # Best effort
             # else: keep failed task worktree for debugging
 
+    # Clean integration worktree if all tasks succeeded
+    if all_ok:
+        integration_wt = repo_root / ".cagent" / "worktrees" / run_dir.name / "_integration"
+        if integration_wt.exists():
+            try:
+                subprocess.run(
+                    ["git", "worktree", "remove", "--force", str(integration_wt)],
+                    cwd=repo_root, capture_output=True, check=True,
+                )
+            except subprocess.CalledProcessError:
+                pass
+
 
 def _cmd_status(args: argparse.Namespace) -> None:
     """Print a one-shot dashboard table."""
@@ -641,7 +689,11 @@ def _cmd_status(args: argparse.Namespace) -> None:
         print("No dashboard data for this run.", file=sys.stderr)
         sys.exit(1)
 
-    data = json.loads(dashboard_path.read_text(encoding="utf-8"))
+    try:
+        data = json.loads(dashboard_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"Error reading dashboard: {e}", file=sys.stderr)
+        sys.exit(1)
     _print_dashboard_table(run_dir.name, data)
 
 
@@ -659,6 +711,11 @@ def _cmd_watch(args: argparse.Namespace) -> None:
 
     print("Press 'q' to quit.\n")
 
+    import os as _os
+    last_mtime: float = 0.0
+    last_data: dict | None = None
+    needs_redraw: bool = True
+
     while True:
         if stdin_has_key():
             key = read_key()
@@ -666,11 +723,27 @@ def _cmd_watch(args: argparse.Namespace) -> None:
                 break
 
         if dashboard_path.exists():
-            data = json.loads(dashboard_path.read_text(encoding="utf-8"))
-            # ANSI clear screen + move cursor home
-            sys.stdout.write("\033[2J\033[H")
-            _print_dashboard_table(run_dir.name, data)
-            sys.stdout.flush()
+            try:
+                mtime = _os.stat(dashboard_path).st_mtime
+            except OSError:
+                time.sleep(1)
+                continue
+            if mtime != last_mtime:
+                last_mtime = mtime
+                try:
+                    new_data = json.loads(dashboard_path.read_text(encoding="utf-8"))
+                    if new_data != last_data:
+                        last_data = new_data
+                        needs_redraw = True
+                except (json.JSONDecodeError, OSError):
+                    time.sleep(1)
+                    continue
+            if needs_redraw and last_data is not None:
+                needs_redraw = False
+                # ANSI clear screen + move cursor home
+                sys.stdout.write("\033[2J\033[H")
+                _print_dashboard_table(run_dir.name, last_data)
+                sys.stdout.flush()
 
         time.sleep(1)
 
@@ -723,16 +796,21 @@ def _print_dashboard_table(run_id: str, data: dict) -> None:
                 elapsed = f"{secs}s"
 
         # Activity — pad before adding ANSI codes
-        now = ""
+        now_raw = ""
         if tp.get("commit_sha"):
-            now = f"commit {tp['commit_sha'][:7]}"
+            now_raw = f"commit {tp['commit_sha'][:7]}"
         elif tp.get("last_activity"):
-            now = tp["last_activity"][:30]
+            now_raw = tp["last_activity"][:30]
         elif tp.get("fail_reason"):
-            reason_padded = f"{tp['fail_reason'][:30]:<30}"
-            now = f"\033[31m{reason_padded}\033[0m"
+            now_raw = f"{tp['fail_reason'][:30]}"
 
-        print(f"│ {tid:<10} │ {status_display} │ {elapsed:<8} │ {tool_count:<4} │ {now:<30} │")
+        now_padded = f"{now_raw:<30}"
+        if tp.get("fail_reason") and not tp.get("commit_sha"):
+            now = f"\033[31m{now_padded}\033[0m"
+        else:
+            now = now_padded
+
+        print(f"│ {tid:<10} │ {status_display} │ {elapsed:<8} │ {tool_count:<4} │ {now} │")
 
     print(f"└{'─'*12}┴{'─'*10}┴{'─'*10}┴{'─'*6}┴{'─'*32}┘")
 
@@ -773,6 +851,7 @@ def _print_events_formatted(path: Path, kind_filter: str | None) -> None:
 
 def _follow_events_formatted(path: Path, kind_filter: str | None) -> None:
     """Follow events file with human-readable output."""
+    print("(Press Ctrl+C to stop following)\n")
     with open(path, "r", encoding="utf-8") as f:
         # Print existing content first, then follow
         try:
@@ -798,7 +877,7 @@ def _print_event_line(line: str, kind_filter: str | None) -> None:
         return
 
     ts = ev.get("ts", 0)
-    ts_str = datetime.fromtimestamp(ts).strftime("%H:%M:%S") if ts else "??:??:??"
+    ts_str = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%H:%M:%S") if ts else "??:??:??"
     summary = ev.get("summary", "")
 
     # Color by kind
@@ -820,6 +899,7 @@ def _print_event_line(line: str, kind_filter: str | None) -> None:
 
 def _follow_file(path: Path) -> None:
     """Tail-follow a file (like tail -f)."""
+    print("(Press Ctrl+C to stop following)\n")
     with open(path, "r", encoding="utf-8") as f:
         # Print existing content first, then follow
         try:
@@ -864,11 +944,14 @@ def _cmd_clean(args: argparse.Namespace) -> None:
         return
 
     # Show what will be cleaned
-    print(f"Will clean {len(target_runs)} run(s):")
+    memory_note = " (including memory)" if args.memory else " (memory preserved)"
+    print(f"Will clean {len(target_runs)} run(s){memory_note}:")
     for rd in target_runs:
         wt_base = repo_root / ".cagent" / "worktrees" / rd.name
         wt_count = len(list(wt_base.iterdir())) if wt_base.exists() else 0
-        print(f"  {rd.name} ({wt_count} worktrees)")
+        mem_count = len(list((rd / "memory").iterdir())) if (rd / "memory").exists() else 0
+        mem_info = f", {mem_count} memory files" if mem_count else ""
+        print(f"  {rd.name} ({wt_count} worktrees{mem_info})")
 
     # Confirm
     if not args.force:
@@ -887,7 +970,7 @@ def _cmd_clean(args: argparse.Namespace) -> None:
         # Remove worktrees
         wt_base = repo_root / ".cagent" / "worktrees" / run_dir.name
         if wt_base.exists():
-            for wt in wt_base.iterdir():
+            for wt in list(wt_base.iterdir()):
                 try:
                     subprocess.run(
                         ["git", "worktree", "remove", "--force", str(wt)],
@@ -917,8 +1000,19 @@ def _cmd_clean(args: argparse.Namespace) -> None:
         except subprocess.CalledProcessError:
             pass
 
-        # Remove run directory
-        shutil.rmtree(run_dir, ignore_errors=True)
+        # Remove run directory contents, preserving memory unless --memory
+        memory_dir = run_dir / "memory"
+        if args.memory or not memory_dir.exists():
+            shutil.rmtree(run_dir, ignore_errors=True)
+        else:
+            # Remove everything except memory/
+            for item in list(run_dir.iterdir()):
+                if item.name == "memory":
+                    continue
+                if item.is_dir():
+                    shutil.rmtree(item, ignore_errors=True)
+                else:
+                    item.unlink(missing_ok=True)
         print(f"Cleaned {run_dir.name}")
 
 
@@ -979,11 +1073,13 @@ def _cmd_push(args: argparse.Namespace) -> None:
     result = subprocess.run(
         ["git", "push", "-u", "origin", branch],
         cwd=repo_root,
+        capture_output=True, text=True,
     )
     if result.returncode == 0:
         print(f"Pushed {branch} to origin.")
     else:
-        print("Push failed.", file=sys.stderr)
+        err = (result.stderr or result.stdout or "").strip()
+        print(f"Push failed: {err}" if err else "Push failed.", file=sys.stderr)
         sys.exit(1)
 
 

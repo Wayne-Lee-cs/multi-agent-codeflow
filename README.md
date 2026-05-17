@@ -1,8 +1,8 @@
 # cagent — Concurrent Agent Workflow
 
-> **Status: v1 alpha** — CLI framework and orchestration logic complete, but `claude -p`
-> authentication in headless mode needs resolution before end-to-end runs work.
-> See [CHECKLIST.md](CHECKLIST.md) for current progress.
+> **Status: v1.1** (evaluated 2026-05-15) — Core workflow operational: dispatch, worktree
+> isolation, cherry-pick integration, and conflict resolution all verified. 113 extreme tests
+> + 61 manual tests passed, 0 failed. See [CHECKLIST.md](CHECKLIST.md) for full breakdown.
 
 A personal code workflow built on Claude Code: one CLI command fans out to multiple
 agents working in parallel git worktrees on the same repository. Tasks start in a
@@ -74,7 +74,7 @@ Already-completed tasks are skipped. Use `cagent status` to find the run ID.
 ## Safety
 
 - cagent **never pushes automatically** — only `cagent push` with explicit y/N confirmation
-- Workers cannot run `git push`, `git reset --hard`, `rm -rf`, or other destructive commands
+- Workers cannot run `git push`, `git reset --hard`, `rm -rf`, `rm -fr`, or other destructive commands
 - All work happens in isolated git worktrees — your working tree is untouched
 - Failed tasks preserve their worktree for debugging
 
@@ -101,10 +101,11 @@ Three levels of monitoring:
 
 ## Known Issues
 
-- **`claude -p` authentication**: In some environments (e.g., OAuth-only Claude Max plans
-  with proxy), `claude -p` reports `apiKeySource: none` and fails with 403. Workaround:
-  ensure `claude -p "hello"` works standalone before running cagent. See PLAN.md §v1.1 for
-  the fix roadmap.
+- **`claude -p` authentication**: cagent runs a preflight auth check before starting. If it
+  fails, diagnostics are printed with suggested fixes. Ensure `claude -p "hello"` works
+  standalone. Use `--api-key` to pass an explicit key if needed.
+- **No automated tests**: 113 manual/extreme tests pass, but no pytest suite exists yet. This
+  is the top priority for v1.x.
 
 ## Requirements
 

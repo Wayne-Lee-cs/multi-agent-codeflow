@@ -10,6 +10,7 @@ from pathlib import Path
 from cagent.agent import _resolve_claude
 from cagent.memory import RunMemory
 from cagent.progress import Dashboard, Event, EventParser
+from cagent.safety import prepare_sandbox
 from cagent.tasks import Task
 
 
@@ -60,8 +61,16 @@ async def integrate(
                 dashboard=dashboard,
                 memory=memory,
             )
-        except Exception:
+        except Exception as e:
             success = False
+            if dashboard:
+                event = Event(
+                    ts=time.time(),
+                    kind="error",
+                    summary=f"cherry-pick task {task.id} exception: {e}",
+                    raw={},
+                )
+                dashboard.update("_integrator", event)
         if success:
             integrated.append(task)
         else:
@@ -136,6 +145,8 @@ async def _cherry_pick_one(
 
     # Restore .claude/ and .gitignore to HEAD before cherry-pick to avoid
     # false conflicts from sandbox artifacts that were removed from task commits.
+    # NOTE: these must run sequentially — parallel checkout on the same worktree
+    # would contend on .git/index.lock.
     await _run_git("checkout", "HEAD", "--", ".claude/", cwd=worktree_path, check=False)
     await _run_git("checkout", "HEAD", "--", ".gitignore", cwd=worktree_path, check=False)
 
@@ -217,10 +228,9 @@ async def _resolve_conflicts(
         f"have no <<<<<<< ======= >>>>>>> markers."
     )
 
-    # NOTE: Do NOT inject safety sandbox for integrator — the integrator agent
-    # needs full Bash access to run git add/cherry-pick --continue. The integrator
-    # is orchestrated by cagent and only runs specific git commands after conflict
-    # resolution, so the sandbox would block legitimate operations.
+    # Inject safety sandbox for integrator — blocks git push, rm -rf, etc.
+    # while allowing git add / cherry-pick --continue.
+    prepare_sandbox(worktree_path)
 
     if dashboard:
         event = Event(
@@ -291,11 +301,8 @@ async def _resolve_conflicts(
     # Verify no conflict markers remain in file contents.
     # Note: git status may still show UU (unmerged) because the integrator
     # edited the file without staging it. We check actual file content instead.
-    # Use git grep on tracked+modified source files only.
     grep_result = await _run_git(
         "grep", "-rl", "-E", r"^(<{7}|={7}|\|{7}|>{7})",
-        "--", "*.py", "*.md", "*.txt", "*.json", "*.js", "*.ts", "*.html", "*.css",
-        "*.yaml", "*.yml", "*.toml", "*.cfg", "*.ini", "*.sh", "*.cmd", "*.bat",
         cwd=worktree_path,
         check=False,
     )
@@ -325,9 +332,9 @@ async def _resolve_conflicts(
         await _run_git("cherry-pick", "--abort", cwd=worktree_path, check=False)
         return False
 
-    # Write integrator memory
+    # Append integrator memory (preserves previous conflict resolutions)
     if memory:
-        memory.write("_integrator", (
+        memory.append("_integrator", (
             f"Resolved conflict for task {task.id} ({task.prompt[:60]})\n"
             f"Conflicting files: {', '.join(conflict_files)}\n"
             f"Preserved intent of both sides."
