@@ -36,6 +36,8 @@ class TaskProgress:
     bytes_seen: int = 0
     commit_sha: str | None = None
     fail_reason: str | None = None
+    tokens_in: int = 0
+    tokens_out: int = 0
 
 
 class EventParser:
@@ -90,9 +92,10 @@ class EventParser:
 
         if typ == "result":
             subtype = obj.get("subtype", "")
+            usage = obj.get("usage")
             if subtype == "success":
-                return [Event(ts=ts, kind="done", summary="done", raw=obj)]
-            return [Event(ts=ts, kind="error", summary=f"error: {subtype}", raw=obj)]
+                return [Event(ts=ts, kind="done", summary="done", raw=obj, usage=usage)]
+            return [Event(ts=ts, kind="error", summary=f"error: {subtype}", raw=obj, usage=usage)]
 
         return []
 
@@ -232,6 +235,9 @@ class Dashboard:
         if event.kind == "done":
             tp.status = "done"
             tp.ended_at = event.ts
+            if event.usage:
+                tp.tokens_in += event.usage.get("input_tokens", 0)
+                tp.tokens_out += event.usage.get("output_tokens", 0)
 
         if event.kind == "error":
             tp.status = "failed"

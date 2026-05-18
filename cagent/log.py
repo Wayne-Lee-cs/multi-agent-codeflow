@@ -30,6 +30,13 @@ class LinePrinter:
             except asyncio.TimeoutError:
                 continue
             except asyncio.CancelledError:
+                # Flush remaining events before exiting
+                while not self._queue.empty():
+                    try:
+                        task_id, event = self._queue.get_nowait()
+                        self._print_line(task_id, event)
+                    except asyncio.QueueEmpty:
+                        break
                 break
 
             self._print_line(task_id, event)

@@ -240,3 +240,87 @@ class TestInvalidDependencies:
         tasks = [_make_task("A", depends_on=["Z"])]
         with pytest.raises(ValueError, match="non-existent task"):
             asyncio.run(run(tasks, concurrency=4, run_dir=run_dir, base_sha="abc123", repo_root=repo_root))
+
+
+class TestRetry:
+    """Retry logic for transient failures."""
+
+    @pytest.mark.asyncio
+    async def test_retry_timeout_then_success(self, run_dir, repo_root):
+        """Timeout failure → retry → success."""
+        call_count = {"count": 0}
+
+        def runner(task, **kwargs):
+            call_count["count"] += 1
+            if call_count["count"] == 1:
+                return AgentResult(task_id=task.id, status="failed", fail_reason="timeout")
+            return AgentResult(task_id=task.id, status="done", commit_sha=f"sha-{task.id}")
+
+        tasks = [_make_task("001")]
+        with patch("cagent.dispatcher.run_agent", side_effect=runner):
+            with patch("cagent.dispatcher.create_worktree"):
+                results = await run(
+                    tasks, concurrency=4, run_dir=run_dir,
+                    base_sha="abc123", repo_root=repo_root, retries=1,
+                )
+        assert results[0].status == "done"
+        assert call_count["count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_retry_exhausted(self, run_dir, repo_root):
+        """All retries exhausted → final failure."""
+        call_count = {"count": 0}
+
+        def runner(task, **kwargs):
+            call_count["count"] += 1
+            return AgentResult(task_id=task.id, status="failed", fail_reason="timeout")
+
+        tasks = [_make_task("001")]
+        with patch("cagent.dispatcher.run_agent", side_effect=runner):
+            with patch("cagent.dispatcher.create_worktree"):
+                results = await run(
+                    tasks, concurrency=4, run_dir=run_dir,
+                    base_sha="abc123", repo_root=repo_root, retries=2,
+                )
+        assert results[0].status == "failed"
+        assert call_count["count"] == 3  # initial + 2 retries
+
+    @pytest.mark.asyncio
+    async def test_non_retryable_no_retry(self, run_dir, repo_root):
+        """Non-retryable error (code error) → no retry."""
+        call_count = {"count": 0}
+
+        def runner(task, **kwargs):
+            call_count["count"] += 1
+            return AgentResult(task_id=task.id, status="failed", fail_reason="exit code 1")
+
+        tasks = [_make_task("001")]
+        with patch("cagent.dispatcher.run_agent", side_effect=runner):
+            with patch("cagent.dispatcher.create_worktree"):
+                results = await run(
+                    tasks, concurrency=4, run_dir=run_dir,
+                    base_sha="abc123", repo_root=repo_root, retries=3,
+                )
+        assert results[0].status == "failed"
+        assert call_count["count"] == 1  # no retry
+
+    @pytest.mark.asyncio
+    async def test_retry_count_tracked(self, run_dir, repo_root):
+        """task.retry_count is updated on each attempt."""
+        call_count = {"count": 0}
+
+        def runner(task, **kwargs):
+            call_count["count"] += 1
+            if call_count["count"] <= 2:
+                return AgentResult(task_id=task.id, status="failed", fail_reason="timeout")
+            return AgentResult(task_id=task.id, status="done", commit_sha=f"sha-{task.id}")
+
+        tasks = [_make_task("001")]
+        with patch("cagent.dispatcher.run_agent", side_effect=runner):
+            with patch("cagent.dispatcher.create_worktree"):
+                results = await run(
+                    tasks, concurrency=4, run_dir=run_dir,
+                    base_sha="abc123", repo_root=repo_root, retries=2,
+                )
+        assert results[0].status == "done"
+        assert tasks[0].retry_count == 2  # last attempt index

@@ -14,6 +14,17 @@ from cagent.tasks import Task, dump_state
 from cagent.worktree import create_worktree
 
 
+_RETRYABLE_REASONS = ("timeout", "rate_limit", "rate limit", "network", "connection")
+
+
+def _is_retryable(fail_reason: str | None) -> bool:
+    """Check if a failure reason is retryable (transient error)."""
+    if not fail_reason:
+        return False
+    reason_lower = fail_reason.lower()
+    return any(keyword in reason_lower for keyword in _RETRYABLE_REASONS)
+
+
 async def run(
     tasks: list[Task],
     concurrency: int,
@@ -25,6 +36,7 @@ async def run(
     dashboard: Dashboard | None = None,
     memory: RunMemory | None = None,
     conventions: str = "",
+    retries: int = 0,
 ) -> list[AgentResult]:
     """Run all tasks concurrently with bounded parallelism.
 
@@ -47,6 +59,16 @@ async def run(
         if now - _last_dump_time >= _DUMP_THROTTLE:
             dump_state(run_dir, tasks)
             _last_dump_time = now
+
+    async def _reset_worktree(worktree_path: Path) -> None:
+        """Reset worktree to base_sha to undo partial changes before retry."""
+        proc = await asyncio.create_subprocess_exec(
+            "git", "reset", "--hard", base_sha,
+            cwd=str(worktree_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.wait()
 
     async def _run_one(task: Task, stagger: int) -> None:
         # Stagger worktree creation to avoid concurrent git index.lock contention.
@@ -74,32 +96,57 @@ async def run(
                         _throttled_dump()
                     return
 
-                # Update task status
-                async with lock:
-                    task.status = "running"
-                    _throttled_dump()
-
-                # Build shared context from completed tasks
-                shared_ctx = ""
-                if memory:
+                # Retry loop
+                max_attempts = retries + 1
+                for attempt in range(max_attempts):
+                    # Update task status
                     async with lock:
-                        completed_ids = [t.id for t in tasks if t.status in ("done", "noop")]
-                    shared_ctx = memory.build_shared_context(completed_ids)
+                        task.status = "running"
+                        task.retry_count = attempt
+                        _throttled_dump()
 
-                # Run agent
-                result = await run_agent(
-                    task=task,
-                    worktree_path=worktree_path,
-                    run_dir=run_dir,
-                    timeout=timeout,
-                    model_override=worker_model_override,
-                    dashboard=dashboard,
-                    shared_context=shared_ctx,
-                    memory=memory,
-                    conventions=conventions,
-                )
+                    # Build shared context from completed tasks
+                    shared_ctx = ""
+                    if memory:
+                        async with lock:
+                            completed_ids = [t.id for t in tasks if t.status in ("done", "noop")]
+                        shared_ctx = memory.build_shared_context(completed_ids)
 
-                # Update task with result
+                    # Run agent
+                    result = await run_agent(
+                        task=task,
+                        worktree_path=worktree_path,
+                        run_dir=run_dir,
+                        timeout=timeout,
+                        model_override=worker_model_override,
+                        dashboard=dashboard,
+                        shared_context=shared_ctx,
+                        memory=memory,
+                        conventions=conventions,
+                    )
+
+                    # Check if retry is warranted
+                    if result.status != "failed" or attempt >= max_attempts - 1:
+                        break
+                    if not _is_retryable(result.fail_reason):
+                        break
+
+                    # Retry with exponential backoff
+                    backoff = min(2 ** attempt, 30)
+                    if dashboard:
+                        dashboard.set_task_status(
+                            task.id, "running",
+                            fail_reason=f"retry {attempt + 1}/{retries} after {backoff}s (reason: {result.fail_reason})",
+                        )
+                    await asyncio.sleep(backoff)
+
+                    # Reset worktree to base for clean retry (best effort)
+                    try:
+                        await _reset_worktree(worktree_path)
+                    except Exception:
+                        pass  # Worktree reset failure should not block retry
+
+                # Update task with final result
                 async with lock:
                     task.status = result.status
                     task.commit_sha = result.commit_sha

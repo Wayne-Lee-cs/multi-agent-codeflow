@@ -34,6 +34,8 @@ class AgentResult:
     commit_sha: str | None = None
     fail_reason: str | None = None
     output_summary: str = ""  # agent's key output text (for memory)
+    tokens_in: int = 0
+    tokens_out: int = 0
 
 
 async def run_agent(
@@ -106,83 +108,104 @@ async def run_agent(
             fail_reason=f"failed to launch claude: {e}",
         )
 
-    # Send prompt via stdin pipe
-    if proc.stdin is None:
-        raise RuntimeError("subprocess stdin pipe was not created")
+    # Write PID file for cancellation support
+    pid_dir = run_dir / "pids"
+    pid_dir.mkdir(parents=True, exist_ok=True)
+    pid_path = pid_dir / f"task-{task.id}.pid"
     try:
-        proc.stdin.write(prompt.encode("utf-8"))
-        await proc.stdin.drain()
-    finally:
-        proc.stdin.close()
-        await proc.stdin.wait_closed()
+        pid_path.write_text(str(proc.pid), encoding="utf-8")
+    except OSError:
+        pass  # Best effort
 
-    # 5. Stream stdout line by line (wrapped in timeout)
-    if proc.stdout is None:
-        raise RuntimeError("subprocess stdout pipe was not created")
-    last_lines: list[str] = []  # keep last N lines for error context
     try:
-        async with asyncio.timeout(timeout):
-            with open(log_path, "a", encoding="utf-8") as log_file:
-                async for raw_line in proc.stdout:
-                    line = raw_line.decode("utf-8", errors="replace")
-                    log_file.write(line)
-                    log_file.flush()
-                    stripped = line.strip()
-                    if stripped:
-                        last_lines.append(stripped)
-                        if len(last_lines) > 5:
-                            last_lines.pop(0)
-
-                    for event in parser.feed(line):
-                        if dashboard:
-                            dashboard.update(task.id, event)
-                        if event.kind == "text" and event.summary:
-                            output_texts.append(event.summary)
-    except TimeoutError:
-        proc.terminate()
+        # Send prompt via stdin pipe
+        if proc.stdin is None:
+            raise RuntimeError("subprocess stdin pipe was not created")
         try:
-            async with asyncio.timeout(3):
-                await proc.wait()
+            proc.stdin.write(prompt.encode("utf-8"))
+            await proc.stdin.drain()
+        finally:
+            proc.stdin.close()
+            await proc.stdin.wait_closed()
+
+        # 5. Stream stdout line by line (wrapped in timeout)
+        if proc.stdout is None:
+            raise RuntimeError("subprocess stdout pipe was not created")
+        last_lines: list[str] = []  # keep last N lines for error context
+        try:
+            async with asyncio.timeout(timeout):
+                with open(log_path, "a", encoding="utf-8") as log_file:
+                    async for raw_line in proc.stdout:
+                        line = raw_line.decode("utf-8", errors="replace")
+                        log_file.write(line)
+                        log_file.flush()
+                        stripped = line.strip()
+                        if stripped:
+                            last_lines.append(stripped)
+                            if len(last_lines) > 5:
+                                last_lines.pop(0)
+
+                        for event in parser.feed(line):
+                            if dashboard:
+                                dashboard.update(task.id, event)
+                            if event.kind == "text" and event.summary:
+                                output_texts.append(event.summary)
         except TimeoutError:
-            proc.kill()
-            await proc.wait()
-        summary = "\n".join(output_texts[-5:])
-        if memory and summary:
-            memory.write(task.id, summary)
-        if dashboard:
-            dashboard.set_task_status(task.id, "failed", fail_reason="timeout")
-        return AgentResult(
-            task_id=task.id, status="failed", fail_reason="timeout",
-            output_summary=summary,
-        )
+            proc.terminate()
+            try:
+                async with asyncio.timeout(3):
+                    await proc.wait()
+            except TimeoutError:
+                proc.kill()
+                await proc.wait()
+            summary = "\n".join(output_texts[-5:])
+            if memory and summary:
+                memory.write(task.id, summary)
+            if dashboard:
+                dashboard.set_task_status(task.id, "failed", fail_reason="timeout")
+            return AgentResult(
+                task_id=task.id, status="failed", fail_reason="timeout",
+                output_summary=summary,
+            )
 
-    # 6. Wait for process to fully exit and check return code
-    await proc.wait()
-    if proc.returncode != 0:
-        fail_reason = f"claude exited with code {proc.returncode}"
-        if last_lines:
-            # Include last meaningful output for diagnostics
-            tail = "; ".join(last_lines[-3:])
-            fail_reason += f" — {tail[:200]}"
-        summary = "\n".join(output_texts[-5:])
-        if memory and summary:
-            memory.write(task.id, summary)
-        if dashboard:
-            dashboard.set_task_status(task.id, "failed", fail_reason=fail_reason)
-        return AgentResult(
-            task_id=task.id, status="failed", fail_reason=fail_reason,
-            output_summary=summary,
-        )
+        # 6. Wait for process to fully exit and check return code
+        await proc.wait()
+        if proc.returncode != 0:
+            fail_reason = f"claude exited with code {proc.returncode}"
+            if last_lines:
+                tail = "; ".join(last_lines[-3:])
+                fail_reason += f" — {tail[:200]}"
+            summary = "\n".join(output_texts[-5:])
+            if memory and summary:
+                memory.write(task.id, summary)
+            if dashboard:
+                dashboard.set_task_status(task.id, "failed", fail_reason=fail_reason)
+            return AgentResult(
+                task_id=task.id, status="failed", fail_reason=fail_reason,
+                output_summary=summary,
+            )
 
-    # 7. Commit changes
-    result = await _commit_result(task, worktree_path, dashboard)
-    result.output_summary = "\n".join(output_texts[-10:])
+        # 7. Commit changes
+        result = await _commit_result(task, worktree_path, dashboard)
+        result.output_summary = "\n".join(output_texts[-10:])
 
-    # 8. Write memory
-    if memory and result.output_summary:
-        memory.write(task.id, result.output_summary)
+        # 8. Propagate token usage from dashboard
+        if dashboard and task.id in dashboard.tasks:
+            tp = dashboard.tasks[task.id]
+            result.tokens_in = tp.tokens_in
+            result.tokens_out = tp.tokens_out
 
-    return result
+        # 9. Write memory
+        if memory and result.output_summary:
+            memory.write(task.id, result.output_summary)
+
+        return result
+    finally:
+        # Clean up PID file
+        try:
+            pid_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 async def _commit_result(

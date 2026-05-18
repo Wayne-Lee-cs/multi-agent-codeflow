@@ -60,7 +60,14 @@ class RunMemory:
         the model's context window.
         """
         ids_tuple = tuple(sorted(task_ids))
-        if ids_tuple == self._cached_ids:
+        # Include per-file mtimes so cache invalidates when content changes
+        mtimes = tuple(
+            (self._dir / f"{tid}.md").stat().st_mtime
+            if (self._dir / f"{tid}.md").exists() else 0.0
+            for tid in sorted(task_ids)
+        )
+        cache_key = (ids_tuple, mtimes)
+        if cache_key == self._cached_ids:
             return self._cached_context
         parts = []
         total = 0
@@ -73,7 +80,7 @@ class RunMemory:
                 parts.append(entry)
                 total += len(entry)
         result = "\n\n".join(parts)
-        self._cached_ids = ids_tuple
+        self._cached_ids = cache_key
         self._cached_context = result
         return result
 

@@ -177,6 +177,33 @@ class TestEventParser:
         assert len(events) == 1
         assert events[0].kind == "done"
 
+    def test_result_success_with_usage(self):
+        obj = {
+            "type": "result",
+            "subtype": "success",
+            "usage": {"input_tokens": 1500, "output_tokens": 800},
+        }
+        events = self.parser.feed(json.dumps(obj))
+        assert len(events) == 1
+        assert events[0].kind == "done"
+        assert events[0].usage == {"input_tokens": 1500, "output_tokens": 800}
+
+    def test_result_error_with_usage(self):
+        obj = {
+            "type": "result",
+            "subtype": "error",
+            "usage": {"input_tokens": 500, "output_tokens": 100},
+        }
+        events = self.parser.feed(json.dumps(obj))
+        assert len(events) == 1
+        assert events[0].kind == "error"
+        assert events[0].usage == {"input_tokens": 500, "output_tokens": 100}
+
+    def test_result_no_usage(self):
+        obj = {"type": "result", "subtype": "success"}
+        events = self.parser.feed(json.dumps(obj))
+        assert events[0].usage is None
+
     def test_result_error(self):
         obj = {"type": "result", "subtype": "error"}
         events = self.parser.feed(json.dumps(obj))
@@ -318,3 +345,41 @@ class TestDashboard:
         tp = dash.tasks["001"]
         assert tp.last_event is not None
         assert tp.last_event.kind == "text"  # default
+
+    def test_done_event_accumulates_tokens(self, tmp_path):
+        dash = Dashboard(tmp_path)
+        usage = {"input_tokens": 2000, "output_tokens": 500}
+        event = Event(ts=time.time(), kind="done", summary="done", raw={}, usage=usage)
+        dash.update("001", event)
+        tp = dash.tasks["001"]
+        assert tp.tokens_in == 2000
+        assert tp.tokens_out == 500
+
+    def test_done_event_no_usage(self, tmp_path):
+        dash = Dashboard(tmp_path)
+        event = Event(ts=time.time(), kind="done", summary="done", raw={})
+        dash.update("001", event)
+        tp = dash.tasks["001"]
+        assert tp.tokens_in == 0
+        assert tp.tokens_out == 0
+
+    def test_tokens_persisted_in_dashboard_json(self, tmp_path):
+        dash = Dashboard(tmp_path)
+        usage = {"input_tokens": 3000, "output_tokens": 1200}
+        dash.update("001", Event(ts=time.time(), kind="done", summary="done", raw={}, usage=usage))
+        dash.flush()
+        data = json.loads((tmp_path / "dashboard.json").read_text(encoding="utf-8"))
+        assert data["001"]["tokens_in"] == 3000
+        assert data["001"]["tokens_out"] == 1200
+
+    def test_tokens_restored_on_resume(self, tmp_path):
+        # First run
+        dash1 = Dashboard(tmp_path)
+        usage = {"input_tokens": 1000, "output_tokens": 400}
+        dash1.update("001", Event(ts=time.time(), kind="done", summary="done", raw={}, usage=usage))
+        dash1.flush()
+
+        # Resume
+        dash2 = Dashboard(tmp_path)
+        assert dash2.tasks["001"].tokens_in == 1000
+        assert dash2.tasks["001"].tokens_out == 400

@@ -361,10 +361,12 @@ async def _run_git(
     cwd: Path,
     env: dict | None = None,
     check: bool = True,
+    timeout: float = 60,
 ) -> _GitResult:
     """Run a git command and return stdout/stderr/returncode.
 
     If check=True (default), raises RuntimeError on non-zero exit code.
+    Timeout kills the subprocess after *timeout* seconds (default 60).
     """
     if env is None:
         env = os.environ.copy()
@@ -375,7 +377,16 @@ async def _run_git(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout_bytes, stderr_bytes = await proc.communicate()
+    try:
+        stdout_bytes, stderr_bytes = await asyncio.wait_for(
+            proc.communicate(), timeout=timeout
+        )
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise RuntimeError(
+            f"git {' '.join(args)} timed out after {timeout}s"
+        ) from None
     result = _GitResult(
         returncode=proc.returncode or 0,
         stdout=stdout_bytes.decode("utf-8", errors="replace"),

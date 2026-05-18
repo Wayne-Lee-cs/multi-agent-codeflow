@@ -39,6 +39,7 @@ def main() -> None:
     run_p.add_argument("--worker-model", default=None, help="Model override for workers")
     run_p.add_argument("--integrator-model", default=None, help="Model override for integrator")
     run_p.add_argument("--timeout", type=int, default=1800, help="Per-agent timeout in seconds")
+    run_p.add_argument("--retries", type=int, default=0, help="Max retries for transient failures (default: 0)")
     run_p.add_argument("--quiet", action="store_true", help="Only print START/DONE/FAIL events")
     run_p.add_argument("--api-key", default=None, help="Explicit API key for claude -p subprocesses")
     run_p.add_argument("--dry-run", action="store_true", help="Show plan without executing")
@@ -80,6 +81,11 @@ def main() -> None:
     plan_p.add_argument("--ref", help="Reference file to include (e.g. design.md)")
     plan_p.add_argument("--model", help="Model override for the architect agent")
 
+    # --- cancel ---
+    cancel_p = sub.add_parser("cancel", help="Cancel a running task")
+    cancel_p.add_argument("task_id", help="Task ID to cancel (e.g. 001)")
+    cancel_p.add_argument("--run", default=None, help="Run ID (default: latest)")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -95,6 +101,7 @@ def main() -> None:
         "push": _cmd_push,
         "branches": _cmd_branches,
         "plan": _cmd_plan,
+        "cancel": _cmd_cancel,
     }
     handlers[args.command](args)
 
@@ -213,10 +220,14 @@ def _print_auth_diagnostics() -> None:
 
 def _get_repo_root() -> Path:
     """Find the git repo root."""
-    result = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel"],
-        capture_output=True, text=True, check=True,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, check=True,
+        )
+    except subprocess.CalledProcessError:
+        print("Error: not inside a git repository.", file=sys.stderr)
+        sys.exit(1)
     return Path(result.stdout.strip())
 
 
@@ -351,6 +362,7 @@ def _execute_run(
                 dashboard=dashboard,
                 memory=memory,
                 conventions=conventions,
+                retries=args.retries,
             )
 
             if merge_results:
@@ -663,6 +675,11 @@ def _write_summary(
     noop = sum(1 for t in tasks if t.status == "noop")
     lines.append(f"\n**{done} done, {failed} failed, {noop} skipped**\n")
 
+    total_in = sum(getattr(t, "tokens_in", 0) for t in tasks)
+    total_out = sum(getattr(t, "tokens_out", 0) for t in tasks)
+    if total_in or total_out:
+        lines.append(f"Tokens: {total_in:,} in, {total_out:,} out\n")
+
     lines.append("\n## Tasks\n")
     for t in tasks:
         status_icon = {"done": "OK", "failed": "FAIL", "noop": "SKIP"}.get(t.status, "?")
@@ -799,10 +816,20 @@ def _print_dashboard_table(run_id: str, data: dict) -> None:
     print(f"RUN: {run_id} │ {' │ '.join(status_parts)}")
     print()
 
-    # Table
-    print(f"┌{'─'*12}┬{'─'*10}┬{'─'*10}┬{'─'*6}┬{'─'*32}┐")
-    print(f"│ {'task':<10} │ {'status':<8} │ {'elapsed':<8} │ {'tool':<4} │ {'activity':<30} │")
-    print(f"├{'─'*12}┼{'─'*10}┼{'─'*10}┼{'─'*6}┼{'─'*32}┤")
+    # Check if any task has token data
+    has_tokens = any(tp.get("tokens_in", 0) or tp.get("tokens_out", 0) for tp in data.values())
+
+    if has_tokens:
+        print(f"┌{'─'*12}┬{'─'*10}┬{'─'*10}┬{'─'*6}┬{'─'*14}┬{'─'*32}┐")
+        print(f"│ {'task':<10} │ {'status':<8} │ {'elapsed':<8} │ {'tool':<4} │ {'tokens':<12} │ {'activity':<30} │")
+        print(f"├{'─'*12}┼{'─'*10}┼{'─'*10}┼{'─'*6}┼{'─'*14}┼{'─'*32}┤")
+    else:
+        print(f"┌{'─'*12}┬{'─'*10}┬{'─'*10}┬{'─'*6}┬{'─'*32}┐")
+        print(f"│ {'task':<10} │ {'status':<8} │ {'elapsed':<8} │ {'tool':<4} │ {'activity':<30} │")
+        print(f"├{'─'*12}┼{'─'*10}┼{'─'*10}┼{'─'*6}┼{'─'*32}┤")
+
+    total_tokens_in = 0
+    total_tokens_out = 0
 
     for tid in sorted(data.keys()):
         tp = data[tid]
@@ -845,9 +872,22 @@ def _print_dashboard_table(run_id: str, data: dict) -> None:
         else:
             now = now_padded
 
-        print(f"│ {tid:<10} │ {status_display} │ {elapsed:<8} │ {tool_count:<4} │ {now} │")
+        if has_tokens:
+            t_in = tp.get("tokens_in", 0)
+            t_out = tp.get("tokens_out", 0)
+            total_tokens_in += t_in
+            total_tokens_out += t_out
+            tok = f"{t_in:,}→{t_out:,}" if (t_in or t_out) else ""
+            print(f"│ {tid:<10} │ {status_display} │ {elapsed:<8} │ {tool_count:<4} │ {tok:<12} │ {now} │")
+        else:
+            print(f"│ {tid:<10} │ {status_display} │ {elapsed:<8} │ {tool_count:<4} │ {now} │")
 
-    print(f"└{'─'*12}┴{'─'*10}┴{'─'*10}┴{'─'*6}┴{'─'*32}┘")
+    if has_tokens:
+        print(f"└{'─'*12}┴{'─'*10}┴{'─'*10}┴{'─'*6}┴{'─'*14}┴{'─'*32}┘")
+        if total_tokens_in or total_tokens_out:
+            print(f"\nTotal tokens: {total_tokens_in:,} in, {total_tokens_out:,} out")
+    else:
+        print(f"└{'─'*12}┴{'─'*10}┴{'─'*10}┴{'─'*6}┴{'─'*32}┘")
 
 
 def _cmd_log(args: argparse.Namespace) -> None:
@@ -1116,6 +1156,50 @@ def _cmd_push(args: argparse.Namespace) -> None:
         err = (result.stderr or result.stdout or "").strip()
         print(f"Push failed: {err}" if err else "Push failed.", file=sys.stderr)
         sys.exit(1)
+
+
+def _cmd_cancel(args: argparse.Namespace) -> None:
+    """Cancel a running task by sending SIGTERM to its subprocess."""
+    import os
+    import signal
+
+    repo_root = _get_repo_root()
+    run_dir = _find_run_dir(repo_root, args.run)
+
+    task_id = args.task_id.replace("task-", "")
+    pid_path = run_dir / "pids" / f"task-{task_id}.pid"
+
+    if not pid_path.exists():
+        print(f"No PID file found for task-{task_id}. Task may not be running.", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        pid = int(pid_path.read_text(encoding="utf-8").strip())
+    except (ValueError, OSError) as e:
+        print(f"Failed to read PID file: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+        print(f"Sent SIGTERM to process {pid} (task-{task_id})")
+    except ProcessLookupError:
+        print(f"Process {pid} not found. Task may have already finished.", file=sys.stderr)
+        pid_path.unlink(missing_ok=True)
+        sys.exit(1)
+    except PermissionError:
+        print(f"Permission denied sending signal to process {pid}.", file=sys.stderr)
+        sys.exit(1)
+
+    # Update dashboard
+    dashboard_path = run_dir / "dashboard.json"
+    if dashboard_path.exists():
+        try:
+            from cagent.progress import Dashboard
+            dashboard = Dashboard(run_dir)
+            dashboard.set_task_status(task_id, "failed", fail_reason="cancelled by user")
+            print(f"Task-{task_id} marked as cancelled in dashboard.")
+        except Exception:
+            pass  # Best effort
 
 
 def _cmd_plan(args: argparse.Namespace) -> None:

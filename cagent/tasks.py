@@ -21,6 +21,8 @@ class Task:
     commit_sha: str | None = None
     log_path: Path = field(default_factory=lambda: Path(os.devnull))
     depends_on: list[str] = field(default_factory=list)  # v2 hook, unused in v1
+    retry_count: int = 0
+    max_retries: int = 0
 
 
 def parse_tasks_file(path: str | Path, run_id: str) -> list[Task]:
