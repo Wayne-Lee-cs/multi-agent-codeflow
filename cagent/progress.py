@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Literal
 
@@ -161,10 +161,37 @@ class EventParser:
         return name
 
 
+def _task_progress_dict(tp: TaskProgress) -> dict:
+    """Build a serializable dict from TaskProgress, excluding large raw data."""
+    last_ev = tp.last_event
+    return {
+        "task_id": tp.task_id,
+        "status": tp.status,
+        "started_at": tp.started_at,
+        "ended_at": tp.ended_at,
+        "last_event": {
+            "ts": last_ev.ts if last_ev else None,
+            "kind": last_ev.kind if last_ev else None,
+            "summary": last_ev.summary if last_ev else None,
+            "raw": {"summary": last_ev.summary[:200] if last_ev and last_ev.summary else ""},
+            "raw_line_len": last_ev.raw_line_len if last_ev else None,
+            "usage": last_ev.usage if last_ev else None,
+        } if last_ev else None,
+        "last_activity": tp.last_activity,
+        "tool_count": tp.tool_count,
+        "bytes_seen": tp.bytes_seen,
+        "commit_sha": tp.commit_sha,
+        "fail_reason": tp.fail_reason,
+        "tokens_in": tp.tokens_in,
+        "tokens_out": tp.tokens_out,
+    }
+
+
 class Dashboard:
     """Tracks progress of all tasks, persists to dashboard.json."""
 
     _DASHBOARD_THROTTLE = 1.0  # seconds between dashboard.json writes
+    _IO_THROTTLE = 0.5  # seconds between per-task file writes
 
     def __init__(self, run_dir: Path):
         self.run_dir = run_dir
@@ -176,6 +203,9 @@ class Dashboard:
         self._on_event: Callable[[str, Event], None] | None = None
         self._last_dashboard_write: float = 0.0
         self._dashboard_dirty: bool = False
+        self._event_buffers: dict[str, list[str]] = {}
+        self._dirty_progress: set[str] = set()
+        self._last_io_flush: float = 0.0
 
         # Load existing dashboard data if present (for resume support)
         dashboard_path = run_dir / "dashboard.json"
@@ -193,7 +223,7 @@ class Dashboard:
                                 summary=v.get("summary", ""),
                                 raw=v.get("raw", {}),
                             )
-                        elif hasattr(tp, k):
+                        elif k in TaskProgress.__dataclass_fields__:
                             setattr(tp, k, v)
                     self.tasks[tid] = tp
             except (json.JSONDecodeError, KeyError, TypeError):
@@ -233,24 +263,27 @@ class Dashboard:
             tp.last_activity = f"DENIED: {event.summary}"
 
         if event.kind == "done":
-            tp.status = "done"
-            tp.ended_at = event.ts
+            # Don't set tp.status here — set_task_status() is the sole
+            # authority for final status transitions. The stream "done" event
+            # fires before the commit step, so setting status here would be
+            # premature. Only collect token usage.
             if event.usage:
                 tp.tokens_in += event.usage.get("input_tokens", 0)
                 tp.tokens_out += event.usage.get("output_tokens", 0)
 
         if event.kind == "error":
-            tp.status = "failed"
-            tp.ended_at = event.ts
-            tp.fail_reason = event.summary
+            # Don't set tp.status here — set_task_status() handles it after
+            # the full agent lifecycle completes.
+            tp.last_activity = f"error: {event.summary[:60]}"
 
-        # Persist per-task progress
-        self._write_task_progress(tp)
-        # Append to events.jsonl
-        self._append_event(task_id, event)
+        # Buffer per-task progress and event for periodic flush
+        self._dirty_progress.add(task_id)
+        self._buffer_event(task_id, event)
         # Notify event handler (LinePrinter)
         if self._on_event:
             self._on_event(task_id, event)
+        # Periodic I/O flush
+        self._maybe_flush_io()
         # Update dashboard
         self._write_dashboard()
 
@@ -260,9 +293,13 @@ class Dashboard:
             self.tasks[task_id] = TaskProgress(task_id=task_id)
         tp = self.tasks[task_id]
         tp.status = status  # type: ignore
+        if status in ("done", "noop") and "fail_reason" not in kwargs:
+            tp.fail_reason = None
         if status in ("done", "failed", "noop") and tp.ended_at is None:
             tp.ended_at = time.time()
         for k, v in kwargs.items():
+            if k not in TaskProgress.__dataclass_fields__:
+                raise ValueError(f"Unknown TaskProgress field: {k!r}")
             setattr(tp, k, v)
 
         # Create a synthetic event for persistence + printer notification
@@ -279,31 +316,63 @@ class Dashboard:
             event = None
 
         if event is not None:
-            # Persist event + notify printer, but don't let update() overwrite status
-            self._append_event(task_id, event)
+            self._buffer_event(task_id, event)
             if self._on_event:
                 self._on_event(task_id, event)
 
-        self._write_task_progress(tp)
-        self._write_dashboard(force=status in ("done", "failed", "noop"))
+        self._dirty_progress.add(task_id)
+        is_final = status in ("done", "failed", "noop")
+        if is_final:
+            self._flush_io()
+        else:
+            self._maybe_flush_io()
+        self._write_dashboard(force=is_final)
 
     def get_snapshot(self) -> dict:
-        """Return a serializable snapshot of all task progress."""
-        result = {}
-        for tid, tp in self.tasks.items():
-            result[tid] = asdict(tp)
-        return result
+        """Return a serializable snapshot of all task progress.
 
-    def _write_task_progress(self, tp: TaskProgress) -> None:
-        d = asdict(tp)
-        target = self._progress_dir / f"task-{tp.task_id}.json"
-        atomic_write(target, json.dumps(d, indent=2, ensure_ascii=False))
+        Manual dict construction avoids asdict() recursively serializing
+        last_event.raw (which can be large), keeping I/O lightweight.
+        """
+        return {tid: _task_progress_dict(tp) for tid, tp in self.tasks.items()}
 
-    def _append_event(self, task_id: str, event: Event) -> None:
-        target = self._events_dir / f"task-{task_id}.jsonl"
-        line = json.dumps(asdict(event), ensure_ascii=False) + "\n"
-        with open(target, "a", encoding="utf-8") as f:
-            f.write(line)
+    def _buffer_event(self, task_id: str, event: Event) -> None:
+        """Buffer an event line in memory for batch writing."""
+        d = {
+            "ts": event.ts,
+            "kind": event.kind,
+            "summary": event.summary,
+            "raw_line_len": event.raw_line_len,
+            "usage": event.usage,
+        }
+        line = json.dumps(d, ensure_ascii=False) + "\n"
+        if task_id not in self._event_buffers:
+            self._event_buffers[task_id] = []
+        self._event_buffers[task_id].append(line)
+
+    def _maybe_flush_io(self) -> None:
+        """Flush buffered I/O if throttle interval has elapsed."""
+        now = time.time()
+        if (now - self._last_io_flush) >= self._IO_THROTTLE:
+            self._flush_io()
+
+    def _flush_io(self) -> None:
+        """Write all buffered events and dirty progress to disk."""
+        self._last_io_flush = time.time()
+        # Atomic swap to avoid losing events buffered during write
+        buffers, self._event_buffers = self._event_buffers, {}
+        dirty, self._dirty_progress = self._dirty_progress, set()
+        for task_id, lines in buffers.items():
+            if lines:
+                target = self._events_dir / f"task-{task_id}.jsonl"
+                with open(target, "a", encoding="utf-8") as f:
+                    f.writelines(lines)
+        for task_id in dirty:
+            if task_id in self.tasks:
+                tp = self.tasks[task_id]
+                d = _task_progress_dict(tp)
+                target = self._progress_dir / f"task-{tp.task_id}.json"
+                atomic_write(target, json.dumps(d, indent=2, ensure_ascii=False))
 
     def _write_dashboard(self, force: bool = False) -> None:
         """Write dashboard.json with time-based throttling."""
@@ -320,6 +389,7 @@ class Dashboard:
         )
 
     def flush(self) -> None:
-        """Force-write dashboard if dirty. Call when run completes."""
+        """Force-write all buffered data. Call when run completes."""
+        self._flush_io()
         if self._dashboard_dirty:
             self._write_dashboard(force=True)

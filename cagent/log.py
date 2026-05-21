@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Literal
 
 from cagent.progress import Dashboard, Event
@@ -37,12 +37,12 @@ class LinePrinter:
                         self._print_line(task_id, event)
                     except asyncio.QueueEmpty:
                         break
-                break
+                raise
 
             self._print_line(task_id, event)
 
     def _print_line(self, task_id: str, event: Event) -> None:
-        ts = datetime.fromtimestamp(event.ts, tz=timezone.utc).strftime("%H:%M:%S")
+        ts = datetime.fromtimestamp(event.ts).strftime("%H:%M:%S")
         kind = event.kind
         summary = event.summary
 
@@ -99,5 +99,5 @@ class LinePrinter:
 
     def print_integration(self, msg: str) -> None:
         """Print an integration-phase message."""
-        ts = datetime.now(tz=timezone.utc).strftime("%H:%M:%S")
+        ts = datetime.now().strftime("%H:%M:%S")
         print(f"[{ts}] integ    {msg}")

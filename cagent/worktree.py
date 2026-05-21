@@ -2,37 +2,9 @@
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
-
-def _git(
-    *args: str,
-    cwd: str | Path | None = None,
-    timeout: int = 60,
-) -> subprocess.CompletedProcess:
-    """Run a git command, raising on failure with stderr details."""
-    try:
-        return subprocess.run(
-            ["git", *args],
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=True,
-            timeout=timeout,
-        )
-    except FileNotFoundError:
-        raise RuntimeError("'git' not found in PATH. Please install Git.")
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(
-            f"git {' '.join(args)} timed out after {timeout}s"
-        )
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(
-            f"git {' '.join(args)} failed (exit {e.returncode}): {e.stderr.strip()}"
-        ) from e
+from cagent.git_utils import run_git as _git
 
 
 def current_head(repo_root: str | Path) -> str:

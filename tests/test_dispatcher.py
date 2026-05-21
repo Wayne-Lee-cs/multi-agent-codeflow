@@ -165,6 +165,37 @@ class TestDependencyGraph:
         assert "blocked by failed dependency" in b_result.fail_reason
 
     @pytest.mark.asyncio
+    async def test_transitive_blocked_tasks(self, run_dir, repo_root):
+        """A(fail) → B(blocked) → C: C should be blocked by B, not cancelled."""
+        executed = []
+
+        def runner(task, **kwargs):
+            executed.append(task.id)
+            if task.id == "A":
+                return AgentResult(task_id="A", status="failed", fail_reason="mock")
+            return AgentResult(task_id=task.id, status="done", commit_sha=f"sha-{task.id}")
+
+        tasks = [
+            _make_task("A"),
+            _make_task("B", depends_on=["A"]),
+            _make_task("C", depends_on=["B"]),
+        ]
+        with patch("cagent.dispatcher.run_agent", side_effect=runner):
+            with patch("cagent.dispatcher.create_worktree"):
+                results = await run(tasks, concurrency=4, run_dir=run_dir, base_sha="abc123", repo_root=repo_root)
+
+        statuses = {r.task_id: r.status for r in results}
+        assert statuses["A"] == "failed"
+        assert statuses["B"] == "failed"
+        assert statuses["C"] == "failed"
+        assert "B" not in executed
+        assert "C" not in executed
+        b_result = next(r for r in results if r.task_id == "B")
+        assert "blocked by failed dependency" in b_result.fail_reason
+        c_result = next(r for r in results if r.task_id == "C")
+        assert "blocked by failed dependency" in c_result.fail_reason
+
+    @pytest.mark.asyncio
     async def test_partial_failure_blocks_transitive(self, run_dir, repo_root):
         """A(ok) → B(fail) → C: C should be blocked by B, not by A."""
         executed = []
@@ -324,3 +355,92 @@ class TestRetry:
                 )
         assert results[0].status == "done"
         assert tasks[0].retry_count == 2  # last attempt index
+
+
+class TestTokenBudget:
+    """Token budget enforcement via max_tokens parameter."""
+
+    @pytest.mark.asyncio
+    async def test_budget_exceeded_stops_dispatching(self, run_dir, repo_root):
+        """When cumulative tokens exceed max_tokens, remaining tasks get failed."""
+        from cagent.progress import Dashboard, TaskProgress
+
+        dashboard = Dashboard(run_dir)
+        call_count = {"count": 0}
+
+        def runner(task, **kwargs):
+            call_count["count"] += 1
+            # Each task uses 5000 tokens total
+            if dashboard:
+                if task.id not in dashboard.tasks:
+                    dashboard.tasks[task.id] = TaskProgress(task_id=task.id)
+                tp = dashboard.tasks[task.id]
+                tp.tokens_in = 3000
+                tp.tokens_out = 2000
+            return AgentResult(task_id=task.id, status="done", commit_sha=f"sha-{task.id}")
+
+        # 3 tasks, budget of 6000 — first task uses 5000, second should push over
+        tasks = [_make_task("001"), _make_task("002"), _make_task("003")]
+        with patch("cagent.dispatcher.run_agent", side_effect=runner):
+            with patch("cagent.dispatcher.create_worktree"):
+                results = await run(
+                    tasks, concurrency=1, run_dir=run_dir,
+                    base_sha="abc123", repo_root=repo_root,
+                    dashboard=dashboard, max_tokens=6000,
+                )
+
+        statuses = {r.task_id: r.status for r in results}
+        # First task should succeed (budget check is after completion)
+        assert statuses["001"] == "done"
+        # Second task succeeds (runs before budget flag is checked on next iteration)
+        assert statuses["002"] == "done"
+        # Third task should fail with budget exceeded
+        assert statuses["003"] == "failed"
+        budget_fail = next(r for r in results if r.task_id == "003")
+        assert "token budget exceeded" in budget_fail.fail_reason
+
+    @pytest.mark.asyncio
+    async def test_no_budget_runs_all(self, run_dir, repo_root):
+        """Without max_tokens, all tasks run regardless of token usage."""
+        from cagent.progress import Dashboard, TaskProgress
+
+        dashboard = Dashboard(run_dir)
+
+        def runner(task, **kwargs):
+            if task.id not in dashboard.tasks:
+                dashboard.tasks[task.id] = TaskProgress(task_id=task.id)
+            tp = dashboard.tasks[task.id]
+            tp.tokens_in = 50000
+            tp.tokens_out = 50000
+            return AgentResult(task_id=task.id, status="done", commit_sha=f"sha-{task.id}")
+
+        tasks = [_make_task("001"), _make_task("002"), _make_task("003")]
+        with patch("cagent.dispatcher.run_agent", side_effect=runner):
+            with patch("cagent.dispatcher.create_worktree"):
+                results = await run(
+                    tasks, concurrency=1, run_dir=run_dir,
+                    base_sha="abc123", repo_root=repo_root,
+                    dashboard=dashboard,
+                )
+
+        assert all(r.status == "done" for r in results)
+
+    @pytest.mark.asyncio
+    async def test_max_turns_passed_to_agent(self, run_dir, repo_root):
+        """max_turns is forwarded to run_agent."""
+        captured_kwargs: list[dict] = []
+
+        def runner(task, **kwargs):
+            captured_kwargs.append(kwargs)
+            return AgentResult(task_id=task.id, status="done", commit_sha=f"sha-{task.id}")
+
+        tasks = [_make_task("001")]
+        with patch("cagent.dispatcher.run_agent", side_effect=runner):
+            with patch("cagent.dispatcher.create_worktree"):
+                await run(
+                    tasks, concurrency=4, run_dir=run_dir,
+                    base_sha="abc123", repo_root=repo_root,
+                    max_turns=15,
+                )
+
+        assert captured_kwargs[0]["max_turns"] == 15

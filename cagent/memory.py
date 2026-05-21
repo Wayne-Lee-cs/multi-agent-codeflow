@@ -19,7 +19,7 @@ class RunMemory:
     def __init__(self, run_dir: Path):
         self._dir = run_dir / "memory"
         self._dir.mkdir(parents=True, exist_ok=True)
-        self._cached_ids: tuple[str, ...] | None = None
+        self._cache_key: tuple[tuple[str, ...], tuple[float, ...]] | None = None
         self._cached_context: str = ""
 
     def write(self, agent_id: str, content: str) -> None:
@@ -31,7 +31,7 @@ class RunMemory:
         """Append memory for a specific agent (preserves previous entries)."""
         path = self._dir / f"{agent_id}.md"
         with open(path, "a", encoding="utf-8") as f:
-            if f.tell() > 0:
+            if f.seek(0, 2) > 0:
                 f.write("\n\n---\n\n")
             f.write(content)
 
@@ -59,19 +59,16 @@ class RunMemory:
         earlier tasks accomplished. Capped at max_chars to avoid exceeding
         the model's context window.
         """
-        ids_tuple = tuple(sorted(task_ids))
+        sorted_ids = sorted(task_ids)
+        ids_tuple = tuple(sorted_ids)
         # Include per-file mtimes so cache invalidates when content changes
-        mtimes = tuple(
-            (self._dir / f"{tid}.md").stat().st_mtime
-            if (self._dir / f"{tid}.md").exists() else 0.0
-            for tid in sorted(task_ids)
-        )
+        mtimes = tuple(self._get_mtime(tid) for tid in sorted_ids)
         cache_key = (ids_tuple, mtimes)
-        if cache_key == self._cached_ids:
+        if cache_key == self._cache_key:
             return self._cached_context
         parts = []
         total = 0
-        for tid in task_ids:
+        for tid in sorted_ids:
             content = self.read(tid)
             if content:
                 entry = f"[Task {tid}]\n{content}"
@@ -80,9 +77,16 @@ class RunMemory:
                 parts.append(entry)
                 total += len(entry)
         result = "\n\n".join(parts)
-        self._cached_ids = cache_key
+        self._cache_key = cache_key
         self._cached_context = result
         return result
+
+    def _get_mtime(self, tid: str) -> float:
+        """Get modification time for a task memory file, or 0.0 if not found."""
+        try:
+            return (self._dir / f"{tid}.md").stat().st_mtime
+        except FileNotFoundError:
+            return 0.0
 
     def write_shared(self, content: str) -> None:
         """Write the aggregated shared_context.md."""

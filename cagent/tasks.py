@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -207,13 +207,24 @@ def _extract_prompt(block: str) -> str:
     return "\n".join(prompt_lines).strip()
 
 
+def _task_to_dict(t: Task) -> dict:
+    """Convert Task to dict without dataclasses.asdict() deep copy overhead."""
+    return {
+        "id": t.id,
+        "prompt": t.prompt,
+        "branch": t.branch,
+        "status": t.status,
+        "commit_sha": t.commit_sha,
+        "log_path": str(t.log_path),
+        "depends_on": t.depends_on,
+        "retry_count": t.retry_count,
+        "max_retries": t.max_retries,
+    }
+
+
 def dump_state(run_dir: Path, tasks: list[Task]) -> None:
     """Serialize task state to tasks.json for crash recovery."""
-    data = []
-    for t in tasks:
-        d = asdict(t)
-        d["log_path"] = str(t.log_path)
-        data.append(d)
+    data = [_task_to_dict(t) for t in tasks]
     run_dir.mkdir(parents=True, exist_ok=True)
     target = run_dir / "tasks.json"
     atomic_write(target, json.dumps(data, indent=2, ensure_ascii=False))

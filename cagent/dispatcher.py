@@ -4,25 +4,33 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re as _re
 import time
+from collections import deque
 from pathlib import Path
 
-from cagent.agent import AgentResult, run_agent
+from cagent.agent import AgentResult, _run_git_async, run_agent
 from cagent.memory import RunMemory
 from cagent.progress import Dashboard
 from cagent.tasks import Task, dump_state
 from cagent.worktree import create_worktree
 
-
-_RETRYABLE_REASONS = ("timeout", "rate_limit", "rate limit", "network", "connection")
+_RETRYABLE_PATTERNS = [
+    _re.compile(r"\btimeout\b", _re.IGNORECASE),
+    _re.compile(r"\brate[\s_]limit\b", _re.IGNORECASE),
+    _re.compile(r"\b429\b"),
+    _re.compile(r"\bnetwork", _re.IGNORECASE),
+    _re.compile(r"\bconnection", _re.IGNORECASE),
+    _re.compile(r"\bECONNREFUSED\b"),
+    _re.compile(r"\bECONNRESET\b"),
+]
 
 
 def _is_retryable(fail_reason: str | None) -> bool:
     """Check if a failure reason is retryable (transient error)."""
     if not fail_reason:
         return False
-    reason_lower = fail_reason.lower()
-    return any(keyword in reason_lower for keyword in _RETRYABLE_REASONS)
+    return any(p.search(fail_reason) for p in _RETRYABLE_PATTERNS)
 
 
 async def run(
@@ -37,6 +45,8 @@ async def run(
     memory: RunMemory | None = None,
     conventions: str = "",
     retries: int = 0,
+    max_turns: int | None = None,
+    max_tokens: int | None = None,
 ) -> list[AgentResult]:
     """Run all tasks concurrently with bounded parallelism.
 
@@ -49,6 +59,7 @@ async def run(
     sem = asyncio.Semaphore(concurrency)
     results: dict[str, AgentResult] = {}
     lock = asyncio.Lock()
+    budget_exceeded = False
     _last_dump_time = 0.0
     _DUMP_THROTTLE = 1.0  # seconds
 
@@ -62,15 +73,20 @@ async def run(
 
     async def _reset_worktree(worktree_path: Path) -> None:
         """Reset worktree to base_sha to undo partial changes before retry."""
-        proc = await asyncio.create_subprocess_exec(
-            "git", "reset", "--hard", base_sha,
-            cwd=str(worktree_path),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        rc, _, stderr = await _run_git_async(
+            "reset", "--hard", base_sha, cwd=worktree_path, timeout=60
         )
-        await proc.wait()
+        if rc != 0:
+            raise RuntimeError(f"git reset --hard failed: {stderr.strip()[:200]}")
+        # Also remove untracked files that git reset --hard doesn't touch
+        rc, _, stderr = await _run_git_async(
+            "clean", "-fd", cwd=worktree_path, timeout=60
+        )
+        if rc != 0:
+            raise RuntimeError(f"git clean -fd failed: {stderr.strip()[:200]}")
 
     async def _run_one(task: Task, stagger: int) -> None:
+        nonlocal budget_exceeded
         # Stagger worktree creation to avoid concurrent git index.lock contention.
         # Only the first `concurrency` tasks get staggered; subsequent waves
         # start immediately since the initial burst is past.
@@ -112,6 +128,15 @@ async def run(
                             completed_ids = [t.id for t in tasks if t.status in ("done", "noop")]
                         shared_ctx = memory.build_shared_context(completed_ids)
 
+                    # Check token budget before starting
+                    if budget_exceeded:
+                        result = AgentResult(
+                            task_id=task.id,
+                            status="failed",
+                            fail_reason="token budget exceeded",
+                        )
+                        break
+
                     # Run agent
                     result = await run_agent(
                         task=task,
@@ -123,6 +148,7 @@ async def run(
                         shared_context=shared_ctx,
                         memory=memory,
                         conventions=conventions,
+                        max_turns=max_turns,
                     )
 
                     # Check if retry is warranted
@@ -143,8 +169,8 @@ async def run(
                     # Reset worktree to base for clean retry (best effort)
                     try:
                         await _reset_worktree(worktree_path)
-                    except Exception:
-                        pass  # Worktree reset failure should not block retry
+                    except Exception as e:
+                        logging.warning("worktree reset failed for task %s: %s", task.id, e)
 
                 # Update task with final result
                 async with lock:
@@ -152,6 +178,13 @@ async def run(
                     task.commit_sha = result.commit_sha
                     results[task.id] = result
                     _throttled_dump()
+
+                # Check token budget after completion
+                if max_tokens is not None and dashboard and not budget_exceeded:
+                    total = sum(tp.tokens_in + tp.tokens_out for tp in dashboard.tasks.values())
+                    if total >= max_tokens:
+                        budget_exceeded = True
+                        logging.info("Token budget reached: %d / %d", total, max_tokens)
 
             except Exception as e:
                 result = AgentResult(
@@ -182,21 +215,26 @@ async def run(
                         f"Available tasks: {sorted(task_map.keys())}"
                     )
 
+        # Build children adjacency table for O(1) downstream lookup
+        children: dict[str, list[str]] = {t.id: [] for t in tasks}
+        for t in tasks:
+            for dep in t.depends_on:
+                children[dep].append(t.id)
+
         # Detect cycles using Kahn's algorithm
         in_degree: dict[str, int] = {t.id: 0 for t in tasks}
         for t in tasks:
             for dep in t.depends_on:
                 in_degree[t.id] += 1
-        queue = [tid for tid, deg in in_degree.items() if deg == 0]
+        queue = deque(tid for tid, deg in in_degree.items() if deg == 0)
         visited = 0
         while queue:
-            tid = queue.pop(0)
+            tid = queue.popleft()
             visited += 1
-            for t in tasks:
-                if tid in t.depends_on:
-                    in_degree[t.id] -= 1
-                    if in_degree[t.id] == 0:
-                        queue.append(t.id)
+            for dependent_id in children[tid]:
+                in_degree[dependent_id] -= 1
+                if in_degree[dependent_id] == 0:
+                    queue.append(dependent_id)
         if visited != len(tasks):
             cycle_tasks = [t.id for t in tasks if in_degree[t.id] > 0]
             raise ValueError(
@@ -232,24 +270,32 @@ async def run(
                 failed = {t.id for t in tasks if t.status == "failed"}
             stagger_counter += len(ready)
 
-        # Mark tasks blocked by failed dependencies
-        for t in tasks:
-            if t.status == "pending":
-                failed_deps = [d for d in t.depends_on if d in failed]
-                if failed_deps:
-                    async with lock:
-                        t.status = "failed"
-                        results[t.id] = AgentResult(
-                            task_id=t.id,
-                            status="failed",
-                            fail_reason=f"blocked by failed dependency: {', '.join(failed_deps)}",
-                        )
-                        if dashboard:
-                            dashboard.set_task_status(
-                                t.id, "failed",
+        # Mark tasks blocked by failed dependencies (transitive closure)
+        blocked = []
+        while True:
+            newly_blocked = []
+            for t in tasks:
+                if t.status == "pending":
+                    failed_deps = [d for d in t.depends_on if task_map[d].status == "failed"]
+                    if failed_deps:
+                        async with lock:
+                            t.status = "failed"
+                            results[t.id] = AgentResult(
+                                task_id=t.id,
+                                status="failed",
                                 fail_reason=f"blocked by failed dependency: {', '.join(failed_deps)}",
                             )
-                        dump_state(run_dir, tasks)
+                            if dashboard:
+                                dashboard.set_task_status(
+                                    t.id, "failed",
+                                    fail_reason=f"blocked by failed dependency: {', '.join(failed_deps)}",
+                                )
+                        newly_blocked.append(t.id)
+            blocked.extend(newly_blocked)
+            if not newly_blocked:
+                break
+        if blocked:
+            dump_state(run_dir, tasks)
     else:
         # No dependencies: run all tasks concurrently (original behavior)
         gather_results = await asyncio.gather(

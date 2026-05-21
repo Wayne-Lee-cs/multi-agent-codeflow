@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -24,6 +26,7 @@ async def integrate(
     timeout: int = 1800,
     dashboard: Dashboard | None = None,
     memory: RunMemory | None = None,
+    post_integrate_cmd: str | None = None,
 ) -> str:
     """Cherry-pick all done task commits into an integration branch.
 
@@ -101,6 +104,25 @@ async def integrate(
             )
             dashboard.update("_integrator", event)
 
+    # Post-integration validation: run user command, repair if it fails (max 2 rounds)
+    if post_integrate_cmd and integrated:
+        validation_ok = await _post_integrate_validate(
+            cmd_str=post_integrate_cmd,
+            worktree_path=worktree_path,
+            run_dir=run_dir,
+            integrator_model_override=integrator_model_override,
+            timeout=timeout,
+            dashboard=dashboard,
+        )
+        if not validation_ok and dashboard:
+            event = Event(
+                ts=time.time(),
+                kind="error",
+                summary="post-integrate-cmd failed after 2 repair rounds — integration marked partial",
+                raw={},
+            )
+            dashboard.update("_integrator", event)
+
     # Squash if requested
     if squash:
         await _run_git("reset", "--soft", base_sha, cwd=worktree_path)
@@ -113,6 +135,210 @@ async def integrate(
     # Get final SHA
     result = await _run_git("rev-parse", "HEAD", cwd=worktree_path)
     return result.stdout.strip()
+
+
+async def _run_shell_cmd(
+    cmd_str: str,
+    cwd: Path,
+    timeout: float = 300,
+) -> tuple[int, str]:
+    """Run a shell command string and return (returncode, combined output)."""
+    import sys as _sys
+
+    if _sys.platform == "win32":
+        proc = await asyncio.create_subprocess_exec(
+            "cmd", "/c", cmd_str,
+            cwd=str(cwd),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+    else:
+        proc = await asyncio.create_subprocess_exec(
+            "sh", "-c", cmd_str,
+            cwd=str(cwd),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+    try:
+        stdout_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        await proc.wait()
+        return 1, f"Command timed out after {timeout}s"
+    rc = proc.returncode if proc.returncode is not None else -1
+    return rc, stdout_bytes.decode("utf-8", errors="replace")
+
+
+async def _run_claude_agent(
+    prompt: str,
+    worktree_path: Path,
+    run_dir: Path,
+    model_override: str | None,
+    timeout: int,
+    dashboard: Dashboard | None,
+    task_id: str = "_integrator",
+) -> int | None:
+    """Spawn a claude -p subprocess, stream output, return exit code.
+
+    Returns the process exit code, or None if the process could not be started
+    or timed out. Caller is responsible for calling prepare_sandbox() beforehand.
+    """
+
+    cmd = [_resolve_claude(), "-p", "-"]
+    cmd.extend(["--permission-mode", "acceptEdits", "--output-format", "stream-json", "--verbose"])
+    if model_override:
+        cmd.extend(["--model", model_override])
+
+    creation_flags = 0
+    if sys.platform == "win32":
+        creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        cwd=str(worktree_path),
+        env=None,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        stdin=asyncio.subprocess.PIPE,
+        creationflags=creation_flags,
+    )
+
+    if proc.stdin is None:
+        return None
+    try:
+        proc.stdin.write(prompt.encode("utf-8"))
+        await proc.stdin.drain()
+    finally:
+        proc.stdin.close()
+        await proc.stdin.wait_closed()
+
+    log_path = run_dir / "logs" / f"task-{task_id}.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    parser = EventParser()
+    if proc.stdout is None:
+        return None
+    try:
+        async with asyncio.timeout(timeout):
+            with open(log_path, "a", encoding="utf-8") as f:
+                async for raw_line in proc.stdout:
+                    line = raw_line.decode("utf-8", errors="replace")
+                    f.write(line)
+                    f.flush()
+                    for evt in parser.feed(line):
+                        if dashboard:
+                            dashboard.update(task_id, evt)
+    except TimeoutError:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        await proc.wait()
+        return None
+
+    await proc.wait()
+    return proc.returncode
+
+
+async def _post_integrate_validate(
+    cmd_str: str,
+    worktree_path: Path,
+    run_dir: Path,
+    integrator_model_override: str | None,
+    timeout: int,
+    dashboard: Dashboard | None,
+    max_rounds: int = 2,
+) -> bool:
+    """Run post-integration command; on failure, launch integrator agent to fix, retry.
+
+    Returns True if the command eventually passes, False after max_rounds failures.
+    """
+    for round_num in range(1, max_rounds + 1):
+        if dashboard:
+            event = Event(
+                ts=time.time(),
+                kind="text",
+                summary=f"post-integrate-cmd round {round_num}: {cmd_str}",
+                raw={},
+            )
+            dashboard.update("_integrator", event)
+
+        returncode, output = await _run_shell_cmd(cmd_str, worktree_path, timeout=timeout)
+
+        if returncode == 0:
+            if dashboard:
+                event = Event(
+                    ts=time.time(),
+                    kind="text",
+                    summary=f"post-integrate-cmd passed (round {round_num})",
+                    raw={},
+                )
+                dashboard.update("_integrator", event)
+            return True
+
+        if dashboard:
+            event = Event(
+                ts=time.time(),
+                kind="error",
+                summary=f"post-integrate-cmd failed (round {round_num}, exit {returncode})",
+                raw={},
+            )
+            dashboard.update("_integrator", event)
+
+        if round_num >= max_rounds:
+            break
+
+        repair_prompt = (
+            f"The post-integration validation command failed.\n\n"
+            f"Command: {cmd_str}\n"
+            f"Exit code: {returncode}\n"
+            f"Output (last 3000 chars):\n{output[-3000:]}\n\n"
+            f"Please fix the code so the command passes. "
+            f"Do NOT modify the test command itself — fix the source code."
+        )
+
+        prepare_sandbox(worktree_path)
+
+        rc = await _run_claude_agent(
+            prompt=repair_prompt,
+            worktree_path=worktree_path,
+            run_dir=run_dir,
+            model_override=integrator_model_override,
+            timeout=timeout,
+            dashboard=dashboard,
+        )
+
+        if rc is None or rc != 0:
+            if rc is not None and dashboard:
+                event = Event(
+                    ts=time.time(),
+                    kind="error",
+                    summary=f"repair agent exited with code {rc}",
+                    raw={},
+                )
+                dashboard.update("_integrator", event)
+            break
+
+        # Stage + commit the repair
+        try:
+            await _run_git("add", "-A", cwd=worktree_path)
+            status = await _run_git("status", "--porcelain", cwd=worktree_path, check=False)
+            if status.stdout.strip():
+                await _run_git("commit", "-m", f"fix: post-integrate-cmd repair round {round_num}", cwd=worktree_path, check=False)
+            else:
+                if dashboard:
+                    event = Event(
+                        ts=time.time(),
+                        kind="text",
+                        summary=f"repair round {round_num}: agent made no changes, skipping commit",
+                        raw={},
+                    )
+                    dashboard.update("_integrator", event)
+        except RuntimeError:
+            break
+
+    return False
 
 
 def _has_conflict_markers(status_output: str) -> bool:
@@ -150,16 +376,9 @@ async def _cherry_pick_one(
     await _run_git("checkout", "HEAD", "--", ".claude/", cwd=worktree_path, check=False)
     await _run_git("checkout", "HEAD", "--", ".gitignore", cwd=worktree_path, check=False)
 
-    # Try cherry-pick
-    proc = await asyncio.create_subprocess_exec(
-        "git", "cherry-pick", task.commit_sha,
-        cwd=str(worktree_path),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await proc.communicate()
-
-    if proc.returncode == 0:
+    # Try cherry-pick using _run_git which has timeout=60 + kill
+    result = await _run_git("cherry-pick", task.commit_sha, cwd=worktree_path, check=False)
+    if result.returncode == 0:
         return True
 
     # Check for conflicts using porcelain format
@@ -217,20 +436,26 @@ async def _resolve_conflicts(
 
     conflict_list = "\n".join(f"  - {f}" for f in conflict_files)
 
+    if merged_summaries:
+        context_block = (
+            f"The current task (task {task.id}) has conflicts with already-merged tasks:\n"
+            f"{merged_summaries}"
+        )
+    else:
+        context_block = (
+            f"The current task (task {task.id}) conflicts with the base branch.\n"
+            f"There are no previously merged tasks — this is the first cherry-pick."
+        )
+
     prompt = (
         f"You are resolving merge conflicts in a cherry-pick operation.\n\n"
-        f"The current task (task {task.id}) has conflicts with already-merged tasks:\n"
-        f"{merged_summaries}\n\n"
+        f"{context_block}\n\n"
         f"Conflicting files:\n{conflict_list}\n\n"
         f"Current task prompt: {task.prompt}\n\n"
         f"Please resolve ALL conflict markers in the conflicting files. "
         f"Preserve the intent of both sides. After resolving, the files should "
         f"have no <<<<<<< ======= >>>>>>> markers."
     )
-
-    # Inject safety sandbox for integrator — blocks git push, rm -rf, etc.
-    # while allowing git add / cherry-pick --continue.
-    prepare_sandbox(worktree_path)
 
     if dashboard:
         event = Event(
@@ -241,60 +466,23 @@ async def _resolve_conflicts(
         )
         dashboard.update("_integrator", event)
 
-    # Run integrator agent
-    cmd = [_resolve_claude(), "-p", "-"]
-    cmd.extend(["--permission-mode", "acceptEdits", "--output-format", "stream-json", "--verbose"])
-    if integrator_model_override:
-        cmd.extend(["--model", integrator_model_override])
+    prepare_sandbox(worktree_path)
 
-    env = os.environ.copy()
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        cwd=str(worktree_path),
-        env=env,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        stdin=asyncio.subprocess.PIPE,
+    rc = await _run_claude_agent(
+        prompt=prompt,
+        worktree_path=worktree_path,
+        run_dir=run_dir,
+        model_override=integrator_model_override,
+        timeout=timeout,
+        dashboard=dashboard,
     )
 
-    if proc.stdin is None:
-        raise RuntimeError("subprocess stdin pipe was not created")
-    try:
-        proc.stdin.write(prompt.encode("utf-8"))
-        await proc.stdin.drain()
-    finally:
-        proc.stdin.close()
-        await proc.stdin.wait_closed()
-
-    # Drain output (log it) with timeout
-    log_path = run_dir / "logs" / "task-_integrator.log"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    parser = EventParser()
-    if proc.stdout is None:
-        raise RuntimeError("subprocess stdout pipe was not created")
-    try:
-        async with asyncio.timeout(timeout):
-            with open(log_path, "a", encoding="utf-8") as f:
-                async for raw_line in proc.stdout:
-                    line = raw_line.decode("utf-8", errors="replace")
-                    f.write(line)
-                    f.flush()
-                    for event in parser.feed(line):
-                        if dashboard:
-                            dashboard.update("_integrator", event)
-    except TimeoutError:
-        proc.kill()
-        await proc.wait()
-        await _run_git("cherry-pick", "--abort", cwd=worktree_path, check=False)
-        return False
-
-    await proc.wait()
-    if proc.returncode != 0:
-        if dashboard:
+    if rc is None or rc != 0:
+        if rc is not None and dashboard:
             event = Event(
                 ts=time.time(),
                 kind="error",
-                summary=f"integrator agent exited with code {proc.returncode}",
+                summary=f"integrator agent exited with code {rc}",
                 raw={},
             )
             dashboard.update("_integrator", event)
@@ -322,8 +510,15 @@ async def _resolve_conflicts(
         return False
 
     # Complete the cherry-pick
-    env_continue = os.environ.copy()
-    env_continue["GIT_EDITOR"] = "true"
+    # Clean sandbox artifacts before staging (mirrors _commit_result behavior)
+    claude_dir = worktree_path / ".claude"
+    for f in [claude_dir / "settings.local.json", claude_dir / "hooks" / "cagent-guard.py"]:
+        if f.exists():
+            try:
+                f.unlink()
+            except OSError:
+                pass
+    env_continue = {**os.environ, "GIT_EDITOR": "true"}
     try:
         await _run_git("add", "-A", cwd=worktree_path)
     except RuntimeError:
@@ -343,17 +538,14 @@ async def _resolve_conflicts(
             f"Preserved intent of both sides."
         ))
 
+    # Update task state so it reflects the successful cherry-pick result.
+    # This is critical: subsequent integration runs check task.commit_sha
+    # to determine which tasks have been integrated.
+    result = await _run_git("rev-parse", "HEAD", cwd=worktree_path, check=False)
+    task.commit_sha = result.stdout.strip()
+    task.status = "done"
+
     return True
-
-
-class _GitResult:
-    """Simple container for git command output."""
-    __slots__ = ("returncode", "stdout", "stderr")
-
-    def __init__(self, returncode: int, stdout: str, stderr: str):
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
 
 
 async def _run_git(
@@ -362,38 +554,13 @@ async def _run_git(
     env: dict | None = None,
     check: bool = True,
     timeout: float = 60,
-) -> _GitResult:
-    """Run a git command and return stdout/stderr/returncode.
+):
+    """Run a git command and return a GitResult.
 
-    If check=True (default), raises RuntimeError on non-zero exit code.
-    Timeout kills the subprocess after *timeout* seconds (default 60).
+    Delegates to cagent.git_utils.run_git_async.
     """
-    if env is None:
-        env = os.environ.copy()
-    proc = await asyncio.create_subprocess_exec(
-        "git", *args,
-        cwd=str(cwd),
-        env=env,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+    from cagent.git_utils import run_git_async
+
+    return await run_git_async(
+        *args, cwd=cwd, env=env, check=check, timeout=timeout
     )
-    try:
-        stdout_bytes, stderr_bytes = await asyncio.wait_for(
-            proc.communicate(), timeout=timeout
-        )
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
-        raise RuntimeError(
-            f"git {' '.join(args)} timed out after {timeout}s"
-        ) from None
-    result = _GitResult(
-        returncode=proc.returncode or 0,
-        stdout=stdout_bytes.decode("utf-8", errors="replace"),
-        stderr=stderr_bytes.decode("utf-8", errors="replace"),
-    )
-    if check and result.returncode != 0:
-        raise RuntimeError(
-            f"git {' '.join(args)} failed (exit {result.returncode}): {result.stderr}"
-        )
-    return result

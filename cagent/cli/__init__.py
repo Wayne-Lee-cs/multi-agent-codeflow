@@ -1,0 +1,135 @@
+"""CLI entry point — argparse subcommands for cagent."""
+
+from __future__ import annotations
+
+import argparse
+import sys
+
+
+def main() -> None:
+    if sys.platform == "win32":
+        import io
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+
+    if sys.version_info < (3, 11):
+        print(
+            f"cagent requires Python >= 3.11 (found {sys.version}). Please upgrade.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    parser = argparse.ArgumentParser(
+        prog="cagent",
+        description="Concurrent agent workflow dispatcher",
+    )
+    sub = parser.add_subparsers(dest="command")
+
+    # --- run ---
+    run_p = sub.add_parser("run", help="Run tasks from a file concurrently")
+    run_p.add_argument("tasks_file", help="Path to tasks file")
+    run_p.add_argument("-j", "--jobs", type=int, default=4, help="Concurrency (default: 4)")
+    run_p.add_argument("--base", default=None, help="Base branch/SHA (default: HEAD)")
+    run_p.add_argument("--squash", action="store_true", help="Squash integration into one commit")
+    run_p.add_argument("--keep-worktrees", action="store_true", help="Keep worktrees after run")
+    run_p.add_argument("--worker-model", default=None, help="Model override for workers")
+    run_p.add_argument("--integrator-model", default=None, help="Model override for integrator")
+    run_p.add_argument("--timeout", type=int, default=1800, help="Per-agent timeout in seconds")
+    run_p.add_argument("--retries", type=int, default=0, help="Max retries for transient failures (default: 0)")
+    run_p.add_argument("--quiet", action="store_true", help="Only print START/DONE/FAIL events")
+    run_p.add_argument("--api-key", default=None, help="Explicit API key for claude -p subprocesses")
+    run_p.add_argument("--dry-run", action="store_true", help="Show plan without executing")
+    run_p.add_argument("--resume", default=None, help="Resume from a previous run ID")
+    run_p.add_argument("--post-integrate-cmd", default=None, help="Command to run after integration (e.g. 'pytest'); failures trigger agent repair, max 2 rounds")
+    run_p.add_argument("--max-turns", type=int, default=None, help="Max conversation turns per task (passed to claude -p --max-turns)")
+    run_p.add_argument("--max-tokens", type=int, default=None, help="Token budget for entire run (input+output combined); stops dispatching new tasks when exceeded. Note: budget is checked between tasks, so concurrent tasks may overshoot by up to (concurrency-1) tasks worth of tokens.")
+
+    # --- status ---
+    status_p = sub.add_parser("status", help="Show run status snapshot")
+    status_p.add_argument("run_id", nargs="?", default=None, help="Run ID (default: latest)")
+
+    # --- watch ---
+    watch_p = sub.add_parser("watch", help="Live dashboard (ANSI, q to quit)")
+    watch_p.add_argument("run_id", nargs="?", default=None, help="Run ID (default: latest)")
+
+    # --- log ---
+    log_p = sub.add_parser("log", help="Show events for a task")
+    log_p.add_argument("task_id", help="Task ID (e.g. task-001)")
+    log_p.add_argument("--run", default=None, help="Run ID (default: latest)")
+    log_p.add_argument("-f", "--follow", action="store_true", help="Follow mode")
+    log_p.add_argument("--raw", action="store_true", help="Show raw JSON lines")
+    log_p.add_argument("--kind", default=None, help="Filter by event kind (tool_use, error, denied, text)")
+
+    # --- clean ---
+    clean_p = sub.add_parser("clean", help="Clean up worktrees and branches (memory preserved by default)")
+    clean_p.add_argument("run_id", nargs="?", default=None, help="Run ID (default: all)")
+    clean_p.add_argument("--all", action="store_true", help="Clean all runs")
+    clean_p.add_argument("--force", "-f", action="store_true", help="Skip confirmation")
+    clean_p.add_argument("--memory", action="store_true", help="Also delete memory files (preserved by default)")
+
+    # --- push ---
+    push_p = sub.add_parser("push", help="Push a branch to origin (requires y/N confirmation)")
+    push_p.add_argument("branch", help="Branch name to push")
+
+    # --- branches ---
+    sub.add_parser("branches", help="List cagent branches")
+
+    # --- plan ---
+    plan_p = sub.add_parser("plan", help="Generate conflict-free tasks from a goal using an architect agent")
+    plan_p.add_argument("goal", help="Natural language description of what to build")
+    plan_p.add_argument("--ref", help="Reference file to include (e.g. design.md)")
+    plan_p.add_argument("--model", help="Model override for the architect agent")
+
+    # --- cancel ---
+    cancel_p = sub.add_parser("cancel", help="Cancel a running task")
+    cancel_p.add_argument("task_id", help="Task ID to cancel (e.g. 001)")
+    cancel_p.add_argument("--run", default=None, help="Run ID (default: latest)")
+
+    args = parser.parse_args()
+
+    if args.command is None:
+        parser.print_help()
+        sys.exit(0)
+
+    from .run import _cmd_run
+    from .watch import _cmd_status, _cmd_watch
+    from .logcmd import _cmd_log
+    from .misc import _cmd_clean, _cmd_push, _cmd_cancel, _cmd_branches
+    from .plan import _cmd_plan
+
+    handlers = {
+        "run": _cmd_run,
+        "status": _cmd_status,
+        "watch": _cmd_watch,
+        "log": _cmd_log,
+        "clean": _cmd_clean,
+        "push": _cmd_push,
+        "branches": _cmd_branches,
+        "plan": _cmd_plan,
+        "cancel": _cmd_cancel,
+    }
+    handlers[args.command](args)
+
+
+# Lazy re-exports for backward compatibility (tests, bin/cagent).
+# Using __getattr__ avoids eagerly importing all submodules at CLI startup.
+_LAZY_IMPORTS: dict[str, str] = {
+    "_fmt_elapsed": ".base",
+    "_get_repo_root": ".base",
+    "_find_run_dir": ".base",
+    "_terminate_pid": ".base",
+    "_write_summary": ".run",
+    "_print_dashboard_table": ".watch",
+    "_cmd_cancel": ".misc",
+    "_cmd_clean": ".misc",
+}
+
+
+def __getattr__(name: str):
+    if name in _LAZY_IMPORTS:
+        import importlib
+        mod = importlib.import_module(_LAZY_IMPORTS[name], __package__)
+        attr = getattr(mod, name)
+        globals()[name] = attr
+        return attr
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -270,17 +270,20 @@ class TestDashboard:
         assert dash.tasks["001"].status == "running"
         assert "DENIED" in dash.tasks["001"].last_activity
 
-    def test_done_sets_status(self, tmp_path):
+    def test_done_event_does_not_set_status(self, tmp_path):
+        """Stream 'done' events only collect tokens — set_task_status() is the authority."""
         dash = Dashboard(tmp_path)
-        dash.update("001", Event(ts=time.time(), kind="done", summary="done", raw={}))
-        assert dash.tasks["001"].status == "done"
-        assert dash.tasks["001"].ended_at is not None
+        usage = {"input_tokens": 100, "output_tokens": 50}
+        dash.update("001", Event(ts=time.time(), kind="done", summary="done", raw={}, usage=usage))
+        assert dash.tasks["001"].status == "pending"
+        assert dash.tasks["001"].tokens_in == 100
+        assert dash.tasks["001"].tokens_out == 50
 
-    def test_error_sets_failed(self, tmp_path):
+    def test_error_event_does_not_set_status(self, tmp_path):
+        """Stream 'error' events don't set status — set_task_status() handles it."""
         dash = Dashboard(tmp_path)
         dash.update("001", Event(ts=time.time(), kind="error", summary="crash", raw={}))
-        assert dash.tasks["001"].status == "failed"
-        assert dash.tasks["001"].fail_reason == "crash"
+        assert dash.tasks["001"].status == "pending"
 
     def test_set_task_status(self, tmp_path):
         dash = Dashboard(tmp_path)
@@ -311,17 +314,17 @@ class TestDashboard:
 
     def test_dashboard_json_persisted(self, tmp_path):
         dash = Dashboard(tmp_path)
-        dash.update("001", Event(ts=time.time(), kind="done", summary="done", raw={}))
+        dash.set_task_status("001", "done", commit_sha="abc123")
         dash.flush()
         data = json.loads((tmp_path / "dashboard.json").read_text(encoding="utf-8"))
         assert "001" in data
         assert data["001"]["status"] == "done"
 
     def test_resume_from_dashboard_json(self, tmp_path):
-        # First run
+        # First run — use set_task_status for authoritative status
         dash1 = Dashboard(tmp_path)
         dash1.update("001", Event(ts=time.time(), kind="start", summary="start", raw={}))
-        dash1.update("001", Event(ts=time.time(), kind="done", summary="done", raw={}))
+        dash1.set_task_status("001", "done", commit_sha="abc123")
         dash1.flush()
 
         # Simulate resume
