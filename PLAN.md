@@ -1,49 +1,54 @@
-# Code Architecture Plan — v5.0 迭代（Phase 49-54）
+# Code Architecture Plan — v5.0 (2026-05-21)
 
-> Phase 1-48 completed (249 pytest pass). Historical details in [ARCHIVE.md](ARCHIVE.md).
+> Phase 1-48 completed. 275 pytest pass, 0 failures. Historical details in [ARCHIVE.md](ARCHIVE.md).
 
-## What & Why
-- **核心目标**: 6 项迭代改进，从测试覆盖、代码重复、性能、安全、平台兼容性全面提升
-- **关键设计决策**: 按优先级排列 — 先做高价值低风险项（重构、性能），再做平台特定项
+## Current Status
 
-## 任务优先级
+**v5.0 已发布** — 核心功能完备，E2E 验证通过，275 自动化测试覆盖。
 
-| # | 任务 | 优先级 | 风险 | 影响文件 |
-|---|------|--------|------|----------|
-| 1 | dump_state 性能优化 | P0 | 低 | tasks.py |
-| 2 | integrator claude 子进程提取 | P0 | 中 | integrator.py |
-| 3 | safety sandbox token 化 | P1 | 中 | safety.py, tests/test_safety.py |
-| 4 | 异步 I/O 优化 | P1 | 中 | progress.py, dispatcher.py |
-| 5 | Windows 优雅关闭 | P2 | 低 | cli/base.py, agent.py, dispatcher.py |
-| 6 | E2E 测试框架 | P2 | 高 | tests/test_e2e.py, tests/conftest.py |
+### v5.0 已完成项
 
-## File Layout
+| # | 任务 | 完成阶段 |
+|---|------|----------|
+| ~~1~~ | dump_state 手动 dict 替代 asdict() | Phase 37-38 |
+| ~~2~~ | integrator `_run_claude_agent()` 提取 | Phase 47 |
+| ~~3~~ | safety shlex.split token 化 | Phase 48 |
+| ~~4~~ | Windows CTRL_BREAK_EVENT 优雅关闭 | Phase 47 |
+| ~~5~~ | E2E 测试框架 (fake claude) | Phase 45 + test_e2e.py |
+
+## Remaining Work (v6.0 Candidates)
+
+| # | 任务 | 优先级 | 风险 | 说明 |
+|---|------|--------|------|------|
+| 1 | Integrator 多策略 (28.2) | P2 | 中 | `--strategy cherry-pick\|merge\|rebase` |
+| 2 | Watch WebSocket (28.4) | P3 | 中 | stdlib HTTP + asyncio WS server |
+| 3 | Docker 沙箱 (29.1) | P3 | 高 | 完全隔离，解决间接执行绕过 |
+| 4 | 异步 I/O 优化 | P3 | 低 | progress.py 异步写入（需引入依赖或 thread pool） |
+| 5 | 手动验证 (D.3-D.8) | P3 | 低 | watch/push/worker-model/noop/timeout 6 项 |
+
+## Architecture
 
 ```
-cagent/tasks.py          — dump_state: asdict() → 手动 dict
-cagent/integrator.py     — 新增 _run_claude_agent() 提取公共逻辑
-cagent/safety.py         — shlex.split token 化检查替代纯 regex
-cagent/progress.py       — Dashboard 异步写入优化
-cagent/cli/base.py       — Windows CTRL_BREAK_EVENT 优雅关闭
-cagent/agent.py          — Windows process group 创建
-tests/test_safety.py     — 新增 split-flag 测试用例
-tests/test_e2e.py        — 假 claude 可执行文件 E2E 测试
-tests/conftest.py        — E2E fixtures
+cagent/
+├── cli/                  — 命令入口 (base/run/watch/plan/logcmd/misc)
+├── agent.py              — Worker: claude -p 子进程 + worktree 隔离
+├── dispatcher.py         — 调度: 依赖图 + wave 并发 + budget 控制
+├── integrator.py         — 集成: cherry-pick + 冲突解决 + 多轮验证
+├── git_utils.py          — 统一 git helper (sync + async)
+├── safety.py             — 沙箱: regex + shlex token + Write 内容扫描
+├── progress.py           — Dashboard + 事件流 + token 追踪
+├── tasks.py              — Task dataclass + 解析 + 序列化
+├── memory.py             — 跨 task 共享上下文
+├── worktree.py           — Git worktree 生命周期管理
+└── log.py                — 控制台输出格式化
 ```
 
 ## Extension Points
-**模式: 策略注入 + 注册表**
-- safety.py: `DENY_PATTERNS` 列表 + `_check_command()` 函数 → 新增检查逻辑只需添加新的检查函数
-- integrator.py: `_run_claude_agent()` 通用函数 → 任何需要调用 claude 的新场景只需传入不同 prompt
-- progress.py: `Dashboard._write_backend` 可替换为不同 I/O 后端（文件、内存、网络）
+- **safety.py**: `DENY_PATTERNS` 列表 + `_check_command()` → 新增检查只需添加函数
+- **integrator.py**: `_run_claude_agent()` 通用函数 → 不同场景传入不同 prompt
+- **dispatcher.py**: wave-based scheduling → 依赖图自动排序
 
-## Portability
-- Windows: CTRL_BREAK_EVENT 需 `CREATE_NEW_PROCESS_GROUP` flag
-- Unix: SIGTERM 正常工作，不需要 process group
-- shlex.split 在 Windows 上行为与 Unix 不同（posix=False），需要处理
-
-## Review Checklist
-- [ ] Architecture matches plan
-- [ ] Extension points work (prove it)
-- [ ] No hardcoded env assumptions
-- [ ] Real bugs (null, boundary)
+## Known Limitations
+- Budget overshoot: 并发 task 间 `--max-tokens` 检查非原子
+- Safety bypass: 间接执行（编译二进制/非 Bash 解释器）可绕过 hook，完全隔离需 Docker
+- Windows: `os.kill(SIGTERM)` 实为 TerminateProcess，CTRL_BREAK_EVENT 为最佳 effort

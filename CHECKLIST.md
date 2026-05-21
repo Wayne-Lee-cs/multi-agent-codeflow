@@ -1,10 +1,8 @@
 # cagent — Implementation Checklist
 
 > v2.1 (Phase 1-24) completed: 153/165 items (92.7%). Details in [ARCHIVE.md](ARCHIVE.md).
-> v3.0-3.4 (Phase 25-38) completed. 220 pytest all pass.
-> v3.5 (Phase 39) 第六轮审计：修复 2 P0 + 4 P1 + 2 P2 + 3 回归。227 pytest all pass.
-> **Phase 40 evaluation (2026-05-19)**: 227 pytest pass, 0 failures, 无新 P0/P1 发现。交叉引用同步 (32.2/32.3/28.3 → DONE)。
-> **Phase 41 (2026-05-19)**: `--post-integrate-cmd` 多轮验证完成 (28.1 DONE)。234 pytest pass。
+> v3.0-4.0 (Phase 25-48) completed. **275 pytest all pass.**
+> **v5.0 (2026-05-21)**: Phase 25-48 全部提交。E2E 验证通过，git_utils 统一，Write 安全扫描，Windows 优雅关闭。
 > This file tracks only **remaining** and **new** work.
 
 ---
@@ -418,4 +416,4 @@
 | Phase 46 (用户文档) | 2 | **DONE** (README.md + PLAN.md 精简) |
 | Phase 47 (技术债清理) | 7 | **DONE** (git_utils 统一 + json import + 空提交 + commit msg) |
 | Phase 48 (设计改进) | 5 | **DONE** (budget 文档 + KeyboardInterrupt + Write sandbox + 2 tests) |
-| **Total remaining** | **12** | 1 deferred (D.2) + 8 手动验证 + 3 功能 TODO (28.2/28.4) + 3 Docker (29.1) |
+| **Total remaining** | **11** | 1 deferred (D.2) + 6 手动验证 (D.3-D.8) + 3 功能 TODO (28.2) + 4 Docker (28.4/29.1) |

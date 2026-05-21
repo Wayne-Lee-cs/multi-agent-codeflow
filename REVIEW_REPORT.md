@@ -5,21 +5,21 @@
 
 ---
 
-## Current Scores (v4.0, 重新评估, 2026-05-20)
+## Current Scores (v5.0, 2026-05-21)
 
-> **评分修正说明**: 之前 6 轮审计聚焦单元测试和代码审查，评分逐轮上涨至 4.93/5，存在通胀。本轮全量重读 3,906 LOC 源码 + 3,137 LOC 测试后重新校准。
+> **评分基准**: 全量代码审读 + Phase 45-48 修复后重新校准。275 pytest pass。
 
-| Dimension | Score (1-5) | 上次 | 调整原因 |
+| Dimension | Score (1-5) | v4.0 | 变化原因 |
 |-----------|-------------|------|----------|
-| 功能完整度 | 4.5 | 4.9 | ↓ **核心问题：E2E 从未验证成功**。所有 claude -p 交互均为 mock，实际 auth 一直 block |
-| 代码质量 | 4.6 | 5.0 | ↓ 代码干净但 44 轮迭代留下不一致：3 套 git helper 接口不同，run.py 重复 json import |
-| 安全性 | 4.3 | 4.9 | ↓ Hook 正则沙箱本质可绕过，仅覆盖 Bash 工具，Edit/Write 可写恶意脚本后执行 |
-| 可观测性 | 4.8 | 5.0 | ↓ Dashboard/events/budget 设计优秀。token 依赖 final result event，中间不可见 |
-| 跨平台 | 4.5 | 4.8 | ↓ Windows 支持用心但 os.kill(SIGTERM) 仍是强杀，Known Limitations 未解决 |
-| 测试覆盖 | 4.3 | 5.0 | ↓ **247 tests 全部是 mock/unit**。零 integration tests，零 E2E |
-| 文档 | 3.5 | 4.8 | ↓ PLAN 500行增量日志非路线图，**零用户文档，无 README** |
+| 功能完整度 | 4.8 | 4.5 | ↑ E2E 验证通过 (Phase 45: auth + 2-task + dep chain + conflict + budget) |
+| 代码质量 | 4.8 | 4.6 | ↑ git_utils.py 统一 3 套 helper (Phase 47)，json import 去重，commit msg 修复 |
+| 安全性 | 4.5 | 4.3 | ↑ Write 工具内容扫描 (Phase 48)，shlex token 化。间接执行仍需 Docker |
+| 可观测性 | 4.8 | 4.8 | → Dashboard/events/budget 设计优秀，无新变化 |
+| 跨平台 | 4.7 | 4.5 | ↑ CTRL_BREAK_EVENT + CREATE_NEW_PROCESS_GROUP 实现 (Phase 47) |
+| 测试覆盖 | 4.6 | 4.3 | ↑ 275 tests，含 5 个 fake-claude E2E 测试 (test_e2e.py) |
+| 文档 | 4.5 | 3.5 | ↑ README.md 完整用户文档 (Phase 46)，PLAN.md 精简为路线图 |
 
-**Overall: 4.36/5** (修正通胀评分。247 pytest pass, 核心差距：E2E + 用户文档 + git helper 统一)
+**Overall: 4.67/5** (275 pytest pass。核心差距：Docker 沙箱 + integrator 多策略 + 手动验证场景)
 
 ---
 
@@ -274,26 +274,26 @@ Full re-read of all 13 modules post-Phase 39. **No new P0/P1 issues found.** Cod
 
 | # | 问题 | 影响 | 状态 |
 |---|------|------|------|
-| V1 | 所有 `claude -p` 交互均为 mock，E2E 从未成功 | prompt 格式、stream-json 解析、worktree 并发、cherry-pick 链路、budget enforcement 全部未验证 | **TODO** (Phase 45) |
+| V1 | 所有 `claude -p` 交互均为 mock，E2E 从未成功 | prompt 格式、stream-json 解析、worktree 并发、cherry-pick 链路、budget enforcement 全部未验证 | **FIXED** (Phase 45: real E2E + test_e2e.py fake claude framework) |
 
 #### P1 — 设计 / 正确性
 
 | # | Module | Issue | Impact | Fix | Status |
 |---|--------|-------|--------|-----|--------|
-| V2 | integrator.py:290-296 | repair commit 可能为空 — agent 未改文件时 `git commit` 静默失败（`check=False`） | 浪费一轮 repair round，validation 命令永远失败 | commit 前 `git status --porcelain` 检查 | **TODO** (Phase 47) |
-| V3 | dispatcher.py:183-186 | budget check 与并发 task 竞态 — `budget_exceeded` flag 对同时运行的 task 不立即可见 | 实际 token 可超预算 `(concurrency-1)` 个 task | 文档注明 + help 说明 | **TODO** (Phase 48) |
-| V4 | cli/run.py:150-183 | KeyboardInterrupt 在 `asyncio.run()` 中断后同步调 `_clean_worktrees` | event loop 状态不确定，可能残留 worktree | 最小化 handler，清理交给 `cagent clean` | **TODO** (Phase 48) |
-| V5 | — | 零用户文档，无 README.md | 用户无法了解安装和使用方式 | 写 README.md | **TODO** (Phase 46) |
+| V2 | integrator.py:290-296 | repair commit 可能为空 — agent 未改文件时 `git commit` 静默失败（`check=False`） | 浪费一轮 repair round，validation 命令永远失败 | commit 前 `git status --porcelain` 检查 | **FIXED** (Phase 47) |
+| V3 | dispatcher.py:183-186 | budget check 与并发 task 竞态 — `budget_exceeded` flag 对同时运行的 task 不立即可见 | 实际 token 可超预算 `(concurrency-1)` 个 task | 文档注明 + help 说明 | **FIXED** (Phase 48: --max-tokens help + Known Limitations) |
+| V4 | cli/run.py:150-183 | KeyboardInterrupt 在 `asyncio.run()` 中断后同步调 `_clean_worktrees` | event loop 状态不确定，可能残留 worktree | 最小化 handler，清理交给 `cagent clean` | **FIXED** (Phase 48) |
+| V5 | — | 零用户文档，无 README.md | 用户无法了解安装和使用方式 | 写 README.md | **FIXED** (Phase 46) |
 
 #### P2 — 代码质量
 
 | # | Module | Issue | Impact | Fix | Status |
 |---|--------|-------|--------|-----|--------|
-| V6 | 全局 | 3 套 git helper：`worktree._git`(sync) / `agent._run_git_async`(async tuple) / `integrator._run_git`(async GitResult) | 接口不一致，维护成本高 | 提取 `cagent/git_utils.py` 统一 | **TODO** (Phase 47) |
-| V7 | cli/run.py:441 | `import json as _json2` 和 `import json as _json` 同函数重复 import | 代码混乱 | 移至模块顶部 | **TODO** (Phase 47) |
-| V8 | agent.py:289 | `task.prompt.split("\n")[0][:72]` — prompt 以 `\n` 开头时 commit message 为空 | 空 commit message | `.strip().split(...)` | **TODO** (Phase 47) |
-| V9 | PLAN.md | 500行增量变更日志，非架构路线图 | 难以快速了解项目方向 | 精简为架构+状态+milestones，历史归档 | **TODO** (Phase 46) |
-| V10 | safety.py | 仅拦截 Bash 工具，Edit/Write 可写恶意脚本后 Bash 执行 | 沙箱可绕过 | PreToolUse 增加 Write 内容检查 | **TODO** (Phase 48) |
+| V6 | 全局 | 3 套 git helper：`worktree._git`(sync) / `agent._run_git_async`(async tuple) / `integrator._run_git`(async GitResult) | 接口不一致，维护成本高 | 提取 `cagent/git_utils.py` 统一 | **FIXED** (Phase 47) |
+| V7 | cli/run.py:441 | `import json as _json2` 和 `import json as _json` 同函数重复 import | 代码混乱 | 移至模块顶部 | **FIXED** (Phase 47) |
+| V8 | agent.py:289 | `task.prompt.split("\n")[0][:72]` — prompt 以 `\n` 开头时 commit message 为空 | 空 commit message | `.strip().split(...)` | **FIXED** (Phase 47) |
+| V9 | PLAN.md | 500行增量变更日志，非架构路线图 | 难以快速了解项目方向 | 精简为架构+状态+milestones，历史归档 | **FIXED** (Phase 46) |
+| V10 | safety.py | 仅拦截 Bash 工具，Edit/Write 可写恶意脚本后 Bash 执行 | 沙箱可绕过 | PreToolUse 增加 Write 内容检查 | **FIXED** (Phase 48) |
 
 ### LOW — 6 items (deferred, non-blocking)
 
@@ -304,7 +304,7 @@ Full re-read of all 13 modules post-Phase 39. **No new P0/P1 issues found.** Cod
 | L3 | safety.py | 间接执行绕过（bash x.sh） | 3.7.1 部分修复，完全解决需 Docker |
 | L4 | agent.py | API Key 在 os.environ 中可见 | CLI 标准做法 |
 | L5 | cli.py | architect prompt injection | 用户即作者，无第三方场景 |
-| L6 | cli.py | Windows `os.kill(SIGTERM)` 实为 TerminateProcess，worker 无 graceful stop | 日志已修正(B7)，行为已纳入 Known Limitations |
+| L6 | cli.py | Windows `os.kill(SIGTERM)` 实为 TerminateProcess，worker 无 graceful stop | CTRL_BREAK_EVENT 实现 (Phase 47)，fallback 纳入 Known Limitations |
 
 ### INFO — Unverified scenarios (need manual test)
 
@@ -318,43 +318,24 @@ Full re-read of all 13 modules post-Phase 39. **No new P0/P1 issues found.** Cod
 
 ---
 
-## Test Coverage Matrix
+## Test Coverage Matrix (v5.0, 275 tests)
 
-| Module | pytest | Manual | Gap | Priority |
-|--------|--------|--------|-----|----------|
-| tasks.py | 22 | — | ✅ Complete | — |
-| safety.py | 67 | 33 | ✅ Complete | — |
-| progress.py | 40 | 6 | ✅ Complete (+7 token tests) | — |
-| compat.py | 7 | — | ✅ Complete | — |
-| worktree.py | 8 | — | ✅ Complete | — |
-| dispatcher.py | 18 | 2 | ✅ (+4 retry + 3 budget + 1 transitive blocked) | — |
-| memory.py | 17 | 5 | ✅ Complete | — |
-| agent.py | 12 | 2 | ✅ Phase 33 + Phase 43 (+2 max-turns tests) | — |
-| integrator.py | 22 | 2 | ✅ Phase 33 + Phase 41 + Phase 42 (+1 D.1 first-conflict test) | — |
-| log.py | 13 | — | ✅ Phase 36 完成 | — |
-| **cli.py** | **21** | 14 | ✅ Phase 37+39+42+43 完成 (+2 budget display tests) | — |
-| **Total** | **247** | **61** | — | — |
-
----
-
-## v3.4 Evaluation Targets
-
-### Phase 38 完成后实际：
-
-| Dimension | 实际 | Key deliverable |
-|-----------|--------|-----------------|
-| 代码质量 | 4.8 | E1 gitignore 追加 + E2 序列化统一 + E4 git 调用统一 |
-| 安全性 | 4.8 | E1 修复后用户排除规则不再丢失 |
-| 文档 | 4.7 | E5 交叉引用修正 + E6 版本号同步 |
-| 功能 | 4.7 | E7 pip install 支持 |
-
-### Phase 32 完成 (P2)：
-
-| Item | Target | Status |
-|------|--------|--------|
-| 32.1 cli.py 拆包 | 代码质量 5.0 | **DONE** (Phase 40: 6 submodules) |
-| 32.2 Dashboard 序列化 | I/O 性能 | **DONE** (C5/E2/R2) |
-| 32.3 pip install | 用户体验 | **DONE** (E7/38.3.3) |
+| Module | pytest | Gap |
+|--------|--------|-----|
+| tasks.py | 22 | ✅ |
+| safety.py | 67 | ✅ |
+| progress.py | 40 | ✅ |
+| compat.py | 7 | ✅ |
+| worktree.py | 8 | ✅ |
+| dispatcher.py | 26 | ✅ |
+| memory.py | 17 | ✅ |
+| agent.py | 14 | ✅ |
+| integrator.py | 29 | ✅ |
+| log.py | 13 | ✅ |
+| cli/ | 21 | ✅ |
+| e2e | 5 | ✅ (fake claude framework) |
+| git_utils | 6 | ✅ |
+| **Total** | **275** | — |
 
 ---
 
