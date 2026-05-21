@@ -199,3 +199,64 @@ Done! (1m13s)
 |------|------|-------|---------|
 | Single Agent | 47.7s | 4 | — |
 | cagent (j=4) | 16.7s | 4 | **2.86x** |
+
+---
+
+## Phase 25-44: v3.0 → v3.9 (2026-05-18 — 2026-05-20)
+
+> 20 rounds of code audit + feature development. 247 pytest tests pass.
+
+### Phase 25: Bug Fixes (P0)
+- 25.0.1 `cli.py` `_get_repo_root()` error handling
+- 25.0.2 `integrator.py` async `_run_git()` timeout
+- 25.0.3 `log.py` LinePrinter cancel queue flush
+- 25.0.4 `memory.py` cache invalidation with mtime
+
+### Phase 26: Reliability (P1)
+- 26.1 Auto-retry with exponential backoff (`--retries N`)
+- 26.2 Token usage tracking (input/output per task + dashboard)
+- 26.3 Single task cancellation (`cagent cancel <task-id>`)
+
+### Phase 27: Test Coverage (P2 → P0)
+- 27.1 agent.py mock tests (10 tests)
+- 27.2 integrator.py mock tests (14 tests)
+
+### Phase 28: Feature Enhancement (P3)
+- 28.1 `--post-integrate-cmd` multi-round validation (Phase 41)
+- 28.3 pip install support via `[project.scripts]` (Phase 38)
+
+### Phase 29: Security Evolution (P4, long-term)
+- 29.2 Resource limits: `--max-turns` + `--max-tokens` (Phase 43)
+
+### Phase 30-39: Six Rounds of Code Audit
+- 30+ bug fixes (P0/P1/P2)
+- Safety sandbox: node -e, powershell -Command, cmd /c, python -c blocking
+- `.gitignore` append mode (not overwrite)
+- Git timeout coverage for all subprocess calls
+- CLI split into `cli/` package (Phase 40)
+- Dashboard serialization optimization
+- Test deduplication (conftest.py shared fixtures)
+
+### Phase 40: Evaluation Pass
+- Full re-read, no new P0/P1 issues
+- CLI package split: base.py, run.py, watch.py, plan.py, logcmd.py, misc.py
+
+### Phase 41: `--post-integrate-cmd`
+- Multi-round validation (max 2 repair rounds)
+- Cross-platform shell execution with timeout
+
+### Phase 42: Quick Wins
+- RuntimeWarning fixes (AsyncMock)
+- Empty prompt fallback for first-conflict scenario
+
+### Phase 43: Resource Limits
+- `--max-turns N` per-task turn limit (pass-through to claude -p)
+- `--max-tokens N` per-run token budget
+- Dashboard budget percentage display with yellow warning at ≥80%
+
+### Phase 44: Bug Fix K8-K14
+- K8: Transitive dependency blocking (A→B→C chain)
+- K9: fail_reason cleanup on retry success
+- K10: resume base_sha fallback
+- K11: cancel PID file cleanup
+- K12-K14: ANSI color, truthiness, token summary fixes

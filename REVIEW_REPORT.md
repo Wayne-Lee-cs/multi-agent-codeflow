@@ -5,19 +5,21 @@
 
 ---
 
-## Current Scores (v3.0, re-evaluated 2026-05-18)
+## Current Scores (v4.0, 重新评估, 2026-05-20)
 
-| Dimension | Score (1-5) | Notes |
-|-----------|-------------|-------|
-| 功能完整度 | 5 | v1 spec + plan + 依赖调度 + 重试 + token 追踪 + cancel |
-| 代码质量 | 4.7 | M1-M4 已修复；agent/integrator 缺 mock（Phase 27） |
-| 安全性 | 4.5 | sandbox + push 门控扎实；已知间接执行绕过 |
-| 可观测性 | 4.8 | Token 追踪 + LinePrinter flush + dashboard token 展示 |
-| 跨平台 | 4.5 | Windows GBK 已修复，compat 层完备 |
-| 测试覆盖 | 4.6 | 166 pytest + 61 手动；agent/integrator 模块未 mock |
-| 文档 | 4.5 | README + PLAN + CHECKLIST + ARCHIVE 完备 |
+> **评分修正说明**: 之前 6 轮审计聚焦单元测试和代码审查，评分逐轮上涨至 4.93/5，存在通胀。本轮全量重读 3,906 LOC 源码 + 3,137 LOC 测试后重新校准。
 
-**Overall: 4.8/5** (Phase 25-26 完成)
+| Dimension | Score (1-5) | 上次 | 调整原因 |
+|-----------|-------------|------|----------|
+| 功能完整度 | 4.5 | 4.9 | ↓ **核心问题：E2E 从未验证成功**。所有 claude -p 交互均为 mock，实际 auth 一直 block |
+| 代码质量 | 4.6 | 5.0 | ↓ 代码干净但 44 轮迭代留下不一致：3 套 git helper 接口不同，run.py 重复 json import |
+| 安全性 | 4.3 | 4.9 | ↓ Hook 正则沙箱本质可绕过，仅覆盖 Bash 工具，Edit/Write 可写恶意脚本后执行 |
+| 可观测性 | 4.8 | 5.0 | ↓ Dashboard/events/budget 设计优秀。token 依赖 final result event，中间不可见 |
+| 跨平台 | 4.5 | 4.8 | ↓ Windows 支持用心但 os.kill(SIGTERM) 仍是强杀，Known Limitations 未解决 |
+| 测试覆盖 | 4.3 | 5.0 | ↓ **247 tests 全部是 mock/unit**。零 integration tests，零 E2E |
+| 文档 | 3.5 | 4.8 | ↓ PLAN 500行增量日志非路线图，**零用户文档，无 README** |
+
+**Overall: 4.36/5** (修正通胀评分。247 pytest pass, 核心差距：E2E + 用户文档 + git helper 统一)
 
 ---
 
@@ -31,18 +33,278 @@
 | M2 | integrator.py:359 | async `_run_git()` 无 timeout，git 挂起时永久阻塞 | 进程泄漏 | `asyncio.wait_for(..., timeout=60)` | **FIXED** |
 | M3 | log.py:25 | LinePrinter cancel 时 queue 未 flush，最后几条 DONE/FAIL 丢失 | 输出不完整 | break 前 drain queue | **FIXED** |
 | M4 | memory.py:62 | `build_shared_context` 缓存不感知内容变化 | integrator append 后返回过期数据 | per-file mtime 加入 cache key | **FIXED** |
-| M5 | agent.py | 无 pytest mock 测试，仅靠 E2E 验证 | 回归风险 | Phase 27 补充 | open |
-| M6 | integrator.py | 无 pytest mock 测试，仅靠 E2E 验证 | 回归风险 | Phase 27 补充 | open |
+| M5 | agent.py | 无 pytest mock 测试，仅靠 E2E 验证 | 回归风险 | Phase 27 补充 | **FIXED** (8 tests) |
+| M6 | integrator.py | 无 pytest mock 测试，仅靠 E2E 验证 | 回归风险 | Phase 27 补充 | **FIXED** (14 tests) |
 
-### LOW — 5 items (deferred, non-blocking)
+### Code Review Bug Fixes (2026-05-19 后追加)
+
+| # | Module | Issue | Impact | Fix | Status |
+|---|--------|-------|--------|-----|--------|
+| CR1 | cli.py:678 | `_write_summary` 从 `tasks` 读 token 而非 `results` | summary token 数据为 0 | 改读 `results` | **FIXED** |
+| CR2 | dispatcher.py:20 | `_is_retryable` 子串匹配过于宽泛（如 "timeout" 匹配 "connection_timeout_error"） | 非瞬态错误被重试 | 改用 compiled regex + `\b` word boundary | **FIXED** |
+| CR3 | memory.py:71 | `build_shared_context` 迭代 `task_ids` 而非 `sorted_ids` | 缓存 key 与实际迭代不一致 | 改为迭代 `sorted_ids` | **FIXED** |
+| CR4 | integrator.py:384 | `proc.kill()` 在进程已退出时抛 `ProcessLookupError` | timeout handler 本身抛异常 | wrap `try/except ProcessLookupError` | **FIXED** |
+
+### NEW — 15 items (深度审计 2026-05-19)
+
+#### P0 — Bug / 正确性 (5 items, Phase 30)
+
+| # | Module | Issue | Impact | Fix | Status |
+|---|--------|-------|--------|-----|--------|
+| N1 | memory.py:70 | `_cached_ids` 字段名语义错误，实际存 `(ids, mtimes)` | 重构时引入 bug | 重命名为 `_cache_key` | **FIXED** |
+| N2 | dispatcher.py:200 | Kahn 拓扑排序 `list.pop(0)` O(n) | 10+ 任务性能退化 | 改用 `collections.deque` | **FIXED** |
+| N3 | agent.py:254 | sandbox 文件删除与 `git add -A` 时序窗口 | sandbox 文件可能被提交 | add 前验证已清除 | **FIXED** |
+| N4 | cli.py:505 | run_id UTC 与终端时间显示不一致 | 中国用户调试困惑 | LinePrinter 改用本地时区 | **FIXED** |
+| N5 | integrator.py:359 | `_run_git` 每次 `os.environ.copy()` | 内存/CPU 浪费 | 默认 `env=None` | **FIXED** |
+
+#### P1 — 设计 / 健壮性 (6 items, Phase 31)
+
+| # | Module | Issue | Impact | Fix | Status |
+|---|--------|-------|--------|-----|--------|
+| N6 | safety.py | 缺 `node -e` / `powershell -Command` / `cmd /c` deny | 高频绕过路径未覆盖 | DENY_PATTERNS 新增 4 条 + pwsh | **FIXED** |
+| N7 | agent.py:272 | `git add -A` 可能提交 .env/node_modules/编译产物 | 敏感信息泄露 + 臃肿 commit | 注入标准 .gitignore 排除 | **FIXED** (Phase 37 C2) |
+| N8 | cli.py:1182 | Windows `os.kill(SIGTERM)` 实为 `TerminateProcess` | 日志误导 + 非 graceful 停止 | 平台判断 + 修正消息 | **FIXED** (Phase 36 B7) |
+| N9 | progress.py:262 | `setattr(tp, k, v)` 无字段验证 | 拼写错误静默创建新属性 | 检查 `__dataclass_fields__` | **FIXED** |
+| N10 | dispatcher.py:63 | `_reset_worktree` 缺 `git clean -fd` | 重试拾取上次残留文件 | reset 后追加 clean | **FIXED** |
+| N11 | cli.py:921 | `_print_events_formatted` 一次性读全文件 | 大文件内存爆发 | 逐行读取 | **FIXED** |
+
+#### P2 — 代码质量 / 可维护性 (4 items, Phase 32)
+
+| # | Module | Issue | Impact | Fix | Status |
+|---|--------|-------|--------|-----|--------|
+| N12 | cli.py | 1452 LOC 过长，9 子命令 + 渲染混合 | 可维护性差 | 拆分为 `cli/` 包 | **FIXED** (Phase 40: 6 submodules) |
+| N13 | progress.py | `asdict(tp)` 递归序列化 `last_event.raw` | I/O + CPU 浪费 | 提取 `_task_progress_dict` 共享函数 | **FIXED** (C5 + E2) |
+| N14 | pyproject.toml | 缺 `[project.scripts]` 入口 | `pip install -e .` 后无法直接用 `cagent` | 添加 entry point | **FIXED** (Phase 38.3.3) |
+| N15 | agent/integrator | Phase 27 优先级不足 | 核心模块 0 测试覆盖 | P2 → P0 提升 | **FIXED** (Phase 27 done) |
+
+### NEW — 10 items (深度审计 2026-05-19 第二轮)
+
+#### P0 — Bug / 正确性 (2 items, Phase 33)
+
+| # | Module | Issue | Impact | Fix | Status |
+|---|--------|-------|--------|-----|--------|
+| A1 | agent.py:214-326 | `_commit_result` 中 6 个 git subprocess 调用无 timeout，与 M2 同类 bug | git 挂起时进程永久阻塞（GPG/index.lock/网络） | 提取 `_run_git_async` + timeout=60 | **FIXED** |
+| A2 | cli.py:644 | `_cmd_resume` 不传 conventions，恢复运行丢失全局约定 | worker 代码风格不一致 | resume 时重新加载 conventions | **FIXED** |
+
+#### P1 — 设计 / 健壮性 (6 items, Phase 34)
+
+| # | Module | Issue | Impact | Fix | Status |
+|---|--------|-------|--------|-----|--------|
+| A3 | agent.py:88 + integrator.py:250 | `os.environ.copy()` 冗余（3.6.5 只修了 `_run_git`） | 每次 agent 调用复制完整 env dict | 改传 `env=None` | **FIXED** |
+| A4 | safety.py:42 | `python -c` 模式只拦截含 `subprocess` 的，`os.system` 等绕过 | sandbox 安全漏洞 | 改为 `r"\bpython[3]?\s+-c\b"` 全面阻断 | **FIXED** |
+| A5 | integrator.py:331 | cherry-pick continue 前 `git add -A` 可能暂存 sandbox 文件 | sandbox 文件进入 commit | add 前清理 sandbox 文件 | **FIXED** |
+| A6 | progress.py:196 | Dashboard 加载路径用 `hasattr`，`set_task_status` 用 `__dataclass_fields__` | 验证不一致，损坏数据可注入属性 | 统一验证方式 | **FIXED** |
+| A7 | cli.py:431 | KeyboardInterrupt 不终止 worker 子进程 | 孤儿 claude -p 持续消耗 API credits | 通过 PID 文件 terminate workers | **FIXED** (cli.py:435-443) |
+| A8 | cli.py:1206 | `_cmd_plan` 运行 architect 无 safety sandbox | plan agent 可执行破坏性命令 | 注入临时 sandbox，完成后清理 | **FIXED** |
+
+#### P2 — 代码质量 (2 items, Phase 35)
+
+| # | Module | Issue | Impact | Fix | Status |
+|---|--------|-------|--------|-----|--------|
+| A9 | tests/ | `AsyncLineIterator` + `_make_process` 在 test_agent 和 test_integrator 中重复定义 | 维护成本 | 提取到 conftest.py | **FIXED** (conftest.py:16-67, test files import) |
+| A10 | agent.py:146 | `last_lines.pop(0)` O(n)，与 N2 (dispatcher deque 修复) 不一致 | 影响极小（max 5 元素），但不一致 | 改用 `deque(maxlen=5)` | **FIXED** (agent.py:134) |
+
+### NEW — 8 items (第三轮审计 2026-05-19)
+
+#### P0 — Bug / 正确性 (1 item, Phase 36)
+
+| # | Module | Issue | Impact | Fix | Status |
+|---|--------|-------|--------|-----|--------|
+| B1 | cli.py:1225 | `_cmd_plan` sandbox 注入后无 finally 清理，sandbox 文件残留用户 repo | 后续 claude 会话行为被 sandbox hook 干扰 | try/finally 包裹 + finally 删除 sandbox 文件 | **FIXED** |
+
+#### P1 — 设计 / 健壮性 (4 items, Phase 36)
+
+| # | Module | Issue | Impact | Fix | Status |
+|---|--------|-------|--------|-----|--------|
+| B2 | integrator.py:335 | `_resolve_conflicts` 中 `os.environ.copy()` 残留，只为设 GIT_EDITOR | 每次冲突解决复制完整 env dict | `{**os.environ, "GIT_EDITOR": "true"}` | **FIXED** |
+| B3 | dispatcher.py:73-87 | `_reset_worktree` 的 git reset/clean 无 timeout | 重试时 index.lock 竞争可能挂起 | `asyncio.wait_for(..., timeout=60)` | **FIXED** |
+| B4 | test_agent.py:17-34 | fixture 重复定义 shadow conftest（Phase 35 只去重 helper 未去重 fixture） | conftest 修改不反映到 test_agent | 删除 test_agent 重复 fixture | **FIXED** |
+| B5 | REVIEW/CHECKLIST | A7/A9/A10 及 34.2.4 状态标记与代码不符 | 维护者误判项目状态 | 同步文档（本轮已修正） | **FIXED** |
+
+#### P2 — 代码质量 (3 items, Phase 36)
+
+| # | Module | Issue | Impact | Fix | Status |
+|---|--------|-------|--------|-----|--------|
+| B6 | log.py | 0 pytest 覆盖，核心控制台模块无自动化验证 | 回归风险 | 补充 LinePrinter 单元测试 | **FIXED** (13 tests) |
+| B7 | cli.py:1210 | Windows `_terminate_pid` 平台差异（跨 N8/31.2.2/34.2.5 三次标记未修） | Windows 下 cancel 非 graceful | 平台判断 + 修正日志 | **FIXED** (merged N8) |
+| B8 | Phase 32 | cli.py 拆包 / Dashboard 序列化 / pip install 三项 P2 | 可维护性 + 用户体验 | 见 Phase 32 + 37 + 38 + 40 | **FIXED** (32.1 Phase 40, 32.2 C5+E2, 32.3 E7) |
+
+### NEW — 5 items (第四轮审计 2026-05-19)
+
+#### P1 — 设计 / 健壮性 (2 items, Phase 37)
+
+| # | Module | Issue | Impact | Fix | Status |
+|---|--------|-------|--------|-----|--------|
+| C1 | integrator.py:154-160 | `_cherry_pick_one` 中 cherry-pick subprocess 无 timeout，同模块 `_run_git` 已有 timeout | git cherry-pick 挂起时进程永久阻塞（GPG/submodule/网络） | 改用 `_run_git("cherry-pick", ...)` 替代裸 subprocess | **FIXED** |
+| C2 | agent.py:319 | `git add -A` 可能提交 `.env`/`node_modules`/编译产物（承接 N7/31.2.1） | 敏感信息泄露 + 臃肿 commit | worktree `.gitignore` 注入标准排除规则 | **FIXED** |
+
+#### P2 — 代码质量 / 性能 (3 items, Phase 37)
+
+| # | Module | Issue | Impact | Fix | Status |
+|---|--------|-------|--------|-----|--------|
+| C3 | dispatcher.py:220-222 | Kahn 排序下游查找 O(N*M)，每次遍历全部 task | 50+ task 场景性能退化 | 预建 `children` 邻接表 | **FIXED** |
+| C4 | cli.py | 0 pytest 覆盖 — 唯一高频修改但无自动化测试的模块（1426 LOC） | 回归风险最高 | 优先给纯函数写 mock 测试 | **FIXED** (tests/test_cli.py 8 passing) |
+| C5 | progress.py:296 | `get_snapshot` 用 `asdict(tp)` 递归序列化含大量 raw（承接 N13/32.2） | 长任务 CPU/内存开销 | 手动构建 dict 替代 | **FIXED** |
+
+### NEW — Additional findings from code review (Phase 37 iteration 2)
+
+#### P0 — Correctness Bug (1 item)
+
+| # | Module | Issue | Impact | Fix | Status |
+|---|--------|-------|--------|-----|--------|
+| D1 | integrator.py:348 | `_resolve_conflicts` 成功返回 True 但从未更新 `task.commit_sha` 或 `task.status`，后续集成检查 `t.status=="done" and t.commit_sha` 会跳过该 task | 冲突解决后的 task 在后续集成迭代中被静默跳过 | 在 `return True` 前执行 `result = await _run_git("rev-parse", "HEAD", ...)` 并更新 `task.commit_sha` 和 `task.status="done"` | **FIXED** |
+
+#### P2 — Code Quality (1 item)
+
+| # | Module | Issue | Impact | Fix | Status |
+|---|--------|-------|--------|-----|--------|
+| D2 | dispatcher.py:283 | `dump_state` 在标记 blocked tasks 循环内调用 N 次，应只在所有 blocked 任务标记完成后调用一次 | 冗余 I/O + 中间状态可能泄露 | 将 `dump_state` 移至循环外，条件触发 | **FIXED** |
+
+### NEW — 7 items (第五轮审计 2026-05-19)
+
+#### P0 — Bug / 正确性 (1 item, Phase 38)
+
+| # | Module | Issue | Impact | Fix | Status |
+|---|--------|-------|--------|-----|--------|
+| E1 | agent.py:67 | `gitignore_path.write_text()` 覆写 worktree 原有 `.gitignore`，agent 运行期间用户自定义排除规则丢失 | 被排除的文件可能意外参与 agent 运行 + 潜在敏感文件泄露 | 改为追加模式：读取现有内容后追加 cagent 排除规则块 | **FIXED** |
+
+#### P1 — 设计 / 健壮性 (3 items, Phase 38)
+
+| # | Module | Issue | Impact | Fix | Status |
+|---|--------|-------|--------|-----|--------|
+| E2 | progress.py:325 | `_write_task_progress` 仍用 `asdict(tp)` 递归序列化 `last_event.raw`（C5 只修了 `get_snapshot`） | per-task progress 写入路径序列化大量 raw 数据 | 提取 `_task_progress_dict` 共享函数，两处复用 | **FIXED** |
+| E3 | cli.py:157 | `_auth_preflight_check` 中 `env=os.environ.copy()` 残留 | 与 Phase 34 全局 `env=None` 策略不一致 | 移除该参数 | **FIXED** |
+| E4 | dispatcher.py:73-97 | `_reset_worktree` 用裸 `create_subprocess_exec`，与 agent/integrator 辅助函数模式不一致 | 三套 git 调用模式增加维护成本 | 复用 `agent._run_git_async` | **FIXED** |
+
+#### P2 — 代码质量 (3 items, Phase 38)
+
+| # | Module | Issue | Impact | Fix | Status |
+|---|--------|-------|--------|-----|--------|
+| E5 | CHECKLIST | 31.2.1/31.2.2/34.2.5 标 open 但已被后续 Phase 修复 | 维护者误判项目状态 | 同步标记（本轮已修正） | **FIXED** |
+| E6 | pyproject.toml | 版本号 `2.1.0` 与实际 v3.4 不一致 | 用户/工具获取错误版本信息 | 更新为 `3.4.0` | **FIXED** |
+| E7 | pyproject.toml | 缺 `[project.scripts]` 入口（承接 N14/32.3，反复推迟） | 无法 `pip install -e .` 后直接使用 `cagent` | 添加 `cagent = "cagent.cli:main"` | **FIXED** |
+
+#### Code review regression fixes (Phase 38 iteration 2)
+
+| # | Module | Issue | Impact | Fix | Status |
+|---|--------|-------|--------|-----|--------|
+| R1 | dispatcher.py:18-26 | `_is_retryable` regex 用 `\b` word boundary，`_` 是 word char 导致 `network_timeout` 等下划线连接形式不匹配 | 可重试错误被误判为不可重试 | `\bnetwork`/`\bconnection` 去掉尾部 `\b`，匹配前缀形式 | **FIXED** |
+| R2 | progress.py:292-349 | `get_snapshot` 与 `_write_task_progress` 重复 dict 构建，新增字段需同步两处 | 维护成本 + 静默 diverge 风险 | 提取 `_task_progress_dict` 共享函数 | **FIXED** |
+| R3 | agent.py:67 | `.gitignore` 块开头 `\n` 导致文件不存在时首行为空行 | 纯 cosmetic（git 忽略） | 条件化前缀 + 常量提升为模块级 | **FIXED** |
+
+### NEW — 8 items (第六轮审计 2026-05-19)
+
+#### P0 — Bug / 正确性 (2 items, Phase 39)
+
+| # | Module | Issue | Impact | Fix | Status |
+|---|--------|-------|--------|-----|--------|
+| F1 | memory.py:33-35 | `append()` 中 `f.tell()` 在 append 模式下平台相关不可靠，某些系统返回 0 即使文件非空 | 多次 append 的内容缺少分隔符，粘连在一起 | 改为 `f.seek(0, 2)` 在 open 上下文内原子检查 | **FIXED** |
+| F2 | safety.py + agent.py | `.gitignore` 双重写入：`prepare_sandbox` 追加 `.claude/`，`run_agent` 追加 cagent exclusion block，两处独立写入可能产生冗余 | gitignore 累积重复行（功能不受影响） | 统一由 `agent.py` 负责 `.gitignore` 写入 + `_cmd_plan` 独立注入 | **FIXED** |
+
+#### P1 — 设计 / 健壮性 (4 items, Phase 39)
+
+| # | Module | Issue | Impact | Fix | Status |
+|---|--------|-------|--------|-----|--------|
+| F3 | safety.py:42 | `python[3]?\s+-c\b` 缺少前导 `\b`，`cpython -c`/`ipython -c` 也被匹配 | 与其他 `\b` 锚定模式风格不一致 | 改为 `r"\bpython[3]?\s+-c\b"` | **FIXED** |
+| F4 | dispatcher.py:158 | `_reset_worktree` 失败被 `except Exception: pass` 静默吞掉 | retry 在脏 worktree 运行，可能提交残留文件 | 改为 `logging.warning(...)` | **FIXED** |
+| F5 | progress.py:333 | `_append_event` 用 `asdict(event)` 序列化完整 raw 到 events.jsonl | 长任务 events.jsonl 文件巨大 | 手动 dict 排除 raw 字段 + 移除未用 asdict import | **FIXED** |
+| F6 | __main__.py:14 | version check 仅在 `__main__` 执行，pip install 入口点 `cli:main` 跳过检查 | Python < 3.11 用户得到语法错误而非友好提示 | `cli.main()` 开头调用（编码修复在前） | **FIXED** |
+
+#### P2 — 代码质量 (2 items, Phase 39)
+
+| # | Module | Issue | Impact | Fix | Status |
+|---|--------|-------|--------|-----|--------|
+| F7 | pyproject.toml | 缺少 `authors`/`license`/`readme` 发布元数据 | PyPI 发布需要 | 补充基础元数据 + 版本号 3.5.0 | **FIXED** |
+| F8 | tests/ | `_cmd_cancel`/`_cmd_clean` 等 CLI 子命令无 mock 测试 | 回归风险 | 补充 8 个 mock 测试 | **FIXED** |
+
+#### Code review regression fixes (Phase 39 iteration 2)
+
+| # | Module | Issue | Impact | Fix | Status |
+|---|--------|-------|--------|-----|--------|
+| G1 | cli.py:_cmd_plan | F2 移除 `prepare_sandbox` 的 `.gitignore` 写入后 plan 命令失去保护 | sandbox 文件可能被 `git add -A` 意外提交 | `_cmd_plan` 独立注入 + cleanup 恢复原始内容 | **FIXED** |
+| G2 | cli.py:main() | F6 版本检查置于 Windows 编码修复之前 | Windows GBK 控制台可能输出乱码 | 调换顺序 | **FIXED** |
+| G3 | memory.py:append() | F1 `path.stat()` TOCTOU 竞态 | 并发 append 可能丢失分隔符 | 改为 `f.seek(0, 2)` 在 open 上下文内检查 | **FIXED** |
+
+### Phase 40 — Evaluation Pass (2026-05-19)
+
+Full re-read of all 13 modules post-Phase 39. **No new P0/P1 issues found.** Code is stable.
+
+| # | Type | Finding | Status |
+|---|------|---------|--------|
+| H1 | P2 | `test_agent.py::test_run_git_async_timeout` RuntimeWarning: `AsyncMock.kill()` returns unawaited coroutine | **FIXED** (Phase 42: AsyncMock→MagicMock for sync calls) |
+| H2 | docs | CHECKLIST 32.2/32.3/28.3 stale open markers for items completed in Phase 37-38 | **FIXED** (cross-refs synced) |
+
+### Phase 41 — `--post-integrate-cmd` Multi-round Validation (2026-05-19)
+
+| # | Module | Change | Status |
+|---|--------|--------|--------|
+| J1 | cli/__init__.py | `--post-integrate-cmd` argparse flag | **DONE** |
+| J2 | cli/run.py | Pass `post_integrate_cmd` to `integrate()` | **DONE** |
+| J3 | integrator.py | `_run_shell_cmd`: cross-platform shell command execution with timeout | **DONE** |
+| J4 | integrator.py | `_post_integrate_validate`: run cmd → fail → repair agent → retry (max 2 rounds) | **DONE** |
+| J5 | tests/test_integrator.py | 7 new tests: shell_cmd success/fail/timeout + validate pass/repair/fail/agent-fail | **DONE** |
+
+### Phase 43 — Resource Limit (2026-05-20)
+
+| # | Module | Change | Status |
+|---|--------|--------|--------|
+| K1 | cli/__init__.py | `--max-turns N` and `--max-tokens N` argparse flags | **DONE** |
+| K2 | agent.py | `max_turns` param → `--max-turns` pass-through to claude -p | **DONE** |
+| K3 | dispatcher.py | `max_tokens` budget enforcement: check after each task, fail remaining when exceeded | **DONE** |
+| K4 | dispatcher.py | `nonlocal budget_exceeded` fix — missing `nonlocal` caused `UnboundLocalError` in all tasks | **DONE** (bug found during testing) |
+| K5 | cli/run.py | Pass max_turns/max_tokens to dispatcher, write budget.json, update banner + summary | **DONE** |
+| K6 | cli/watch.py | `_load_budget()` + budget percentage display + yellow warning at ≥80% | **DONE** |
+| K7 | tests/ | 7 new tests: agent max-turns (2) + dispatcher budget (3) + dashboard budget display (2) | **DONE** |
+
+### Phase 44 — Bug Fix K8-K14 (2026-05-20)
+
+| # | Module | Issue | Severity | Fix | Status |
+|---|--------|-------|----------|-----|--------|
+| K8 | dispatcher.py | Transitive dependency blocking — single-pass blocked marking misses A→B→C chains | P0 | `while True` closure loop for transitive closure + `test_transitive_blocked_tasks` | **FIXED** |
+| K9 | progress.py | `fail_reason` persists after retry-then-success; dashboard shows stale error | P1 | Clear `fail_reason` when status set to `done`/`noop` | **FIXED** |
+| K10 | cli/run.py | Resume crashes if `base_sha` file missing from run_dir | P1 | Fallback to `current_head()` + stderr warning | **FIXED** |
+| K11 | cli/misc.py | `_cmd_cancel` leaves PID file after successful terminate | P1 | `pid_path.unlink(missing_ok=True)` after terminate + ProcessLookupError | **FIXED** |
+| K12 | cli/watch.py | `_print_dashboard_table` emits raw ANSI escapes when piped to file/non-TTY | P2 | `use_color = sys.stdout.isatty()` conditional for all ANSI output | **FIXED** |
+| K13 | cli/run.py | `if args.max_turns:` falsy for value 0, inconsistent with `is not None` elsewhere | P2 | Unified to `is not None` checks | **FIXED** |
+| K14 | cli/run.py | `_write_summary` token counts miss prior-run tokens on resume | P2 | Fallback to dashboard.json cumulative totals, take max of both sources | **FIXED** |
+
+### 重新评估 — 新发现 (2026-05-20 全量代码审读)
+
+#### P0 — E2E 验证缺失 (项目最大风险)
+
+| # | 问题 | 影响 | 状态 |
+|---|------|------|------|
+| V1 | 所有 `claude -p` 交互均为 mock，E2E 从未成功 | prompt 格式、stream-json 解析、worktree 并发、cherry-pick 链路、budget enforcement 全部未验证 | **TODO** (Phase 45) |
+
+#### P1 — 设计 / 正确性
+
+| # | Module | Issue | Impact | Fix | Status |
+|---|--------|-------|--------|-----|--------|
+| V2 | integrator.py:290-296 | repair commit 可能为空 — agent 未改文件时 `git commit` 静默失败（`check=False`） | 浪费一轮 repair round，validation 命令永远失败 | commit 前 `git status --porcelain` 检查 | **TODO** (Phase 47) |
+| V3 | dispatcher.py:183-186 | budget check 与并发 task 竞态 — `budget_exceeded` flag 对同时运行的 task 不立即可见 | 实际 token 可超预算 `(concurrency-1)` 个 task | 文档注明 + help 说明 | **TODO** (Phase 48) |
+| V4 | cli/run.py:150-183 | KeyboardInterrupt 在 `asyncio.run()` 中断后同步调 `_clean_worktrees` | event loop 状态不确定，可能残留 worktree | 最小化 handler，清理交给 `cagent clean` | **TODO** (Phase 48) |
+| V5 | — | 零用户文档，无 README.md | 用户无法了解安装和使用方式 | 写 README.md | **TODO** (Phase 46) |
+
+#### P2 — 代码质量
+
+| # | Module | Issue | Impact | Fix | Status |
+|---|--------|-------|--------|-----|--------|
+| V6 | 全局 | 3 套 git helper：`worktree._git`(sync) / `agent._run_git_async`(async tuple) / `integrator._run_git`(async GitResult) | 接口不一致，维护成本高 | 提取 `cagent/git_utils.py` 统一 | **TODO** (Phase 47) |
+| V7 | cli/run.py:441 | `import json as _json2` 和 `import json as _json` 同函数重复 import | 代码混乱 | 移至模块顶部 | **TODO** (Phase 47) |
+| V8 | agent.py:289 | `task.prompt.split("\n")[0][:72]` — prompt 以 `\n` 开头时 commit message 为空 | 空 commit message | `.strip().split(...)` | **TODO** (Phase 47) |
+| V9 | PLAN.md | 500行增量变更日志，非架构路线图 | 难以快速了解项目方向 | 精简为架构+状态+milestones，历史归档 | **TODO** (Phase 46) |
+| V10 | safety.py | 仅拦截 Bash 工具，Edit/Write 可写恶意脚本后 Bash 执行 | 沙箱可绕过 | PreToolUse 增加 Write 内容检查 | **TODO** (Phase 48) |
+
+### LOW — 6 items (deferred, non-blocking)
 
 | # | Module | Issue | Status |
 |---|--------|-------|--------|
-| L1 | integrator.py | 空 prompt — 首个 task 与 base 冲突时 merged_summaries 为空 | Edge case, 不影响功能 |
+| L1 | integrator.py | 空 prompt — 首个 task 与 base 冲突时 merged_summaries 为空 | **FIXED** (Phase 42: fallback prompt) |
 | L2 | cli.py | run_id 1 秒分辨率，理论碰撞 | 实践中不可能 |
-| L3 | safety.py | 间接执行绕过（bash x.sh） | Known limitation, v3 Docker 解决 |
+| L3 | safety.py | 间接执行绕过（bash x.sh） | 3.7.1 部分修复，完全解决需 Docker |
 | L4 | agent.py | API Key 在 os.environ 中可见 | CLI 标准做法 |
 | L5 | cli.py | architect prompt injection | 用户即作者，无第三方场景 |
+| L6 | cli.py | Windows `os.kill(SIGTERM)` 实为 TerminateProcess，worker 无 graceful stop | 日志已修正(B7)，行为已纳入 Known Limitations |
 
 ### INFO — Unverified scenarios (need manual test)
 
@@ -58,40 +320,41 @@
 
 ## Test Coverage Matrix
 
-| Module | pytest | Manual | Gap |
-|--------|--------|--------|-----|
-| tasks.py | 22 | — | ✅ Complete |
-| safety.py | 53 | 33 | ✅ Complete |
-| progress.py | 40 | 6 | ✅ Complete (+7 token tests) |
-| compat.py | 7 | — | ✅ Complete |
-| worktree.py | 8 | — | ✅ Complete |
-| dispatcher.py | 17 | 2 | ✅ (+4 retry tests) |
-| memory.py | 19 | 5 | ✅ Complete |
-| **agent.py** | **0** | 2 | ⚠️ Needs mock tests |
-| **integrator.py** | **0** | 2 | ⚠️ Needs mock tests |
-| **log.py** | **0** | 6 | Can be directly tested |
-| cli.py | 0 | 14 | E2E level OK |
-| **Total** | **166** | **61** | |
+| Module | pytest | Manual | Gap | Priority |
+|--------|--------|--------|-----|----------|
+| tasks.py | 22 | — | ✅ Complete | — |
+| safety.py | 67 | 33 | ✅ Complete | — |
+| progress.py | 40 | 6 | ✅ Complete (+7 token tests) | — |
+| compat.py | 7 | — | ✅ Complete | — |
+| worktree.py | 8 | — | ✅ Complete | — |
+| dispatcher.py | 18 | 2 | ✅ (+4 retry + 3 budget + 1 transitive blocked) | — |
+| memory.py | 17 | 5 | ✅ Complete | — |
+| agent.py | 12 | 2 | ✅ Phase 33 + Phase 43 (+2 max-turns tests) | — |
+| integrator.py | 22 | 2 | ✅ Phase 33 + Phase 41 + Phase 42 (+1 D.1 first-conflict test) | — |
+| log.py | 13 | — | ✅ Phase 36 完成 | — |
+| **cli.py** | **21** | 14 | ✅ Phase 37+39+42+43 完成 (+2 budget display tests) | — |
+| **Total** | **247** | **61** | — | — |
 
 ---
 
-## v3.0 Evaluation Targets
+## v3.4 Evaluation Targets
 
-### Phase 25 修复后（4 项 bug fix）：
+### Phase 38 完成后实际：
 
-| Dimension | Current | After Phase 25 | Delta |
-|-----------|---------|----------------|-------|
-| 代码质量 | 4.3 | 4.7 | +0.4 |
-| 可观测性 | 4.3 | 4.6 | +0.3 |
-
-### Phase 26-27 完成后（可靠性 + 测试补全）：
-
-| Dimension | Target | Key deliverable |
+| Dimension | 实际 | Key deliverable |
 |-----------|--------|-----------------|
-| 可靠性 | 4.8 | ✅ 自动重试 + token 追踪 + cancel |
-| 测试覆盖 | 4.8 | agent/integrator mock tests (~30 新用例) |
-| 安全性 | 4.7 | resource limits |
-| 功能 | 5 | ✅ cancel + retry + multi-strategy |
+| 代码质量 | 4.8 | E1 gitignore 追加 + E2 序列化统一 + E4 git 调用统一 |
+| 安全性 | 4.8 | E1 修复后用户排除规则不再丢失 |
+| 文档 | 4.7 | E5 交叉引用修正 + E6 版本号同步 |
+| 功能 | 4.7 | E7 pip install 支持 |
+
+### Phase 32 完成 (P2)：
+
+| Item | Target | Status |
+|------|--------|--------|
+| 32.1 cli.py 拆包 | 代码质量 5.0 | **DONE** (Phase 40: 6 submodules) |
+| 32.2 Dashboard 序列化 | I/O 性能 | **DONE** (C5/E2/R2) |
+| 32.3 pip install | 用户体验 | **DONE** (E7/38.3.3) |
 
 ---
 

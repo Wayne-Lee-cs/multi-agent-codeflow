@@ -1,9 +1,24 @@
 [project]
 name = "cagent"
-version = "2.1.0"
+version = "5.0.0"
 description = "Concurrent agent workflow dispatcher — run multiple claude -p workers in parallel git worktrees"
 requires-python = ">=3.11"
 dependencies = []
+readme = "README.md"
+license = {text = "MIT"}
+authors = [{name = "Wayne Lee"}]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Repository = "https://github.com/waynelee/cagent"
+
+[project.scripts]
+cagent = "cagent.cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

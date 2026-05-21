@@ -1,14 +1,10 @@
 # cagent — Concurrent Agent Workflow
 
-> **Status: v2.0** (evaluated 2026-05-17) — Core workflow + plan feature operational: architect
-> agent task decomposition, dependency graph scheduling, dispatch, worktree isolation,
-> cherry-pick integration, and conflict resolution all verified. 110 pytest + 61 manual tests
-> passed, 0 failed. See [CHECKLIST.md](CHECKLIST.md) for full breakdown.
+> **v5.0** — 275 pytest tests, zero third-party dependencies.
 
 A personal code workflow built on Claude Code: one CLI command fans out to multiple
-agents working in parallel git worktrees on the same repository. Tasks start in a
-flat queue and evolve into a layered pipeline (architect → builders → integrator).
-A controller aggregates outputs and produces a single unified commit.
+agents working in parallel git worktrees on the same repository. Tasks can declare
+dependencies, and the dispatcher automatically schedules them in waves.
 
 ## Quick Start
 
@@ -17,46 +13,53 @@ A controller aggregates outputs and produces a single unified commit.
 - Python >= 3.11
 - `claude` CLI in PATH (Claude Code)
 - Git
-- **`claude -p` must be able to authenticate** — run `claude -p "hello"` to verify
+- `claude -p` must be able to authenticate — run `claude -p "hello"` to verify
+
+### Install
 
 ```bash
-# In Claude Code session:
-/cagent run tasks/example.txt
+# Option A: pip install (recommended)
+pip install -e .
+cagent run tasks.txt
 
-# Unix terminal:
-./bin/cagent run tasks/example.txt
-
-# Windows terminal:
-bin\cagent.cmd run tasks/example.txt
-
-# Cross-platform (recommended):
-python -m cagent run tasks/example.txt
+# Option B: clone-and-run (zero install)
+python -m cagent run tasks.txt
 ```
 
-cagent inherits your Claude Code session's model and credentials automatically
-(including proxies like LiteLLM), provided `claude -p` can authenticate in your
-environment.
+### Basic Workflow
+
+```bash
+# 1. Plan (optional) — decompose a goal into tasks
+cagent plan "build a REST API with auth and billing"
+
+# 2. Run — execute tasks concurrently
+cagent run tasks.md -j 4
+
+# 3. Monitor
+cagent watch           # live dashboard
+cagent status          # one-shot snapshot
+
+# 4. Integrate
+git merge cagent/<run-id>/integration
+cagent push cagent/<run-id>/integration
+```
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
 | `plan <goal>` | Architect agent decomposes goal into conflict-free tasks |
-| `run <tasks-file>` | Run tasks concurrently with multiple agents (.txt or .md) |
+| `run <tasks-file>` | Run tasks concurrently (.txt or .md) |
+| `run --resume <run-id>` | Resume a previous run, skipping completed tasks |
 | `status [run-id]` | One-shot dashboard snapshot |
 | `watch [run-id]` | Live ANSI dashboard (press `q` to quit) |
 | `log <task-id>` | Show events for a task |
+| `cancel <task-id>` | Cancel a running task |
 | `clean [run-id]` | Clean up worktrees and branches |
 | `push <branch>` | Push to origin (requires y/N confirmation) |
+| `branches [run-id]` | List branches for a run |
 
-### Plan Options
-
-```
---ref <file>              Reference file for architect agent
---model <id>              Model override for architect agent
-```
-
-### Run Options
+## Run Options
 
 ```
 -j, --jobs N              Concurrency (default: 4)
@@ -66,26 +69,14 @@ environment.
 --worker-model <id>       Model override for workers
 --integrator-model <id>   Model override for integrator
 --timeout <sec>           Per-agent timeout (default: 1800)
+--retries N               Auto-retry on transient errors (timeout/rate-limit/network)
+--max-turns N             Per-task turn limit (passed to claude -p)
+--max-tokens N            Per-run token budget (checked between tasks)
+--post-integrate-cmd CMD  Validation command after integration (e.g. "pytest")
 --quiet                   Only print START/DONE/FAIL events
---resume <run-id>         Resume a previous run, skipping completed tasks
+--api-key KEY             Explicit API key (overrides env)
+--dry-run                 Show planned execution without running
 ```
-
-### Resuming Failed Runs
-
-If a run is interrupted or has failures, resume it with:
-
-```bash
-python -m cagent run tasks/example.txt --resume 2026-05-06T15-22-58
-```
-
-Already-completed tasks are skipped. Use `cagent status` to find the run ID.
-
-## Safety
-
-- cagent **never pushes automatically** — only `cagent push` with explicit y/N confirmation
-- Workers cannot run `git push`, `git reset --hard`, `rm -rf`, `rm -fr`, or other destructive commands
-- All work happens in isolated git worktrees — your working tree is untouched
-- Failed tasks preserve their worktree for debugging
 
 ## Tasks File Format
 
@@ -122,25 +113,21 @@ Create src/users.py implementing user CRUD.
 
 Conventions are loaded from `conventions.md` in the same directory, or from an inline `## Conventions` section.
 
+## Safety
+
+- cagent **never pushes automatically** — only `cagent push` with explicit y/N confirmation
+- Workers cannot run `git push`, `rm -rf`, `node -e`, `python -c`, `powershell -Command`, or other destructive commands (regex + token-based detection, including split-flag patterns like `rm -r -f`)
+- Write and Edit tool content is scanned for dangerous patterns (defense-in-depth)
+- All work happens in isolated git worktrees — your working tree is untouched
+- Failed tasks preserve their worktree for debugging
+- Token budget enforcement prevents runaway API costs
+
 ## Observability
 
-Three levels of monitoring:
-
 1. **Real-time lines** — `cagent run` stdout shows `[HH:MM:SS] task-NNN <activity>`
-2. **Live table** — `python -m cagent watch` for ANSI dashboard (or `cagent status` for snapshot)
-3. **Detailed replay** — `python -m cagent log <task-id> -f` for full event stream
-
-## Known Issues
-
-- **`claude -p` authentication**: cagent runs a preflight auth check before starting. If it
-  fails, diagnostics are printed with suggested fixes. Ensure `claude -p "hello"` works
-  standalone. Use `--api-key` to pass an explicit key if needed.
-
-## Requirements
-
-- Python >= 3.11
-- `claude` CLI in PATH (Claude Code), with `claude -p` able to authenticate
-- Git
+2. **Live table** — `cagent watch` for ANSI dashboard (or `cagent status` for snapshot)
+3. **Detailed replay** — `cagent log <task-id> -f` for full event stream
+4. **Token tracking** — dashboard and summary show input/output token counts and budget usage
 
 ## Architecture
 
@@ -155,7 +142,19 @@ cagent run tasks.md -j 4      │
     ├── Worker 2 (claude -p, depends_on: 001)  → branch task-002  (waits for 001)
     └── Worker N (claude -p, depends_on: none) → branch task-N
            │
-           └── Integrator (cherry-pick + conflict resolution)
+           └── Integrator (cherry-pick + conflict resolution + post-integrate validation)
                     │
                     └── integration branch (ready to merge)
 ```
+
+## Known Limitations
+
+- **Budget overshoot**: `--max-tokens` is checked between tasks; concurrent tasks may overshoot by `(concurrency - 1)` tasks worth of tokens.
+- **Write/Edit content false positives**: the safety hook applies deny patterns to file content (defense-in-depth), which may block legitimate writes containing command strings in comments, tests, or documentation.
+- **Indirect execution bypass**: compiled binaries or non-Bash interpreters (e.g., a Go program calling `exec("git push")`) can bypass the regex/token safety check. Full isolation requires Docker (not yet implemented).
+
+## Requirements
+
+- Python >= 3.11 (zero third-party dependencies)
+- `claude` CLI in PATH, with `claude -p` able to authenticate
+- Git
