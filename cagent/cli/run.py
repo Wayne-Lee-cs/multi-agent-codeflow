@@ -4,13 +4,18 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
+import os
 import subprocess
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Any, Callable
+
+if TYPE_CHECKING:
+    from cagent.progress import Dashboard
 
 from .base import (
     _fmt_elapsed,
@@ -19,6 +24,77 @@ from .base import (
     _preflight_check,
     _prompt_clean_memory,
 )
+
+
+@contextlib.contextmanager
+def _run_lock(repo_root: Path, force: bool = False):
+    """Acquire a per-repo run lock to prevent concurrent cagent runs.
+
+    Uses OS-level file locking: msvcrt on Windows, fcntl on Unix.
+    The lock is held until the context manager exits.
+    """
+    lock_dir = repo_root / ".cagent"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / "run.lock"
+
+    if force:
+        yield
+        return
+
+    lock_fd = None
+    try:
+        lock_fd = open(lock_path, "w")
+        if sys.platform == "win32":
+            import msvcrt
+            try:
+                msvcrt.locking(lock_fd.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError:
+                lock_fd.close()
+                print(
+                    "Error: Another cagent run is active in this repository.\n"
+                    "  Use --force to override (only if you're sure no other run is active).",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+        else:
+            import fcntl
+            try:
+                fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                lock_fd.close()
+                print(
+                    "Error: Another cagent run is active in this repository.\n"
+                    "  Use --force to override (only if you're sure no other run is active).",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+        lock_fd.write(str(os.getpid()))
+        lock_fd.flush()
+        yield
+    finally:
+        if lock_fd is not None:
+            try:
+                try:
+                    if sys.platform == "win32":
+                        import msvcrt
+                        try:
+                            msvcrt.locking(lock_fd.fileno(), msvcrt.LK_UNLCK, 1)
+                        except OSError:
+                            pass
+                    else:
+                        import fcntl
+                        try:
+                            fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
+                        except OSError:
+                            pass
+                finally:
+                    lock_fd.close()
+            except (OSError, ValueError):
+                pass
+        try:
+            lock_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _print_task_timing(dashboard: "Dashboard") -> None:
@@ -42,22 +118,157 @@ def _print_task_timing(dashboard: "Dashboard") -> None:
         print(f"  [{tid}] {status:<6} {elapsed_str:>8}{tools}{sha}")
 
 
-def _execute_run(
-    all_tasks: list,
-    dispatch_tasks: list,
+async def _dispatch_phase(
+    dispatch_tasks: list[Any],
+    all_tasks: list[Any],
+    args: argparse.Namespace,
+    run_dir: Path,
+    base_sha: str,
+    repo_root: Path,
+    dashboard: Any,
+    memory: Any,
+    conventions: str,
+    api_key: str | None,
+    merge_results: Callable[..., Any] | None,
+) -> list[Any]:
+    """Run the dispatcher and return merged results."""
+    from cagent.dispatcher import run
+
+    results = await run(
+        tasks=dispatch_tasks,
+        concurrency=args.jobs,
+        run_dir=run_dir,
+        base_sha=base_sha,
+        repo_root=repo_root,
+        worker_model_override=args.worker_model,
+        timeout=args.timeout,
+        dashboard=dashboard,
+        memory=memory,
+        conventions=conventions,
+        retries=args.retries,
+        max_turns=getattr(args, "max_turns", None),
+        max_tokens=getattr(args, "max_tokens", None),
+        api_key=api_key,
+    )
+
+    all_results: list[Any]
+    if merge_results:
+        all_results = merge_results(all_tasks, results)
+    else:
+        all_results = results
+
+    done_count = sum(1 for r in all_results if r.status == "done")
+    failed_count = sum(1 for r in all_results if r.status == "failed")
+    noop_count = sum(1 for r in all_results if r.status == "noop")
+
+    print()
+    print(f"Dispatcher: {done_count} done, {failed_count} failed, {noop_count} noop")
+    _print_task_timing(dashboard)
+
+    return all_results
+
+
+async def _integrate_phase(
+    all_tasks: list[Any],
+    all_results: list[Any],
     run_id: str,
     run_dir: Path,
     base_sha: str,
     repo_root: Path,
     args: argparse.Namespace,
-    merge_results: Callable | None = None,
+    dashboard: Any,
+    memory: Any,
+    api_key: str | None,
+) -> str | None:
+    """Write shared memory and run integration. Returns integration SHA or None."""
+    from cagent.integrator import integrate
+
+    all_memories = memory.read_all()
+    if all_memories:
+        summary_parts = [
+            f"## Task {tid}\n{content}"
+            for tid, content in all_memories.items()
+        ]
+        memory.write_shared(
+            f"# Shared Context — Run {run_id}\n\n" + "\n\n".join(summary_parts)
+        )
+
+    done_count = sum(1 for r in all_results if r.status == "done")
+    if done_count == 0:
+        return None
+
+    strategy = getattr(args, "strategy", "cherry-pick")
+    # printer is attached to dashboard event handler
+    print(f"  integration: starting {strategy}...")
+    try:
+        integration_sha = await integrate(
+            tasks=all_tasks,
+            run_dir=run_dir,
+            base_sha=base_sha,
+            repo_root=repo_root,
+            squash=args.squash,
+            integrator_model_override=args.integrator_model,
+            timeout=args.timeout,
+            dashboard=dashboard,
+            memory=memory,
+            post_integrate_cmd=getattr(args, "post_integrate_cmd", None),
+            strategy=strategy,
+            api_key=api_key,
+        )
+        print(f"  integration: done — branch cagent/{run_id}/integration  tip {integration_sha[:12]}")
+        return integration_sha
+    except Exception as e:
+        print(f"  integration: FAILED: {e}")
+        print(f"  Worktree preserved for manual inspection.")
+        return None
+
+
+def _summary_phase(
+    all_tasks: list[Any],
+    results: list[Any],
+    run_id: str,
+    run_dir: Path,
+    base_sha: str,
+    repo_root: Path,
+    integration_sha: str | None,
+    elapsed: str,
+    args: argparse.Namespace,
+) -> None:
+    """Write summary, clean worktrees, and print final status."""
+    _write_summary(run_dir, all_tasks, results, base_sha, integration_sha, run_id, elapsed)
+
+    if not args.keep_worktrees:
+        _clean_worktrees(repo_root, run_dir, all_tasks, results)
+
+    print()
+    if integration_sha:
+        print(f"Done! ({elapsed})")
+        print(f"  Integration branch: cagent/{run_id}/integration")
+        print(f"  To merge:  git merge cagent/{run_id}/integration")
+        print(f"  To push:   cagent push cagent/{run_id}/integration")
+    else:
+        print(f"Run completed in {elapsed} with no successful tasks to integrate.")
+
+    memory_dir = run_dir / "memory"
+    if memory_dir.exists() and any(memory_dir.iterdir()):
+        print(f"\n  Subagent memory: {memory_dir}")
+        _prompt_clean_memory(memory_dir)
+
+
+def _execute_run(
+    all_tasks: list[Any],
+    dispatch_tasks: list[Any],
+    run_id: str,
+    run_dir: Path,
+    base_sha: str,
+    repo_root: Path,
+    args: argparse.Namespace,
+    merge_results: Callable[..., Any] | None = None,
     retry_hint: str | None = None,
     conventions: str = "",
+    api_key: str | None = None,
 ) -> None:
     """Shared run logic: dispatch -> integrate -> summary."""
-    from cagent.agent import AgentResult
-    from cagent.dispatcher import run
-    from cagent.integrator import integrate
     from cagent.log import LinePrinter
     from cagent.memory import RunMemory
     from cagent.progress import Dashboard
@@ -71,90 +282,39 @@ def _execute_run(
     dashboard.set_event_handler(printer.push)
 
     async def _run_all():
+        dashboard.start_async_io()
         printer_task = asyncio.create_task(printer.run())
         try:
-            results = await run(
-                tasks=dispatch_tasks,
-                concurrency=args.jobs,
-                run_dir=run_dir,
-                base_sha=base_sha,
-                repo_root=repo_root,
-                worker_model_override=args.worker_model,
-                timeout=args.timeout,
-                dashboard=dashboard,
-                memory=memory,
-                conventions=conventions,
-                retries=args.retries,
-                max_turns=getattr(args, "max_turns", None),
-                max_tokens=getattr(args, "max_tokens", None),
+            all_results = await _dispatch_phase(
+                dispatch_tasks, all_tasks, args, run_dir, base_sha,
+                repo_root, dashboard, memory, conventions, api_key, merge_results,
             )
 
-            if merge_results:
-                all_results = merge_results(all_tasks, results)
-            else:
-                all_results = results
-
-            done_count = sum(1 for r in all_results if r.status == "done")
-            failed_count = sum(1 for r in all_results if r.status == "failed")
-            noop_count = sum(1 for r in all_results if r.status == "noop")
-
-            print()
-            print(f"Dispatcher: {done_count} done, {failed_count} failed, {noop_count} noop")
-
-            _print_task_timing(dashboard)
-
-            all_memories = memory.read_all()
-            if all_memories:
-                summary_parts = [
-                    f"## Task {tid}\n{content}"
-                    for tid, content in all_memories.items()
-                ]
-                memory.write_shared(
-                    f"# Shared Context — Run {run_id}\n\n" + "\n\n".join(summary_parts)
-                )
-
-            integration_sha = None
-            if done_count > 0:
-                printer.print_integration("starting cherry-pick integration...")
-                try:
-                    integration_sha = await integrate(
-                        tasks=all_tasks,
-                        run_dir=run_dir,
-                        base_sha=base_sha,
-                        repo_root=repo_root,
-                        squash=args.squash,
-                        integrator_model_override=args.integrator_model,
-                        timeout=args.timeout,
-                        dashboard=dashboard,
-                        memory=memory,
-                        post_integrate_cmd=getattr(args, "post_integrate_cmd", None),
-                    )
-                    printer.print_integration(
-                        f"done — branch cagent/{run_id}/integration  tip {integration_sha[:12]}"
-                    )
-                except Exception as e:
-                    printer.print_integration(f"FAILED: {e}")
-                    print(f"  Worktree preserved for manual inspection.")
-                    integration_sha = None
+            integration_sha = await _integrate_phase(
+                all_tasks, all_results, run_id, run_dir, base_sha,
+                repo_root, args, dashboard, memory, api_key,
+            )
 
             return all_results, integration_sha
 
         finally:
-            dashboard.flush()
+            try:
+                await dashboard.flush_async()
+            except (asyncio.CancelledError, Exception):
+                dashboard.flush()  # Sync fallback on cancellation
             dashboard.set_event_handler(None)
             printer_task.cancel()
             try:
                 await printer_task
             except asyncio.CancelledError:
                 pass
+            await dashboard.stop_async_io()
 
     try:
         results, integration_sha = asyncio.run(_run_all())
     except KeyboardInterrupt:
         elapsed = _fmt_elapsed(time.time() - run_start)
         print(f"\n\nInterrupted after {elapsed}.")
-
-        from cagent.tasks import dump_state
 
         # Terminate worker subprocesses via PID files
         pids_dir = run_dir / "pids"
@@ -180,42 +340,32 @@ def _execute_run(
         sys.exit(130)
 
     elapsed = _fmt_elapsed(time.time() - run_start)
-    _write_summary(run_dir, all_tasks, results, base_sha, integration_sha, run_id, elapsed)
-
-    if not args.keep_worktrees:
-        _clean_worktrees(repo_root, run_dir, all_tasks, results)
-
-    print()
-    if integration_sha:
-        print(f"Done! ({elapsed})")
-        print(f"  Integration branch: cagent/{run_id}/integration")
-        print(f"  To merge:  git merge cagent/{run_id}/integration")
-        print(f"  To push:   cagent push cagent/{run_id}/integration")
-    else:
-        print(f"Run completed in {elapsed} with no successful tasks to integrate.")
-
-    memory_dir = run_dir / "memory"
-    if memory_dir.exists() and any(memory_dir.iterdir()):
-        print(f"\n  Subagent memory: {memory_dir}")
-        _prompt_clean_memory(memory_dir)
+    _summary_phase(
+        all_tasks, results, run_id, run_dir, base_sha,
+        repo_root, integration_sha, elapsed, args,
+    )
 
 
 def _cmd_run(args: argparse.Namespace) -> None:
     """Execute the full run workflow: dispatch -> integrate -> summary."""
-    if args.api_key:
-        import os
-        os.environ["ANTHROPIC_API_KEY"] = args.api_key
+    repo_root = _get_repo_root()
+    _preflight_check(
+        check_auth=True,
+        repo_root=repo_root,
+        force_auth=getattr(args, "api_key", None) is not None,
+    )
 
-    _preflight_check(check_auth=True)
+    with _run_lock(repo_root, force=getattr(args, "force", False)):
+        if args.resume:
+            _cmd_resume(args, repo_root)
+            return
+        _cmd_run_inner(args, repo_root)
 
+
+def _cmd_run_inner(args: argparse.Namespace, repo_root: Path) -> None:
+    """Inner run logic, called while holding the run lock."""
     from cagent.tasks import dump_state, parse_tasks_file
     from cagent.worktree import current_head
-
-    repo_root = _get_repo_root()
-
-    if args.resume:
-        _cmd_resume(args, repo_root)
-        return
 
     if args.base:
         try:
@@ -230,7 +380,7 @@ def _cmd_run(args: argparse.Namespace) -> None:
     else:
         base_sha = current_head(repo_root)
 
-    run_id = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
+    run_id = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H-%M-%S-%f")
     run_dir = _get_runs_dir(repo_root) / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -254,6 +404,7 @@ def _cmd_run(args: argparse.Namespace) -> None:
         print(f"  jobs:     {args.jobs}")
         print(f"  timeout:  {args.timeout}s")
         print(f"  squash:   {'yes' if args.squash else 'no'}")
+        print(f"  strategy: {args.strategy}")
         print(f"  model:    {args.worker_model or '(inherit from Claude Code)'}")
         print()
         print("Tasks:")
@@ -297,6 +448,7 @@ def _cmd_run(args: argparse.Namespace) -> None:
         args=args,
         retry_hint=f"To retry: python -m cagent run {args.tasks_file}",
         conventions=conventions,
+        api_key=getattr(args, "api_key", None),
     )
 
 
@@ -370,7 +522,7 @@ def _cmd_resume(args: argparse.Namespace, repo_root: Path) -> None:
         base_sha = current_head(repo_root)
         print(f"Warning: base_sha file not found in {run_dir.name}, falling back to HEAD ({base_sha[:12]})", file=sys.stderr)
 
-    def _merge_resume_results(all_tasks: list, dispatch_results: list) -> list:
+    def _merge_resume_results(all_tasks: list[Any], dispatch_results: list[Any]) -> list[Any]:
         result_map = {r.task_id: r for r in dispatch_results}
         merged = []
         for t in all_tasks:
@@ -395,8 +547,8 @@ def _cmd_resume(args: argparse.Namespace, repo_root: Path) -> None:
 
 def _write_summary(
     run_dir: Path,
-    tasks: list,
-    results: list,
+    tasks: list[Any],
+    results: list[Any],
     base_sha: str,
     integration_sha: str | None,
     run_id: str,
@@ -458,7 +610,7 @@ def _write_summary(
     (run_dir / "summary.md").write_text("".join(lines), encoding="utf-8")
 
 
-def _clean_worktrees(repo_root: Path, run_dir: Path, tasks: list, results: list) -> None:
+def _clean_worktrees(repo_root: Path, run_dir: Path, tasks: list[Any], results: list[Any]) -> None:
     """Clean up worktrees based on success/failure status."""
     all_ok = all(r.status in ("done", "noop") for r in results)
     result_map = {r.task_id: r for r in results}

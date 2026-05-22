@@ -6,6 +6,7 @@ import argparse
 import json
 import sys
 import time
+from typing import Any
 from pathlib import Path
 
 from cagent.compat import enable_ansi, is_tty, stdin_has_key, read_key
@@ -18,7 +19,8 @@ def _load_budget(run_dir: Path) -> int | None:
     if budget_path.exists():
         try:
             data = json.loads(budget_path.read_text(encoding="utf-8"))
-            return data.get("max_tokens")
+            val = data.get("max_tokens")
+            return int(val) if val is not None else None
         except (json.JSONDecodeError, OSError):
             pass
     return None
@@ -45,6 +47,11 @@ def _cmd_status(args: argparse.Namespace) -> None:
 
 def _cmd_watch(args: argparse.Namespace) -> None:
     """Live dashboard with ANSI refresh. Degrades to single status if not TTY."""
+    # Check if --web mode is requested
+    if hasattr(args, "web") and args.web is not None:
+        _cmd_watch_web(args)
+        return
+
     if not is_tty():
         _cmd_status(args)
         print("\n(stdin is not a terminal; use 'cagent watch' in a separate terminal for live updates)")
@@ -59,7 +66,7 @@ def _cmd_watch(args: argparse.Namespace) -> None:
 
     import os as _os
     last_mtime: float = 0.0
-    last_data: dict | None = None
+    last_data: dict[str, Any] | None = None
     needs_redraw: bool = True
 
     while True:
@@ -93,7 +100,21 @@ def _cmd_watch(args: argparse.Namespace) -> None:
         time.sleep(1)
 
 
-def _print_dashboard_table(run_id: str, data: dict, max_tokens: int | None = None) -> None:
+def _cmd_watch_web(args: argparse.Namespace) -> None:
+    """Start WebSocket server for browser dashboard."""
+    import asyncio
+
+    from cagent.server import run_dashboard_server
+
+    repo_root = _get_repo_root()
+    run_dir = _find_run_dir(repo_root, args.run_id)
+    port = args.web
+
+    print(f"Starting dashboard server for run: {run_dir.name}")
+    asyncio.run(run_dashboard_server(run_dir, port))
+
+
+def _print_dashboard_table(run_id: str, data: dict[str, Any], max_tokens: int | None = None) -> None:
     """Render a dashboard table from dashboard.json data."""
     use_color = sys.stdout.isatty()
     total = len(data)

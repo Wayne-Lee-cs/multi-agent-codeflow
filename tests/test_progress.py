@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from cagent.progress import Dashboard, Event, EventParser, TaskProgress
+from cagent.progress import Dashboard, Event, EventParser, TaskProgress, _truncate_jsonl_if_large
 
 
 class TestEventParser:
@@ -386,3 +386,203 @@ class TestDashboard:
         dash2 = Dashboard(tmp_path)
         assert dash2.tasks["001"].tokens_in == 1000
         assert dash2.tasks["001"].tokens_out == 400
+
+
+class TestAsyncIO:
+    """Tests for async I/O functionality."""
+
+    @pytest.mark.asyncio
+    async def test_start_stop_async_io(self, tmp_path):
+        """Test starting and stopping async I/O task."""
+        dash = Dashboard(tmp_path)
+        dash.start_async_io()
+        assert dash._io_task is not None
+
+        await dash.stop_async_io()
+        assert dash._io_task is None
+
+    @pytest.mark.asyncio
+    async def test_async_io_writes_dashboard(self, tmp_path):
+        """Test that async I/O writes dashboard.json."""
+        import asyncio
+
+        dash = Dashboard(tmp_path)
+        dash.start_async_io()
+
+        dash.set_task_status("001", "done", commit_sha="abc123")
+        # Give worker time to process
+        await asyncio.sleep(0.2)
+
+        await dash.stop_async_io()
+
+        # Verify dashboard was written
+        assert (tmp_path / "dashboard.json").exists()
+        data = json.loads((tmp_path / "dashboard.json").read_text(encoding="utf-8"))
+        assert "001" in data
+        assert data["001"]["status"] == "done"
+
+    @pytest.mark.asyncio
+    async def test_async_io_writes_events(self, tmp_path):
+        """Test that async I/O writes event files."""
+        import asyncio
+
+        dash = Dashboard(tmp_path)
+        dash.start_async_io()
+
+        event = Event(ts=time.time(), kind="start", summary="start", raw={})
+        dash.update("001", event)
+        # Give worker time to process
+        await asyncio.sleep(0.2)
+
+        await dash.stop_async_io()
+
+        # Verify event file was written
+        event_file = tmp_path / "events" / "task-001.jsonl"
+        assert event_file.exists()
+
+    @pytest.mark.asyncio
+    async def test_flush_async_waits_for_io(self, tmp_path):
+        """Test that flush_async waits for all I/O to complete."""
+        dash = Dashboard(tmp_path)
+        dash.start_async_io()
+
+        dash.set_task_status("001", "done", commit_sha="abc123")
+        await dash.flush_async()
+
+        # Verify dashboard was written
+        assert (tmp_path / "dashboard.json").exists()
+
+        await dash.stop_async_io()
+
+    def test_fallback_sync_io(self, tmp_path):
+        """Test that synchronous I/O works when async is not started."""
+        dash = Dashboard(tmp_path)
+        dash.set_task_status("001", "done", commit_sha="abc123")
+        dash.flush()
+
+        # Verify dashboard was written synchronously
+        assert (tmp_path / "dashboard.json").exists()
+        data = json.loads((tmp_path / "dashboard.json").read_text(encoding="utf-8"))
+        assert "001" in data
+
+
+class TestIncrementalDashboard:
+    """Tests for Phase 54.1: incremental dashboard updates."""
+
+    def test_write_dashboard_only_serializes_dirty_tasks(self, tmp_path):
+        """Only changed tasks appear in the diff sent to I/O."""
+        dash = Dashboard(tmp_path)
+        dash.set_task_status("001", "done", commit_sha="aaa")
+        dash.flush()
+
+        # Reset tracking
+        dash._last_dashboard_snapshot.clear()
+        dash._dashboard_dirty = False
+
+        # Write initial snapshot
+        dash._write_dashboard(force=True)
+        initial_snap = dict(dash._last_dashboard_snapshot)
+        assert "001" in initial_snap
+
+        # Update task 002 — should only diff 002
+        dash.set_task_status("002", "running")
+        dash._write_dashboard(force=True)
+
+        # 001 should still be in snapshot from before, 002 newly added
+        assert "002" in dash._last_dashboard_snapshot
+
+    def test_do_write_dashboard_merges_into_existing_file(self, tmp_path):
+        """_do_write_dashboard merges diff into existing dashboard.json."""
+        dash = Dashboard(tmp_path)
+        # Write initial state
+        dash.set_task_status("001", "done", commit_sha="aaa")
+        dash.flush()
+
+        # Now write a diff for a new task only
+        dash._do_write_dashboard({"diff": {"002": {"task_id": "002", "status": "running"}}})
+
+        data = json.loads((tmp_path / "dashboard.json").read_text(encoding="utf-8"))
+        # Both tasks should be present
+        assert "001" in data
+        assert "002" in data
+        assert data["001"]["status"] == "done"
+        assert data["002"]["status"] == "running"
+
+    def test_do_write_dashboard_no_diff_skips(self, tmp_path):
+        """Empty diff does not write anything."""
+        dash = Dashboard(tmp_path)
+        dash._do_write_dashboard({"diff": {}})
+        assert not (tmp_path / "dashboard.json").exists()
+
+    def test_do_write_dashboard_recovers_from_corrupt_file(self, tmp_path):
+        """Corrupted dashboard.json is recovered gracefully on next write."""
+        dash = Dashboard(tmp_path)
+        # Write corrupted JSON
+        (tmp_path / "dashboard.json").write_text("{invalid json!!!", encoding="utf-8")
+        # Should not raise — starts fresh
+        dash._do_write_dashboard({"diff": {"001": {"task_id": "001", "status": "done"}}})
+        data = json.loads((tmp_path / "dashboard.json").read_text(encoding="utf-8"))
+        assert "001" in data
+        assert data["001"]["status"] == "done"
+
+    def test_incremental_preserves_full_state_across_writes(self, tmp_path):
+        """Multiple incremental writes accumulate to full state."""
+        dash = Dashboard(tmp_path)
+        dash.set_task_status("001", "done", commit_sha="aaa")
+        dash.flush()
+        dash.set_task_status("002", "running")
+        dash.flush()
+        dash.set_task_status("003", "failed", fail_reason="timeout")
+        dash.flush()
+
+        data = json.loads((tmp_path / "dashboard.json").read_text(encoding="utf-8"))
+        assert len(data) == 3
+        assert data["001"]["status"] == "done"
+        assert data["002"]["status"] == "running"
+        assert data["003"]["status"] == "failed"
+
+
+class TestTruncation:
+    """Tests for Phase 56.1: log file truncation."""
+
+    def test_no_truncation_under_limit(self, tmp_path):
+        """Files under max_bytes are not modified."""
+        path = tmp_path / "test.jsonl"
+        lines = [f'{{"i": {i}}}\n' for i in range(10)]
+        path.write_text("".join(lines), encoding="utf-8")
+        original = path.read_text(encoding="utf-8")
+
+        _truncate_jsonl_if_large(path, max_bytes=1_000_000, keep_ratio=0.8)
+
+        assert path.read_text(encoding="utf-8") == original
+
+    def test_truncation_keeps_tail(self, tmp_path):
+        """Files over max_bytes are truncated, keeping the tail."""
+        path = tmp_path / "test.jsonl"
+        lines = [f'{{"i": {i}}}\n' for i in range(100)]
+        path.write_text("".join(lines), encoding="utf-8")
+
+        # Set max_bytes small enough to trigger truncation
+        _truncate_jsonl_if_large(path, max_bytes=500, keep_ratio=0.5)
+
+        remaining = path.read_text(encoding="utf-8").splitlines()
+        # Should keep ~50% of lines (the last ones)
+        assert len(remaining) >= 49  # at least half
+        assert len(remaining) <= 51
+        # Should contain the last entries
+        assert '"i": 99' in remaining[-1]
+
+    def test_truncation_nonexistent_file(self, tmp_path):
+        """Truncation on missing file is a no-op."""
+        path = tmp_path / "missing.jsonl"
+        _truncate_jsonl_if_large(path, max_bytes=100, keep_ratio=0.5)  # should not raise
+
+    def test_truncation_preserves_at_least_one_line(self, tmp_path):
+        """Even with aggressive ratio, at least one line is kept."""
+        path = tmp_path / "test.jsonl"
+        path.write_text('{"i": 0}\n{"i": 1}\n', encoding="utf-8")
+
+        _truncate_jsonl_if_large(path, max_bytes=5, keep_ratio=0.01)
+
+        remaining = path.read_text(encoding="utf-8").strip().splitlines()
+        assert len(remaining) >= 1

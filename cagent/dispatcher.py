@@ -47,6 +47,7 @@ async def run(
     retries: int = 0,
     max_turns: int | None = None,
     max_tokens: int | None = None,
+    api_key: str | None = None,
 ) -> list[AgentResult]:
     """Run all tasks concurrently with bounded parallelism.
 
@@ -149,6 +150,7 @@ async def run(
                         memory=memory,
                         conventions=conventions,
                         max_turns=max_turns,
+                        api_key=api_key,
                     )
 
                     # Check if retry is warranted

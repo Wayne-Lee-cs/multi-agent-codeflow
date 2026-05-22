@@ -381,3 +381,192 @@ class TestVersionCheck:
         """Version check should not exit on Python >= 3.11."""
         import sys
         assert sys.version_info >= (3, 11)
+
+
+class TestRunLock:
+    """Tests for _run_lock — concurrent run prevention."""
+
+    def test_lock_acquires_and_releases(self, tmp_path):
+        """Lock acquires successfully and releases after context manager."""
+        from cagent.cli.run import _run_lock
+
+        repo_root = tmp_path
+        with _run_lock(repo_root):
+            lock_path = repo_root / ".cagent" / "run.lock"
+            assert lock_path.exists()
+
+        # Lock file should be cleaned up after exit
+        assert not lock_path.exists()
+
+    def test_lock_force_skips_check(self, tmp_path):
+        """--force flag bypasses lock acquisition entirely."""
+        from cagent.cli.run import _run_lock
+
+        repo_root = tmp_path
+        # With force=True, no locking is attempted
+        with _run_lock(repo_root, force=True):
+            lock_path = repo_root / ".cagent" / "run.lock"
+            # Lock file should NOT exist when force=True
+            assert not lock_path.exists()
+
+    def test_lock_creates_cagent_dir(self, tmp_path):
+        """Lock creates .cagent directory if it doesn't exist."""
+        from cagent.cli.run import _run_lock
+
+        repo_root = tmp_path / "new_repo"
+        repo_root.mkdir()
+
+        with _run_lock(repo_root):
+            assert (repo_root / ".cagent").is_dir()
+
+    def test_lock_error_message_on_failure(self, tmp_path, capsys):
+        """Lock failure prints clear error message and exits."""
+        import sys
+        from cagent.cli.run import _run_lock
+
+        repo_root = tmp_path
+        # Simulate lock failure by making the platform locking function raise OSError.
+        # msvcrt/fcntl are imported inside the function, so we mock at the module level.
+        if sys.platform == "win32":
+            import msvcrt
+            with patch.object(msvcrt, "locking", side_effect=OSError("lock held")):
+                with pytest.raises(SystemExit, match="1"):
+                    with _run_lock(repo_root):
+                        pass
+        else:
+            import fcntl
+            with patch.object(fcntl, "flock", side_effect=OSError("lock held")):
+                with pytest.raises(SystemExit, match="1"):
+                    with _run_lock(repo_root):
+                        pass
+
+        err = capsys.readouterr().err
+        assert "Another cagent run is active" in err
+        assert "--force" in err
+
+
+class TestAuthCache:
+    """Tests for auth preflight cache (53.1)."""
+
+    def test_cache_hit_skips_auth(self, tmp_path, capsys):
+        """Auth check is skipped when cache file is recent."""
+        import time
+        from cagent.cli.base import _auth_preflight_check
+
+        cache_dir = tmp_path / ".cagent"
+        cache_dir.mkdir()
+        (cache_dir / "auth_ok").write_text(str(time.time()), encoding="utf-8")
+
+        _auth_preflight_check("claude", repo_root=tmp_path)
+
+        out = capsys.readouterr().out
+        assert "cached OK" in out
+
+    def test_cache_expired_rechecks(self, tmp_path):
+        """Auth check runs when cache file is expired (>5 min)."""
+        import time
+        from cagent.cli.base import _auth_preflight_check
+
+        cache_dir = tmp_path / ".cagent"
+        cache_dir.mkdir()
+        # Write timestamp from 10 minutes ago
+        (cache_dir / "auth_ok").write_text(str(time.time() - 600), encoding="utf-8")
+
+        # This will fail because "claude" isn't actually available in test,
+        # but it proves the cache was NOT used (no "cached OK" in output)
+        with pytest.raises(SystemExit):
+            _auth_preflight_check("claude", repo_root=tmp_path)
+
+    def test_force_auth_ignores_cache(self, tmp_path):
+        """force_auth=True always re-validates even with valid cache."""
+        import time
+        from cagent.cli.base import _auth_preflight_check
+
+        cache_dir = tmp_path / ".cagent"
+        cache_dir.mkdir()
+        (cache_dir / "auth_ok").write_text(str(time.time()), encoding="utf-8")
+
+        # force_auth=True should ignore cache and try to run claude
+        with pytest.raises(SystemExit):
+            _auth_preflight_check("claude", repo_root=tmp_path, force_auth=True)
+
+    def test_success_writes_cache(self, tmp_path):
+        """Successful auth writes cache file."""
+        import time
+        from cagent.cli.base import _auth_preflight_check
+
+        cache_path = tmp_path / ".cagent" / "auth_ok"
+        assert not cache_path.exists()
+
+        # Mock subprocess to return success
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = ""
+        mock_result.stderr = ""
+
+        with patch("cagent.cli.base.subprocess.run", return_value=mock_result):
+            _auth_preflight_check("claude", repo_root=tmp_path)
+
+        assert cache_path.exists()
+        ts = float(cache_path.read_text(encoding="utf-8").strip())
+        assert abs(ts - time.time()) < 5  # Within 5 seconds
+
+
+class TestCmdBranches:
+    """Tests for _cmd_branches — git for-each-ref based listing."""
+
+    def test_no_branches(self, tmp_path, capsys):
+        """No cagent branches prints message."""
+        from cagent.cli.misc import _cmd_branches
+
+        args = MagicMock()
+        mock_result = MagicMock()
+        mock_result.stdout = ""
+
+        with patch("cagent.cli.misc._get_repo_root", return_value=tmp_path), \
+             patch("cagent.cli.misc.subprocess.run", return_value=mock_result):
+            _cmd_branches(args)
+
+        out = capsys.readouterr().out
+        assert "No cagent branches found" in out
+
+    def test_lists_branches_with_commits(self, tmp_path, capsys):
+        """Lists branches with commit info from for-each-ref."""
+        from cagent.cli.misc import _cmd_branches
+
+        args = MagicMock()
+        mock_result = MagicMock()
+        mock_result.stdout = (
+            "cagent/run-001/task-001|abc1234|fix: resolve null pointer\n"
+            "cagent/run-001/task-002|def5678|feat: add validation\n"
+        )
+
+        with patch("cagent.cli.misc._get_repo_root", return_value=tmp_path), \
+             patch("cagent.cli.misc.subprocess.run", return_value=mock_result):
+            _cmd_branches(args)
+
+        out = capsys.readouterr().out
+        assert "2" in out  # count
+        assert "cagent/run-001/task-001" in out
+        assert "abc1234" in out
+        assert "cagent/run-001/task-002" in out
+        assert "def5678" in out
+
+    def test_integration_branch_marked(self, tmp_path, capsys):
+        """Integration branch gets a * marker."""
+        from cagent.cli.misc import _cmd_branches
+
+        args = MagicMock()
+        mock_result = MagicMock()
+        mock_result.stdout = (
+            "cagent/run-001/integration|fff0000|merge: integration\n"
+            "cagent/run-001/task-001|aaa1111|feat: something\n"
+        )
+
+        with patch("cagent.cli.misc._get_repo_root", return_value=tmp_path), \
+             patch("cagent.cli.misc.subprocess.run", return_value=mock_result):
+            _cmd_branches(args)
+
+        out = capsys.readouterr().out
+        assert " *" in out  # integration marker
+        assert "integration" in out

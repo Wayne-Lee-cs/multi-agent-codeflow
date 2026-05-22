@@ -7,7 +7,10 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
+
+_AUTH_CACHE_TTL = 300  # 5 minutes
 
 
 def _fmt_elapsed(seconds: float) -> str:
@@ -22,10 +25,16 @@ def _fmt_elapsed(seconds: float) -> str:
     return f"{hours}h{mins}m{secs}s"
 
 
-def _preflight_check(check_auth: bool = False) -> None:
+def _preflight_check(
+    check_auth: bool = False,
+    repo_root: Path | None = None,
+    force_auth: bool = False,
+) -> None:
     """Verify required tools are available before running.
 
     If check_auth=True, also verify that `claude -p` can authenticate.
+    If repo_root is given, auth success is cached at .cagent/auth_ok for 5 minutes.
+    If force_auth=True, always re-verify (e.g. when --api-key is used).
     """
     if not shutil.which("git"):
         print("Error: 'git' not found in PATH. Please install Git.", file=sys.stderr)
@@ -41,11 +50,31 @@ def _preflight_check(check_auth: bool = False) -> None:
         sys.exit(1)
 
     if check_auth:
-        _auth_preflight_check(claude_bin)
+        _auth_preflight_check(claude_bin, repo_root=repo_root, force_auth=force_auth)
 
 
-def _auth_preflight_check(claude_bin: str) -> None:
-    """Run a quick claude -p test to verify authentication works."""
+def _auth_preflight_check(
+    claude_bin: str,
+    repo_root: Path | None = None,
+    force_auth: bool = False,
+) -> None:
+    """Run a quick claude -p test to verify authentication works.
+
+    If repo_root is given, caches success at .cagent/auth_ok for _AUTH_CACHE_TTL seconds.
+    If force_auth=True, always re-validates (key may have changed).
+    """
+    # Check cache unless forced
+    if not force_auth and repo_root is not None:
+        cache_path = repo_root / ".cagent" / "auth_ok"
+        if cache_path.exists():
+            try:
+                cached_ts = float(cache_path.read_text(encoding="utf-8").strip())
+                if (time.time() - cached_ts) < _AUTH_CACHE_TTL:
+                    print("Checking claude CLI authentication... cached OK")
+                    return
+            except (ValueError, OSError):
+                pass  # Cache corrupt, re-check
+
     print("Checking claude CLI authentication... ", end="", flush=True)
     try:
         result = subprocess.run(
@@ -69,6 +98,14 @@ def _auth_preflight_check(claude_bin: str) -> None:
 
     if result.returncode == 0:
         print("OK")
+        # Cache auth success
+        if repo_root is not None:
+            try:
+                cache_dir = repo_root / ".cagent"
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                (cache_dir / "auth_ok").write_text(str(time.time()), encoding="utf-8")
+            except OSError:
+                pass  # Best effort
         return
 
     print("FAILED")

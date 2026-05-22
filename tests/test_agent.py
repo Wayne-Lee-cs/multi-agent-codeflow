@@ -317,6 +317,75 @@ async def test_run_agent_no_max_turns_by_default(
 
 
 @pytest.mark.asyncio
+async def test_run_agent_api_key_injected(
+    sample_task: Task, tmp_worktree: Path, tmp_run_dir: Path,
+) -> None:
+    """api_key is injected into subprocess env, not global os.environ."""
+    import os
+
+    captured_kwargs: list[dict] = []
+    claude_proc = _make_process(returncode=0, stdout_lines=[])
+    git_status = _make_process(returncode=0, stdout=b"")
+
+    async def mock_exec(*args, **kwargs):
+        captured_kwargs.append(kwargs)
+        cmd = args[0] if args else ""
+        if cmd == "claude":
+            return claude_proc
+        if len(args) > 1 and args[1] == "status":
+            return git_status
+        return _make_process(returncode=0)
+
+    original_env = os.environ.copy()
+
+    with patch("cagent.agent._resolve_claude", return_value="claude"), \
+         patch("cagent.agent.asyncio.create_subprocess_exec", side_effect=mock_exec), \
+         patch("cagent.agent.prepare_sandbox"):
+        await run_agent(
+            task=sample_task, worktree_path=tmp_worktree,
+            run_dir=tmp_run_dir, api_key="sk-test-key-12345",
+        )
+
+    # Verify subprocess received the API key in its env
+    claude_call = [kw for kw in captured_kwargs if kw.get("env") is not None][0]
+    assert claude_call["env"]["ANTHROPIC_API_KEY"] == "sk-test-key-12345"
+
+    # Verify global os.environ was NOT polluted
+    assert os.environ.get("ANTHROPIC_API_KEY") != "sk-test-key-12345"
+
+
+@pytest.mark.asyncio
+async def test_run_agent_no_api_key_uses_none_env(
+    sample_task: Task, tmp_worktree: Path, tmp_run_dir: Path,
+) -> None:
+    """Without api_key, subprocess gets env=None (inherits parent)."""
+    captured_kwargs: list[dict] = []
+    claude_proc = _make_process(returncode=0, stdout_lines=[])
+    git_status = _make_process(returncode=0, stdout=b"")
+
+    async def mock_exec(*args, **kwargs):
+        captured_kwargs.append(kwargs)
+        cmd = args[0] if args else ""
+        if cmd == "claude":
+            return claude_proc
+        if len(args) > 1 and args[1] == "status":
+            return git_status
+        return _make_process(returncode=0)
+
+    with patch("cagent.agent._resolve_claude", return_value="claude"), \
+         patch("cagent.agent.asyncio.create_subprocess_exec", side_effect=mock_exec), \
+         patch("cagent.agent.prepare_sandbox"):
+        await run_agent(
+            task=sample_task, worktree_path=tmp_worktree,
+            run_dir=tmp_run_dir,
+        )
+
+    # Verify subprocess gets env=None (inherits parent env)
+    claude_call = captured_kwargs[0]
+    assert claude_call.get("env") is None
+
+
+@pytest.mark.asyncio
 async def test_run_git_async_success(tmp_worktree: Path) -> None:
     """_run_git_async returns (rc, stdout, stderr) on success."""
     async def mock_exec(*args, **kwargs):

@@ -185,7 +185,7 @@ async def test_integrate_all_fail_raises(tmp_path: Path) -> None:
 
     with patch("cagent.worktree.create_worktree"), \
          patch("cagent.integrator.asyncio.create_subprocess_exec", side_effect=mock_exec):
-        with pytest.raises(RuntimeError, match="All.*cherry-picks failed"):
+        with pytest.raises(RuntimeError, match="All.*integration attempts failed"):
             await integrate(
                 tasks=tasks, run_dir=run_dir,
                 base_sha="base123", repo_root=tmp_path,
@@ -418,4 +418,186 @@ async def test_integrate_first_task_conflict_with_base(tmp_path: Path) -> None:
     assert result == "resolved_sha"
     prompt = b"".join(stdin_captured).decode("utf-8")
     assert "base branch" in prompt
-    assert "first cherry-pick" in prompt
+    assert "first integration" in prompt
+
+
+# --- Strategy tests ---
+
+
+@pytest.mark.asyncio
+async def test_integrate_merge_strategy_success(tmp_path: Path) -> None:
+    """Merge strategy: all merges succeed."""
+    tasks = [_done_task("001", "sha001"), _done_task("002", "sha002")]
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    call_log = []
+
+    async def mock_exec(*args, **kwargs):
+        cmd_list = list(args)
+        call_log.append(cmd_list)
+        if "rev-parse" in cmd_list:
+            return _make_process(returncode=0, stdout=b"merged_sha\n")
+        return _make_process(returncode=0)
+
+    with patch("cagent.worktree.create_worktree"), \
+         patch("cagent.integrator.asyncio.create_subprocess_exec", side_effect=mock_exec):
+        result = await integrate(
+            tasks=tasks, run_dir=run_dir,
+            base_sha="base123", repo_root=tmp_path,
+            strategy="merge",
+        )
+
+    assert result == "merged_sha"
+    # Verify merge commands were called
+    git_cmds = [cmd[1] if len(cmd) > 1 else "" for cmd in call_log]
+    assert "merge" in git_cmds
+
+
+@pytest.mark.asyncio
+async def test_integrate_rebase_strategy_success(tmp_path: Path) -> None:
+    """Rebase strategy: all rebases succeed."""
+    tasks = [_done_task("001", "sha001"), _done_task("002", "sha002")]
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    call_log = []
+
+    async def mock_exec(*args, **kwargs):
+        cmd_list = list(args)
+        call_log.append(cmd_list)
+        if "rev-parse" in cmd_list:
+            return _make_process(returncode=0, stdout=b"rebased_sha\n")
+        return _make_process(returncode=0)
+
+    with patch("cagent.worktree.create_worktree"), \
+         patch("cagent.integrator.asyncio.create_subprocess_exec", side_effect=mock_exec):
+        result = await integrate(
+            tasks=tasks, run_dir=run_dir,
+            base_sha="base123", repo_root=tmp_path,
+            strategy="rebase",
+        )
+
+    assert result == "rebased_sha"
+    # Verify cherry-pick commands were called (rebase uses cherry-pick internally)
+    git_cmds = [cmd[1] if len(cmd) > 1 else "" for cmd in call_log]
+    assert "cherry-pick" in git_cmds
+
+
+@pytest.mark.asyncio
+async def test_integrate_merge_strategy_conflict_resolution(tmp_path: Path) -> None:
+    """Merge strategy: conflict occurs, integrator resolves it."""
+    tasks = [_done_task("001", "sha001")]
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    stdin_captured: list[bytes] = []
+
+    def capture_write(data: bytes):
+        stdin_captured.append(data)
+
+    async def mock_exec(*args, **kwargs):
+        cmd_list = list(args)
+        if "merge" in cmd_list and "--no-ff" in cmd_list:
+            return _make_process(returncode=1)
+        if "status" in cmd_list and "--porcelain" in cmd_list:
+            return _make_process(returncode=0, stdout=b"UU file.py\n")
+        if "grep" in cmd_list:
+            return _make_process(returncode=1)  # no conflict markers remain
+        if "rev-parse" in cmd_list:
+            return _make_process(returncode=0, stdout=b"resolved_sha\n")
+        if any("claude" in str(a).lower() for a in cmd_list):
+            proc = _make_process(returncode=0, stdout=b"")
+            proc.stdin.write = MagicMock(side_effect=capture_write)
+            return proc
+        return _make_process(returncode=0)
+
+    with patch("cagent.worktree.create_worktree"), \
+         patch("cagent.integrator.prepare_sandbox"), \
+         patch("cagent.integrator._resolve_claude", return_value="claude"), \
+         patch("cagent.integrator.asyncio.create_subprocess_exec", side_effect=mock_exec):
+        result = await integrate(
+            tasks=tasks, run_dir=run_dir,
+            base_sha="base123", repo_root=tmp_path,
+            strategy="merge",
+        )
+
+    assert result == "resolved_sha"
+    prompt = b"".join(stdin_captured).decode("utf-8")
+    assert "merge conflicts" in prompt.lower()
+
+
+@pytest.mark.asyncio
+async def test_integrate_rebase_strategy_conflict_resolution(tmp_path: Path) -> None:
+    """Rebase strategy: conflict occurs, integrator resolves it."""
+    tasks = [_done_task("001", "sha001")]
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    stdin_captured: list[bytes] = []
+
+    def capture_write(data: bytes):
+        stdin_captured.append(data)
+
+    async def mock_exec(*args, **kwargs):
+        cmd_list = list(args)
+        if "cherry-pick" in cmd_list:
+            if "--abort" in cmd_list or "--continue" in cmd_list:
+                return _make_process(returncode=0)
+            return _make_process(returncode=1)
+        if "status" in cmd_list and "--porcelain" in cmd_list:
+            return _make_process(returncode=0, stdout=b"UU file.py\n")
+        if "grep" in cmd_list:
+            return _make_process(returncode=1)  # no conflict markers remain
+        if "rev-parse" in cmd_list:
+            return _make_process(returncode=0, stdout=b"resolved_sha\n")
+        if any("claude" in str(a).lower() for a in cmd_list):
+            proc = _make_process(returncode=0, stdout=b"")
+            proc.stdin.write = MagicMock(side_effect=capture_write)
+            return proc
+        return _make_process(returncode=0)
+
+    with patch("cagent.worktree.create_worktree"), \
+         patch("cagent.integrator.prepare_sandbox"), \
+         patch("cagent.integrator._resolve_claude", return_value="claude"), \
+         patch("cagent.integrator.asyncio.create_subprocess_exec", side_effect=mock_exec):
+        result = await integrate(
+            tasks=tasks, run_dir=run_dir,
+            base_sha="base123", repo_root=tmp_path,
+            strategy="rebase",
+        )
+
+    assert result == "resolved_sha"
+    prompt = b"".join(stdin_captured).decode("utf-8")
+    assert "merge conflicts" in prompt.lower()
+
+
+@pytest.mark.asyncio
+async def test_integrate_strategy_default_cherry_pick(tmp_path: Path) -> None:
+    """Default strategy is cherry-pick."""
+    tasks = [_done_task("001", "sha001")]
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    call_log = []
+
+    async def mock_exec(*args, **kwargs):
+        cmd_list = list(args)
+        call_log.append(cmd_list)
+        if "cherry-pick" in cmd_list:
+            return _make_process(returncode=0)
+        if "rev-parse" in cmd_list:
+            return _make_process(returncode=0, stdout=b"cherry_sha\n")
+        return _make_process(returncode=0)
+
+    with patch("cagent.worktree.create_worktree"), \
+         patch("cagent.integrator.asyncio.create_subprocess_exec", side_effect=mock_exec):
+        result = await integrate(
+            tasks=tasks, run_dir=run_dir,
+            base_sha="base123", repo_root=tmp_path,
+        )
+
+    assert result == "cherry_sha"
+    # Verify cherry-pick was used
+    git_cmds = [cmd[1] if len(cmd) > 1 else "" for cmd in call_log]
+    assert "cherry-pick" in git_cmds

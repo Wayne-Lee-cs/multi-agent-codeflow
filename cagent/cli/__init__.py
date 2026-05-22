@@ -31,6 +31,7 @@ def main() -> None:
     run_p.add_argument("-j", "--jobs", type=int, default=4, help="Concurrency (default: 4)")
     run_p.add_argument("--base", default=None, help="Base branch/SHA (default: HEAD)")
     run_p.add_argument("--squash", action="store_true", help="Squash integration into one commit")
+    run_p.add_argument("--strategy", choices=["cherry-pick", "merge", "rebase"], default="cherry-pick", help="Integration strategy (default: cherry-pick)")
     run_p.add_argument("--keep-worktrees", action="store_true", help="Keep worktrees after run")
     run_p.add_argument("--worker-model", default=None, help="Model override for workers")
     run_p.add_argument("--integrator-model", default=None, help="Model override for integrator")
@@ -39,6 +40,7 @@ def main() -> None:
     run_p.add_argument("--quiet", action="store_true", help="Only print START/DONE/FAIL events")
     run_p.add_argument("--api-key", default=None, help="Explicit API key for claude -p subprocesses")
     run_p.add_argument("--dry-run", action="store_true", help="Show plan without executing")
+    run_p.add_argument("--force", action="store_true", help="Skip run lock check (for concurrent runs)")
     run_p.add_argument("--resume", default=None, help="Resume from a previous run ID")
     run_p.add_argument("--post-integrate-cmd", default=None, help="Command to run after integration (e.g. 'pytest'); failures trigger agent repair, max 2 rounds")
     run_p.add_argument("--max-turns", type=int, default=None, help="Max conversation turns per task (passed to claude -p --max-turns)")
@@ -51,6 +53,7 @@ def main() -> None:
     # --- watch ---
     watch_p = sub.add_parser("watch", help="Live dashboard (ANSI, q to quit)")
     watch_p.add_argument("run_id", nargs="?", default=None, help="Run ID (default: latest)")
+    watch_p.add_argument("--web", nargs="?", const=8080, type=int, default=None, help="Start WebSocket server for browser dashboard (default port: 8080)")
 
     # --- log ---
     log_p = sub.add_parser("log", help="Show events for a task")

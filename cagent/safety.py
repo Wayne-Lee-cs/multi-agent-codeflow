@@ -20,6 +20,7 @@ import json
 import shlex
 import sys
 from pathlib import Path
+from string import Template
 
 # Patterns that should never run inside a cagent worktree.
 # Each entry is a regex string; the hook script checks Bash tool_input.command.
@@ -119,7 +120,7 @@ def _check_tokens(cmd: str) -> str | None:
 _HOOK_SCRIPT = '''\
 import json, re, shlex, sys
 
-DENY_PATTERNS = {patterns_json}
+DENY_PATTERNS = $patterns_json
 
 
 def _check_tokens(cmd):
@@ -171,7 +172,7 @@ except Exception:
     sys.exit(0)
 
 tool_name = inp.get("tool_name", "")
-tool_input = inp.get("tool_input", {{}})
+tool_input = inp.get("tool_input", {})
 
 # Check Bash tool commands
 if tool_name == "Bash":
@@ -179,24 +180,24 @@ if tool_name == "Bash":
     if cmd:
         for pattern in DENY_PATTERNS:
             if re.search(pattern, cmd, re.IGNORECASE):
-                result = {{
-                    "hookSpecificOutput": {{
+                result = {
+                    "hookSpecificOutput": {
                         "hookEventName": "PreToolUse",
                         "permissionDecision": "deny",
                         "permissionDecisionReason": "cagent sandbox: blocked dangerous command matching " + pattern
-                    }}
-                }}
+                    }
+                }
                 json.dump(result, sys.stdout)
                 sys.exit(0)
         token_reason = _check_tokens(cmd)
         if token_reason:
-            result = {{
-                "hookSpecificOutput": {{
+            result = {
+                "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
                     "permissionDecision": "deny",
                     "permissionDecisionReason": "cagent sandbox: " + token_reason
-                }}
-            }}
+                }
+            }
             json.dump(result, sys.stdout)
             sys.exit(0)
 
@@ -212,13 +213,13 @@ else:
 if content:
     for pattern in DENY_PATTERNS:
         if re.search(pattern, content, re.IGNORECASE):
-            result = {{
-                "hookSpecificOutput": {{
+            result = {
+                "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
                     "permissionDecision": "deny",
                     "permissionDecisionReason": "cagent sandbox: blocked file content matching " + pattern
-                }}
-            }}
+                }
+            }
             json.dump(result, sys.stdout)
             sys.exit(0)
 
@@ -238,7 +239,7 @@ def prepare_sandbox(worktree_path: str | Path) -> None:
     hook_script_path = hooks_dir / "cagent-guard.py"
 
     patterns_json = json.dumps(DENY_PATTERNS, ensure_ascii=False)
-    script_content = _HOOK_SCRIPT.format(patterns_json=patterns_json)
+    script_content = Template(_HOOK_SCRIPT).safe_substitute(patterns_json=patterns_json)
     hook_script_path.write_text(script_content, encoding="utf-8")
 
     # Use current Python executable and forward-slash path for cross-platform compat

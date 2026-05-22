@@ -19,13 +19,15 @@ class RunMemory:
     def __init__(self, run_dir: Path):
         self._dir = run_dir / "memory"
         self._dir.mkdir(parents=True, exist_ok=True)
-        self._cache_key: tuple[tuple[str, ...], tuple[float, ...]] | None = None
+        self._cache_key: tuple[tuple[str, ...], int] | None = None
         self._cached_context: str = ""
+        self._version: int = 0  # incremented on every write/append
 
     def write(self, agent_id: str, content: str) -> None:
         """Write memory for a specific agent (worker or integrator)."""
         path = self._dir / f"{agent_id}.md"
         path.write_text(content, encoding="utf-8")
+        self._version += 1
 
     def append(self, agent_id: str, content: str) -> None:
         """Append memory for a specific agent (preserves previous entries)."""
@@ -34,6 +36,7 @@ class RunMemory:
             if f.seek(0, 2) > 0:
                 f.write("\n\n---\n\n")
             f.write(content)
+        self._version += 1
 
     def read(self, agent_id: str) -> str:
         """Read memory for a specific agent. Returns empty string if not found."""
@@ -61,9 +64,7 @@ class RunMemory:
         """
         sorted_ids = sorted(task_ids)
         ids_tuple = tuple(sorted_ids)
-        # Include per-file mtimes so cache invalidates when content changes
-        mtimes = tuple(self._get_mtime(tid) for tid in sorted_ids)
-        cache_key = (ids_tuple, mtimes)
+        cache_key = (ids_tuple, self._version)
         if cache_key == self._cache_key:
             return self._cached_context
         parts = []
@@ -80,13 +81,6 @@ class RunMemory:
         self._cache_key = cache_key
         self._cached_context = result
         return result
-
-    def _get_mtime(self, tid: str) -> float:
-        """Get modification time for a task memory file, or 0.0 if not found."""
-        try:
-            return (self._dir / f"{tid}.md").stat().st_mtime
-        except FileNotFoundError:
-            return 0.0
 
     def write_shared(self, content: str) -> None:
         """Write the aggregated shared_context.md."""

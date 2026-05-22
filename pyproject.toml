@@ -1,6 +1,6 @@
 [project]
 name = "cagent"
-version = "5.0.0"
+version = "6.0.0"
 description = "Concurrent agent workflow dispatcher — run multiple claude -p workers in parallel git worktrees"
 requires-python = ">=3.11"
 dependencies = []
@@ -20,7 +20,19 @@ Repository = "https://github.com/waynelee/cagent"
 [project.scripts]
 cagent = "cagent.cli:main"
 
+[project.optional-dependencies]
+dev = ["mypy>=1.0", "pytest", "pytest-asyncio"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+check_untyped_defs = true
+ignore_missing_imports = true

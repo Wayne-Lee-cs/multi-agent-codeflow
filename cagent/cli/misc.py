@@ -196,19 +196,25 @@ def _cmd_branches(args: argparse.Namespace) -> None:
     """List all cagent branches."""
     repo_root = _get_repo_root()
     result = subprocess.run(
-        ["git", "branch", "--list", "cagent/*"],
+        [
+            "git", "for-each-ref",
+            "--format=%(refname:short)|%(objectname:short)|%(subject)",
+            "refs/heads/cagent/",
+        ],
         cwd=repo_root, capture_output=True, text=True,
     )
-    branches = [b.strip().removeprefix("* ") for b in result.stdout.splitlines() if b.strip()]
-    if not branches:
+    if not result.stdout.strip():
         print("No cagent branches found.")
         return
-    print(f"cagent branches ({len(branches)}):")
-    for b in sorted(branches):
-        log = subprocess.run(
-            ["git", "log", "--oneline", "-1", b],
-            cwd=repo_root, capture_output=True, text=True,
-        )
-        commit = log.stdout.strip()[:60] if log.stdout.strip() else ""
-        marker = " *" if b.endswith("/integration") else ""
-        print(f"  {b}{marker}  {commit}")
+    entries = []
+    for line in result.stdout.splitlines():
+        parts = line.split("|", 2)
+        if len(parts) < 3:
+            continue
+        name, sha, subject = parts
+        entries.append((name, sha, subject))
+    print(f"cagent branches ({len(entries)}):")
+    for name, sha, subject in sorted(entries):
+        commit = f"{sha} {subject}"[:60]
+        marker = " *" if name.endswith("/integration") else ""
+        print(f"  {name}{marker}  {commit}")

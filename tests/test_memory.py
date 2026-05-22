@@ -96,6 +96,37 @@ class TestBuildSharedContext:
         assert ctx1 != ctx2
         assert "Task 002" in ctx2
 
+    def test_cache_invalidates_on_overwrite(self, tmp_path):
+        """Version counter invalidates cache when same file is overwritten."""
+        mem = RunMemory(tmp_path)
+        mem.write("001", "v1 content")
+        ctx1 = mem.build_shared_context(["001"])
+        assert "v1 content" in ctx1
+        mem.write("001", "v2 content")
+        ctx2 = mem.build_shared_context(["001"])
+        assert "v2 content" in ctx2
+        assert ctx1 != ctx2
+
+    def test_cache_invalidates_on_append(self, tmp_path):
+        """Version counter invalidates cache on append."""
+        mem = RunMemory(tmp_path)
+        mem.write("001", "initial")
+        ctx1 = mem.build_shared_context(["001"])
+        mem.append("001", "appended")
+        ctx2 = mem.build_shared_context(["001"])
+        assert "appended" in ctx2
+        assert ctx1 != ctx2
+
+    def test_version_counter_no_stat_calls(self, tmp_path):
+        """Cache key uses version counter, not file stat (no _get_mtime)."""
+        mem = RunMemory(tmp_path)
+        mem.write("001", "output")
+        # build_shared_context should not call _get_mtime
+        ctx = mem.build_shared_context(["001"])
+        assert "output" in ctx
+        # Verify _get_mtime method no longer exists
+        assert not hasattr(mem, "_get_mtime")
+
     def test_skips_nonexistent_ids(self, tmp_path):
         mem = RunMemory(tmp_path)
         mem.write("001", "output")

@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Any, Callable, Literal
 
 from cagent.compat import atomic_write
+
+_log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -19,9 +24,9 @@ class Event:
         "denied", "done", "error",
     ]
     summary: str
-    raw: dict = field(default_factory=dict)
+    raw: dict[str, Any] = field(default_factory=dict)
     raw_line_len: int = 0  # character length of stripped JSON line (avoids re-serialization)
-    usage: dict | None = None  # token usage from result events
+    usage: dict[str, Any] | None = None  # token usage from result events
 
 
 @dataclass
@@ -73,7 +78,7 @@ class EventParser:
             ev.raw_line_len = line_len
         return events
 
-    def _parse_event(self, obj: dict) -> list[Event]:
+    def _parse_event(self, obj: dict[str, Any]) -> list[Event]:
         ts = time.time()
         typ = obj.get("type", "")
 
@@ -99,7 +104,7 @@ class EventParser:
 
         return []
 
-    def _parse_assistant(self, obj: dict, ts: float) -> list[Event]:
+    def _parse_assistant(self, obj: dict[str, Any], ts: float) -> list[Event]:
         message = obj.get("message", {})
         content = message.get("content", [])
         if not isinstance(content, list) or not content:
@@ -118,7 +123,7 @@ class EventParser:
                 events.append(Event(ts=ts, kind="thinking", summary="thinking...", raw=obj))
         return events
 
-    def _parse_user(self, obj: dict, ts: float) -> list[Event]:
+    def _parse_user(self, obj: dict[str, Any], ts: float) -> list[Event]:
         message = obj.get("message", {})
         content = message.get("content", [])
         if not isinstance(content, list) or not content:
@@ -144,7 +149,7 @@ class EventParser:
         return events
 
     @staticmethod
-    def _summarize_tool(name: str, inp: dict) -> str:
+    def _summarize_tool(name: str, inp: dict[str, Any]) -> str:
         if name == "Edit":
             return f"Edit {inp.get('file_path', '?')}"
         if name == "Read":
@@ -161,7 +166,7 @@ class EventParser:
         return name
 
 
-def _task_progress_dict(tp: TaskProgress) -> dict:
+def _task_progress_dict(tp: TaskProgress) -> dict[str, Any]:
     """Build a serializable dict from TaskProgress, excluding large raw data."""
     last_ev = tp.last_event
     return {
@@ -187,6 +192,26 @@ def _task_progress_dict(tp: TaskProgress) -> dict:
     }
 
 
+def _truncate_jsonl_if_large(path: Path, max_bytes: int, keep_ratio: float) -> None:
+    """Truncate a JSONL file from the beginning if it exceeds max_bytes."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return
+    if size <= max_bytes:
+        return
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    except OSError:
+        return
+    keep_count = max(1, int(len(lines) * keep_ratio))
+    truncated = lines[-keep_count:]
+    try:
+        path.write_text("".join(truncated), encoding="utf-8")
+    except OSError:
+        pass
+
+
 class Dashboard:
     """Tracks progress of all tasks, persists to dashboard.json."""
 
@@ -206,6 +231,10 @@ class Dashboard:
         self._event_buffers: dict[str, list[str]] = {}
         self._dirty_progress: set[str] = set()
         self._last_io_flush: float = 0.0
+        self._io_queue: asyncio.Queue[tuple[str, dict[str, Any]] | None] | None = None
+        self._io_task: asyncio.Task[None] | None = None
+        self._io_lock = threading.Lock()
+        self._last_dashboard_snapshot: dict[str, dict[str, Any]] = {}  # task_id -> last serialized dict
 
         # Load existing dashboard data if present (for resume support)
         dashboard_path = run_dir / "dashboard.json"
@@ -228,6 +257,61 @@ class Dashboard:
                     self.tasks[tid] = tp
             except (json.JSONDecodeError, KeyError, TypeError):
                 pass  # Start fresh if data is corrupt
+
+    def start_async_io(self) -> None:
+        """Start the background I/O task. Call from async context."""
+        if self._io_task is not None:
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            raise RuntimeError("start_async_io() must be called from an async context")
+        self._io_queue = asyncio.Queue()
+        self._io_task = asyncio.create_task(self._io_worker())
+
+    async def stop_async_io(self) -> None:
+        """Stop the background I/O task. Call from async context.
+
+        Prerequisite: call flush_async() first to ensure all buffered data
+        is enqueued before stopping the worker.
+        """
+        if self._io_task is None:
+            return
+        # Flush any remaining buffered data before stopping
+        self.flush()
+        # Signal worker to stop
+        if self._io_queue:
+            await self._io_queue.put(None)
+        try:
+            await self._io_task
+        except asyncio.CancelledError:
+            pass
+        self._io_task = None
+        self._io_queue = None
+
+    async def _io_worker(self) -> None:
+        """Background worker that processes I/O requests from the queue."""
+        queue = self._io_queue
+        assert queue is not None  # guaranteed by start_async_io()
+        while True:
+            item = await queue.get()
+            if item is None:
+                break
+            op_type, data = item
+            try:
+                if op_type == "flush":
+                    await asyncio.to_thread(self._do_flush_io, data)
+                elif op_type == "dashboard":
+                    await asyncio.to_thread(self._do_write_dashboard, data)
+                elif op_type == "done":
+                    # Signal that all prior work is complete
+                    event = data.get("event")
+                    if event:
+                        event.set()
+            except Exception:
+                _log.exception("I/O worker error during %s", op_type)
+            finally:
+                queue.task_done()
 
     def set_event_handler(self, handler: Callable[[str, Event], None] | None) -> None:
         """Set or clear the event handler callback (used by LinePrinter)."""
@@ -328,7 +412,7 @@ class Dashboard:
             self._maybe_flush_io()
         self._write_dashboard(force=is_final)
 
-    def get_snapshot(self) -> dict:
+    def get_snapshot(self) -> dict[str, dict[str, Any]]:
         """Return a serializable snapshot of all task progress.
 
         Manual dict construction avoids asdict() recursively serializing
@@ -346,9 +430,10 @@ class Dashboard:
             "usage": event.usage,
         }
         line = json.dumps(d, ensure_ascii=False) + "\n"
-        if task_id not in self._event_buffers:
-            self._event_buffers[task_id] = []
-        self._event_buffers[task_id].append(line)
+        with self._io_lock:
+            if task_id not in self._event_buffers:
+                self._event_buffers[task_id] = []
+            self._event_buffers[task_id].append(line)
 
     def _maybe_flush_io(self) -> None:
         """Flush buffered I/O if throttle interval has elapsed."""
@@ -359,33 +444,81 @@ class Dashboard:
     def _flush_io(self) -> None:
         """Write all buffered events and dirty progress to disk."""
         self._last_io_flush = time.time()
-        # Atomic swap to avoid losing events buffered during write
-        buffers, self._event_buffers = self._event_buffers, {}
-        dirty, self._dirty_progress = self._dirty_progress, set()
+        # Atomic swap under lock to avoid losing events buffered during write
+        with self._io_lock:
+            buffers, self._event_buffers = self._event_buffers, {}
+            dirty, self._dirty_progress = self._dirty_progress, set()
+
+        # Snapshot progress in the event loop thread (safe — no concurrent mutation)
+        progress_snap = {}
+        for task_id in dirty:
+            if task_id in self.tasks:
+                progress_snap[task_id] = _task_progress_dict(self.tasks[task_id])
+
+        if self._io_queue is not None:
+            # Use async I/O queue
+            self._io_queue.put_nowait(("flush", {"buffers": buffers, "progress": progress_snap}))
+        else:
+            # Fallback to synchronous I/O
+            self._do_flush_io({"buffers": buffers, "progress": progress_snap})
+
+    _MAX_EVENT_FILE_SIZE = 5 * 1024 * 1024  # 5MB
+    _TRUNCATE_KEEP_RATIO = 0.8  # keep last 80% of lines when truncating
+
+    def _do_flush_io(self, data: dict[str, Any]) -> None:
+        """Actually write buffered events and progress to disk (runs in thread)."""
+        buffers = data["buffers"]
+        progress_snap = data["progress"]
         for task_id, lines in buffers.items():
             if lines:
                 target = self._events_dir / f"task-{task_id}.jsonl"
                 with open(target, "a", encoding="utf-8") as f:
                     f.writelines(lines)
-        for task_id in dirty:
-            if task_id in self.tasks:
-                tp = self.tasks[task_id]
-                d = _task_progress_dict(tp)
-                target = self._progress_dir / f"task-{tp.task_id}.json"
-                atomic_write(target, json.dumps(d, indent=2, ensure_ascii=False))
+                _truncate_jsonl_if_large(target, self._MAX_EVENT_FILE_SIZE, self._TRUNCATE_KEEP_RATIO)
+        for task_id, d in progress_snap.items():
+            target = self._progress_dir / f"task-{task_id}.json"
+            atomic_write(target, json.dumps(d, indent=2, ensure_ascii=False))
 
     def _write_dashboard(self, force: bool = False) -> None:
-        """Write dashboard.json with time-based throttling."""
+        """Write dashboard.json with time-based throttling (incremental)."""
         now = time.time()
         if not force and (now - self._last_dashboard_write) < self._DASHBOARD_THROTTLE:
             self._dashboard_dirty = True
             return
         self._dashboard_dirty = False
         self._last_dashboard_write = now
+
+        # Build incremental snapshot: only include tasks that changed
+        full_snapshot = self.get_snapshot()
+        diff: dict[str, dict[str, Any]] = {}
+        for tid, tp_dict in full_snapshot.items():
+            if tid not in self._last_dashboard_snapshot or tp_dict != self._last_dashboard_snapshot[tid]:
+                diff[tid] = tp_dict
+        # Update cache
+        self._last_dashboard_snapshot.update(diff)
+
+        if self._io_queue is not None:
+            self._io_queue.put_nowait(("dashboard", {"diff": diff}))
+        else:
+            self._do_write_dashboard({"diff": diff})
+
+    def _do_write_dashboard(self, data: dict[str, Any]) -> None:
+        """Actually write dashboard.json (runs in thread, incremental merge)."""
         target = self.run_dir / "dashboard.json"
+        diff = data.get("diff", {})
+        if not diff:
+            return
+        # Merge diff into existing file
+        existing: dict[str, dict[str, Any]] = {}
+        if target.exists():
+            try:
+                existing = json.loads(target.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                pass
+        existing.update(diff)
         atomic_write(
             target,
-            json.dumps(self.get_snapshot(), indent=2, ensure_ascii=False),
+            json.dumps(existing, indent=2, ensure_ascii=False),
         )
 
     def flush(self) -> None:
@@ -393,3 +526,19 @@ class Dashboard:
         self._flush_io()
         if self._dashboard_dirty:
             self._write_dashboard(force=True)
+
+    async def flush_async(self) -> None:
+        """Force-write all buffered data and wait for I/O to complete."""
+        self._flush_io()
+        if self._dashboard_dirty:
+            self._write_dashboard(force=True)
+        # Wait for queue to drain by sending a sentinel and waiting for it
+        if self._io_queue is not None:
+            done_event = asyncio.Event()
+            await self._io_queue.put(("done", {"event": done_event}))
+            try:
+                await done_event.wait()
+            except asyncio.CancelledError:
+                # If cancelled (e.g. KeyboardInterrupt), force synchronous
+                # flush without modifying _io_queue to avoid inconsistent state
+                self.flush()

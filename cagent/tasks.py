@@ -7,7 +7,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from cagent.compat import atomic_write
 
@@ -166,7 +166,7 @@ def _extract_section(markdown: str, heading: str) -> str:
 def _split_task_blocks(markdown: str) -> list[str]:
     """Split markdown into task blocks starting with ### Task."""
     blocks = []
-    current = []
+    current: list[str] = []
     for line in markdown.splitlines():
         if line.strip().startswith("### Task"):
             if current:
@@ -207,7 +207,7 @@ def _extract_prompt(block: str) -> str:
     return "\n".join(prompt_lines).strip()
 
 
-def _task_to_dict(t: Task) -> dict:
+def _task_to_dict(t: Task) -> dict[str, Any]:
     """Convert Task to dict without dataclasses.asdict() deep copy overhead."""
     return {
         "id": t.id,

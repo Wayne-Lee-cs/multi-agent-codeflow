@@ -26,7 +26,7 @@ def run_git(
     *args: str,
     cwd: str | Path | None = None,
     timeout: int = 60,
-) -> subprocess.CompletedProcess:
+) -> subprocess.CompletedProcess[str]:
     """Run a git command synchronously, raising RuntimeError on failure."""
     try:
         return subprocess.run(
@@ -52,7 +52,7 @@ def run_git(
 async def run_git_async(
     *args: str,
     cwd: str | Path,
-    env: dict | None = None,
+    env: dict[str, str] | None = None,
     check: bool = True,
     timeout: float = 60,
 ) -> GitResult:

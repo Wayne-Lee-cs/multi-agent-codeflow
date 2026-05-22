@@ -36,12 +36,11 @@ def _scan_dir_tree(path: Path, max_depth: int = 2, _depth: int = 0) -> str:
 
 def _cmd_plan(args: argparse.Namespace) -> None:
     """Use an architect agent to generate tasks.md + conventions.md from a goal."""
-    _preflight_check(check_auth=True)
+    repo_root = _get_repo_root()
+    _preflight_check(check_auth=True, repo_root=repo_root)
 
     from cagent.safety import prepare_sandbox
     from cagent.agent import _CAGENT_GITIGNORE_MARKER, _CAGENT_GITIGNORE_LINES
-
-    repo_root = _get_repo_root()
     prepare_sandbox(repo_root)
     sandbox_files = [
         repo_root / ".claude" / "settings.local.json",

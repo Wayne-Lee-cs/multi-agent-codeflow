@@ -12,10 +12,11 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from cagent.git_utils import GitTimeoutError
 from cagent.memory import RunMemory
-from cagent.progress import Dashboard, EventParser
+from cagent.progress import Dashboard, EventParser, _truncate_jsonl_if_large
 from cagent.safety import prepare_sandbox
 from cagent.tasks import Task
 
@@ -37,7 +38,7 @@ _CAGENT_GITIGNORE_LINES = ".claude/\n.env\nnode_modules/\n__pycache__/\n*.pyc\n.
 @dataclass
 class AgentResult:
     task_id: str
-    status: str  # "done", "failed", "noop"
+    status: Literal["done", "failed", "noop"]
     commit_sha: str | None = None
     fail_reason: str | None = None
     output_summary: str = ""  # agent's key output text (for memory)
@@ -56,6 +57,7 @@ async def run_agent(
     memory: RunMemory | None = None,
     conventions: str = "",
     max_turns: int | None = None,
+    api_key: str | None = None,
 ) -> AgentResult:
     """Run a claude -p subprocess for a single task in its worktree.
 
@@ -108,14 +110,18 @@ async def run_agent(
     # 5. Launch process — stdin always piped for prompt delivery
     # On Windows, CREATE_NEW_PROCESS_GROUP enables graceful shutdown via
     # CTRL_BREAK_EVENT instead of TerminateProcess hard-kill.
+    # If api_key is provided, inject it into subprocess env only (not global os.environ).
     creation_flags = 0
     if sys.platform == "win32":
         creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP
+    subprocess_env = None
+    if api_key:
+        subprocess_env = {**os.environ, "ANTHROPIC_API_KEY": api_key}
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             cwd=str(worktree_path),
-            env=None,
+            env=subprocess_env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             stdin=asyncio.subprocess.PIPE,
@@ -228,6 +234,8 @@ async def run_agent(
 
         return result
     finally:
+        # Truncate oversized log files (keep last 80% if > 5MB)
+        _truncate_jsonl_if_large(log_path, 5 * 1024 * 1024, 0.8)
         # Clean up PID file
         try:
             pid_path.unlink(missing_ok=True)

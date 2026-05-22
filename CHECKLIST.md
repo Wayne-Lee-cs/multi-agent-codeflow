@@ -3,6 +3,8 @@
 > v2.1 (Phase 1-24) completed: 153/165 items (92.7%). Details in [ARCHIVE.md](ARCHIVE.md).
 > v3.0-4.0 (Phase 25-48) completed. **275 pytest all pass.**
 > **v5.0 (2026-05-21)**: Phase 25-48 全部提交。E2E 验证通过，git_utils 统一，Write 安全扫描，Windows 优雅关闭。
+> **v5.1 (2026-05-21)**: Phase 49-51 完成。多策略集成、WebSocket dashboard、异步 I/O。293 tests。
+> **v6.0 (2026-05-22)**: Phase 52-56 全部完成。324 tests。mypy 0 errors。
 > This file tracks only **remaining** and **new** work.
 
 ---
@@ -11,7 +13,7 @@
 
 ### Deferred — acceptable for current version
 - [x] **D.1** `integrator.py` — Empty prompt when first task conflicts with base (edge case) *(Phase 42 修复：fallback prompt "conflicts with base branch")*
-- [ ] **D.2** `cli.py` — run_id timestamp collision at 1-second resolution (extremely unlikely)
+- [x] **D.2** `cli.py` — run_id timestamp collision at 1-second resolution *(Phase 51 修复：添加 `%f` 微秒)*
 
 ### Unverified — need manual testing
 - [ ] **D.3** `cagent watch` TTY 下 1s 刷新表格 + `q` 退出
@@ -90,9 +92,9 @@
 - [x] **28.1.4** 最多重试 2 轮，仍失败则标记 integration 为 partial *(Phase 41 完成)*
 
 ### 28.2 Integrator 多策略
-- [ ] **28.2.1** `cli.py` — `--strategy cherry-pick|merge|rebase` flag（默认 cherry-pick）
-- [ ] **28.2.2** `integrator.py` — `_merge_strategy()` / `_rebase_strategy()` 实现
-- [ ] **28.2.3** 测试各策略的冲突/无冲突路径
+- [x] **28.2.1** `cli.py` — `--strategy cherry-pick|merge|rebase` flag（默认 cherry-pick）*(Phase 49 完成)*
+- [x] **28.2.2** `integrator.py` — `_merge_strategy()` / `_rebase_strategy()` 实现 *(Phase 49 完成)*
+- [x] **28.2.3** 测试各策略的冲突/无冲突路径 *(Phase 49 完成, 5 新测试)*
 
 ### 28.3 pip install 支持
 - [x] **28.3.1** `pyproject.toml` — 添加 `[project.scripts] cagent = "cagent.cli:main"` *(Phase 38 E7/38.3.3 完成)*
@@ -100,20 +102,22 @@
 - [x] **28.3.3** 保持 `python -m cagent` 仍然可用 *(Phase 38 验证)*
 
 ### 28.4 Watch WebSocket (P4)
-- [ ] **28.4.1** `cagent/server.py` — stdlib HTTP + asyncio WebSocket server
-- [ ] **28.4.2** Dashboard 变化时推送 JSON 到 WebSocket clients
-- [ ] **28.4.3** `cagent watch --web [port]` flag 启动 server
-- [ ] **28.4.4** 简单 HTML 前端（可选）
+- [x] **28.4.1** `cagent/server.py` — stdlib HTTP + asyncio WebSocket server *(Phase 50 完成)*
+- [x] **28.4.2** Dashboard 变化时推送 JSON 到 WebSocket clients *(Phase 50 完成)*
+- [x] **28.4.3** `cagent watch --web [port]` flag 启动 server *(Phase 50 完成)*
+- [x] **28.4.4** 简单 HTML 前端（可选）*(Phase 50 完成, 内嵌 HTML/CSS/JS)*
 
 ---
 
 ## Phase 29: v3.0 — 安全演进 (P4, 长期)
 
-### 29.1 Docker 沙箱
-- [ ] **29.1.1** `cagent/sandbox_docker.py` — Docker container 生命周期管理
-- [ ] **29.1.2** `--sandbox docker` flag，worker 在容器内运行
-- [ ] **29.1.3** Volume mount worktree，网络隔离
-- [ ] **29.1.4** Fallback：Docker 不可用时 warning + 退回 hook 模式
+### ~~29.1 Docker 沙箱~~ — **已移除 (v6.0 评估)**
+> 架构评估结论：内嵌 Docker 编排使项目臃肿（+300-500行），零依赖是核心优势。
+> 替代方案：Phase 56.2 提供 Dockerfile，用户可自行在容器内运行 cagent 实现完全隔离。
+- [x] ~~**29.1.1**~~ `cagent/sandbox_docker.py` — **REMOVED**: 不再实现
+- [x] ~~**29.1.2**~~ `--sandbox docker` flag — **REMOVED**: 不再实现
+- [x] ~~**29.1.3**~~ Volume mount worktree — **REMOVED**: 不再实现
+- [x] ~~**29.1.4**~~ Fallback — **REMOVED**: 不再实现
 
 ### 29.2 Resource Limit ✅ (Phase 43 完成)
 - [x] **29.2.1** `--max-turns N`：per-task turn limit, pass-through to `claude -p --max-turns` *(Phase 43)*
@@ -397,7 +401,7 @@
 | Phase 25 (Bug 修复) | 4 | **DONE** |
 | Phase 26 (可靠性) | 13 | **DONE** (12/13, 1 手动验证) |
 | Phase 27 (测试补全) | 14 | **DONE** (11/14, 3 手动验证) |
-| Phase 28 (功能增强) | 14 | **partial** — 28.1 multi-round DONE (4/4), 28.3 pip install DONE (3/3), 28.2/28.4 TODO (7) |
+| Phase 28 (功能增强) | 14 | **DONE** (14/14) — 28.1 multi-round (4/4), 28.2 多策略 (3/3), 28.3 pip install (3/3), 28.4 WebSocket (4/4) |
 | Phase 29 (安全演进) | 7 | TODO — 长期 |
 | Phase 30 (审计 Bug 修复) | 5 | **DONE** |
 | Phase 31 (审计 设计加固) | 7 | **DONE** (7/7, 31.2.1→C2, 31.2.2→B7) |
@@ -416,4 +420,123 @@
 | Phase 46 (用户文档) | 2 | **DONE** (README.md + PLAN.md 精简) |
 | Phase 47 (技术债清理) | 7 | **DONE** (git_utils 统一 + json import + 空提交 + commit msg) |
 | Phase 48 (设计改进) | 5 | **DONE** (budget 文档 + KeyboardInterrupt + Write sandbox + 2 tests) |
-| **Total remaining** | **11** | 1 deferred (D.2) + 6 手动验证 (D.3-D.8) + 3 功能 TODO (28.2) + 4 Docker (28.4/29.1) |
+| Phase 49 (Integrator 多策略) | 3 | **DONE** (--strategy flag + merge/rebase 策略 + 5 tests + 代码审查修复) |
+| Phase 50 (Watch WebSocket) | 4 | **DONE** (server.py + --web flag + HTML dashboard + 8 tests) |
+| Phase 51 (异步 I/O 优化 + 收尾) | 6 | **DONE** (async I/O + D.2 微秒 run_id + 最终审查 6 issues 修复) |
+| Phase 29.1 (Docker 沙箱) | 4 | **REMOVED** (v6.0 评估：改为 Dockerfile 提供) |
+| Phase 52 (安全加固) | 3 | **DONE** (3/3, api_key 传递 + run.lock + WS Origin 校验, +10 tests) |
+| Phase 53 (运行时稳健性) | 5 | **DONE** (5/5, auth 缓存 + asyncio config + graceful shutdown + import 清理 + io lock) |
+| Phase 54 (性能优化) | 3 | **DONE** (3/3, Dashboard 增量 + git for-each-ref + 版本号缓存, +7 tests) |
+| Phase 55 (代码质量) | 5 | **DONE** (5/5, mypy + 类型标注 + _execute_run 拆分 + 版本号 + Template) |
+| Phase 56 (日志与可观测性) | 2 | **DONE** (2/2, 日志截断 + Dockerfile, +4 tests) |
+| **Total remaining** | **6** | 6 手动验证 (D.3-D.8) |
+
+---
+
+## v6.0 — Phase 52: 安全加固 (P0, 2026-05-21)
+
+### 52.1 API key 安全传递
+- [x] **52.1.1** `cli/run.py` — 移除 `os.environ["ANTHROPIC_API_KEY"] = args.api_key`，改为在 `_execute_run` 中将 key 传递给 dispatcher
+- [x] **52.1.2** `dispatcher.py` — `run()` 接受 `api_key: str | None` 参数，传递给 `run_agent()`
+- [x] **52.1.3** `agent.py` — `run_agent()` 接受 `api_key: str | None`，仅在 `create_subprocess_exec(env=...)` 中为 claude 子进程注入 `ANTHROPIC_API_KEY`，不污染全局 env
+- [x] **52.1.4** `integrator.py` — `_run_claude_agent()` 同样接受并传递 `api_key`
+- [x] **52.1.5** 测试：2 个新测试验证 `os.environ` 中无 API key 泄露 + env=None 默认行为
+
+### 52.2 并发运行互斥锁
+- [x] **52.2.1** `cli/run.py` — `_run_lock` 上下文管理器，`.cagent/run.lock` 文件锁（Windows: `msvcrt.locking`, Unix: `fcntl.flock`）
+- [x] **52.2.2** 锁获取失败时打印清晰错误："Another cagent run is active in this repository. Use --force to override."
+- [x] **52.2.3** `--force` flag 跳过锁检查（适用于确认无冲突的场景）
+- [x] **52.2.4** 测试：4 个新测试（acquire/release + force skip + dir creation + error message）
+
+### 52.3 WebSocket Origin 校验
+- [x] **52.3.1** `server.py` — `_handle_websocket` + `_is_localhost_origin` 检查 `Origin` header，仅允许 `127.0.0.1`/`localhost`/`::1`
+- [x] **52.3.2** 非法 Origin 返回 403 Forbidden，不升级 WebSocket
+- [x] **52.3.3** 测试：4 个新测试（localhost 通过 + 非 localhost 拒绝 + 空 origin 允许 + 403 集成测试）
+
+---
+
+## v6.0 — Phase 53: 运行时稳健性 (P1, 2026-05-21)
+
+### 53.1 auth 预检缓存
+- [x] **53.1.1** `cli/base.py` — `_auth_preflight_check` 成功后写入 `.cagent/auth_ok`（内容：时间戳）
+- [x] **53.1.2** `_auth_preflight_check` 开头检查 `.cagent/auth_ok` 是否存在且时间戳 < 5 分钟，是则跳过
+- [x] **53.1.3** `cagent run --api-key` 时始终重新验证（key 变化场景）
+- [x] **53.1.4** 测试：4 个新测试（缓存命中 + 过期 + force 忽略缓存 + 成功写入）
+
+### 53.2 pytest asyncio warning 修复
+- [x] **53.2.1** `pyproject.toml` — `[tool.pytest.ini_options]` 添加 `asyncio_default_fixture_loop_scope = "function"`
+
+### 53.3 `server.py` graceful shutdown
+- [x] **53.3.1** `run_dashboard_server` 注册 SIGINT/SIGTERM handler 调用 `server.stop()`
+- [x] **53.3.2** Windows 兼容：`signal.signal(signal.SIGINT, ...)` 替代 `loop.add_signal_handler()`
+- [x] **53.3.3** 已有 server 测试覆盖（12 tests）
+
+### 53.4 `cli/run.py` 重复 import 清理
+- [x] **53.4.1** 移除 `_execute_run` 内 KeyboardInterrupt handler 中的 `from cagent.tasks import dump_state`
+
+### 53.5 `_flush_io` 显式锁保护
+- [x] **53.5.1** `progress.py` — `Dashboard.__init__` 新增 `self._io_lock = threading.Lock()`
+- [x] **53.5.2** `_flush_io` 和 `_buffer_event` 中 `_event_buffers` / `_dirty_progress` 的读写用 `_io_lock` 保护
+- [x] **53.5.3** 已有 progress 测试覆盖（307 tests total）
+
+---
+
+## v6.0 — Phase 54: 性能优化 (P1, 2026-05-22) ✅
+
+### 54.1 Dashboard 增量更新
+- [x] **54.1.1** `progress.py` — `_write_dashboard` 只序列化变化的 task，与上次快照 diff 后写入
+- [x] **54.1.2** `server.py` — WebSocket 广播改为 diff 格式（`{type: "diff", tasks: {...}}`），仅发送变化的 task
+- [x] **54.1.3** `_DASHBOARD_HTML` — JavaScript 客户端适配增量更新协议（`allTasks` 本地状态 + `Object.assign` 合并 diff）
+- [x] **54.1.4** 测试：4 个新测试（增量写入 + merge 一致性 + 空 diff 跳过 + 多次写入累积）
+
+### 54.2 `_cmd_branches` 用 `git for-each-ref`
+- [x] **54.2.1** `cli/misc.py` — `_cmd_branches` 用 `git for-each-ref --format='%(refname:short)|%(objectname:short)|%(subject)' refs/heads/cagent/` 替代逐分支 `git log`
+- [x] **54.2.2** 测试：3 个新测试（无分支 + 多分支列表 + integration 标记）
+
+### 54.3 `build_shared_context` 版本号缓存
+- [x] **54.3.1** `memory.py` — `write()` 和 `append()` 时递增 `self._version: int` 计数器
+- [x] **54.3.2** `build_shared_context` 缓存 key 改为 `(ids_tuple, self._version)` 取代 per-file mtime stat
+- [x] **54.3.3** 测试：3 个新测试（覆盖写缓存失效 + append 缓存失效 + 无 _get_mtime 方法）
+
+---
+
+## v6.0 — Phase 55: 代码质量 (P2, 2026-05-22) ✅
+
+### 55.1 mypy 集成
+- [x] **55.1.1** `pyproject.toml` — 添加 `[tool.mypy]` 配置 + `[project.optional-dependencies] dev` 含 mypy
+- [x] **55.1.2** 修复 mypy 报告的 16 处类型错误（8 个文件）
+- [x] **55.1.3** `mypy cagent/` 0 errors, `--disallow-any-generics` 0 errors
+
+### 55.2 类型标注补全
+- [x] **55.2.1** `cli/run.py` — `list` → `list[Any]`，`Callable` → `Callable[..., Any]`
+- [x] **55.2.2** 7 个文件 33 处裸泛型补全（`dict` → `dict[str, Any]` 等）
+- [x] **55.2.3** `AgentResult.status` 改为 `Literal["done", "failed", "noop"]` 消除 dispatcher 赋值类型错误
+
+### 55.3 `_execute_run` 拆分
+- [x] **55.3.1** 提取 `_dispatch_phase(...)` — 包含 dispatcher 调用 + 结果合并 + 计数输出
+- [x] **55.3.2** 提取 `_integrate_phase(...)` — 包含 shared memory 写入 + integration 调用
+- [x] **55.3.3** 提取 `_summary_phase(...)` — 包含 summary 写入 + worktree 清理 + 最终输出
+- [x] **55.3.4** `_execute_run` 简化为三个 phase 的串联调用
+
+### 55.4 版本号统一
+- [x] **55.4.1** `pyproject.toml` — `version = "6.0.0"`
+- [x] **55.4.2** PLAN.md / CHECKLIST.md 版本引用同步
+
+### 55.5 `_HOOK_SCRIPT` 模板可读性
+- [x] **55.5.1** `safety.py` — `_HOOK_SCRIPT` 从 `.format()` 双花括号改为 `string.Template` + `$patterns_json` 占位符
+- [x] **55.5.2** 所有现有 safety 测试通过（hook 脚本功能不变）
+
+---
+
+## v6.0 — Phase 56: 日志与可观测性 (P2, 2026-05-22) ✅
+
+### 56.1 日志大小限制
+- [x] **56.1.1** `progress.py` — `_truncate_jsonl_if_large` 工具函数，超过 5MB 时保留最后 80% 行
+- [x] **56.1.2** `progress.py` — `_do_flush_io` 写入 events jsonl 后自动调用截断
+- [x] **56.1.3** `agent.py` — task log 写入后自动调用截断
+- [x] **56.1.4** 测试：4 个新测试（未超限不截断 + 超限保留尾部 + 不存在文件 + 至少保留 1 行）
+
+### 56.2 Dockerfile 提供
+- [x] **56.2.1** `Dockerfile` — 基于 `python:3.12-slim`，安装 git + Node.js + claude CLI + cagent
+- [x] **56.2.2** `.dockerignore` — 排除 `.git`/`.cagent`/`__pycache__` 等
+- [x] **56.2.3** `WORKDIR /workspace`，用户 mount 项目目录到此路径
