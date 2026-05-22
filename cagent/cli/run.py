@@ -349,6 +349,10 @@ def _execute_run(
 def _cmd_run(args: argparse.Namespace) -> None:
     """Execute the full run workflow: dispatch -> integrate -> summary."""
     repo_root = _get_repo_root()
+
+    from cagent.config import apply_config, load_config
+    apply_config(args, load_config(repo_root))
+
     _preflight_check(
         check_auth=True,
         repo_root=repo_root,

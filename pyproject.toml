@@ -21,13 +21,25 @@ Repository = "https://github.com/waynelee/cagent"
 cagent = "cagent.cli:main"
 
 [project.optional-dependencies]
-dev = ["mypy>=1.0", "pytest", "pytest-asyncio"]
+dev = ["mypy>=1.0", "pytest", "pytest-asyncio", "pytest-cov"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+
+[tool.coverage.run]
+source = ["cagent"]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 55
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.",
+    "if TYPE_CHECKING:",
+]
 
 [tool.mypy]
 python_version = "3.11"

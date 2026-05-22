@@ -1,21 +1,32 @@
-# cagent — Concurrent Agent Workflow
+# cagent
 
-> **v5.0** — 275 pytest tests, zero third-party dependencies.
+> **v6.0.0** — 326 tests, zero third-party dependencies.
 
-A personal code workflow built on Claude Code: one CLI command fans out to multiple
-agents working in parallel git worktrees on the same repository. Tasks can declare
-dependencies, and the dispatcher automatically schedules them in waves.
+Concurrent agent workflow dispatcher — run multiple `claude -p` workers in parallel git worktrees.
 
-## Quick Start
+## Features
 
-### Prerequisites
+- **Parallel execution** — bounded-concurrency async dispatcher with configurable `-j` workers
+- **Git worktree isolation** — each task runs in its own worktree, zero interference
+- **Dependency graph** — declare `depends_on` between tasks; Kahn's algorithm for topological scheduling and cycle detection
+- **Three integration strategies** — cherry-pick (default), merge, rebase with automated conflict resolution via integrator agent
+- **Safety sandbox** — PreToolUse hooks block `git push`, `rm -rf`, `bash -c`, and 20+ dangerous patterns; token-splitting detection prevents flag evasion
+- **Token budget** — `--max-tokens` stops dispatching when cumulative usage exceeds the budget
+- **Retry with backoff** — exponential backoff for transient failures (timeout, rate limit, network errors)
+- **Run resumption** — `--resume` picks up from where an interrupted run left off
+- **Per-run memory** — agents share context within a run via `RunMemory`
+- **Real-time dashboard** — ANSI terminal (`cagent watch`) or WebSocket browser UI (`cagent watch --web`)
+- **Cross-platform** — Windows (msvcrt, CREATE_NEW_PROCESS_GROUP) and Unix (fcntl, SIGTERM) support
+- **Zero dependencies** — pure Python 3.11+ stdlib, no third-party runtime packages
+
+## Requirements
 
 - Python >= 3.11
-- `claude` CLI in PATH (Claude Code)
 - Git
+- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) (`claude` in PATH)
 - `claude -p` must be able to authenticate — run `claude -p "hello"` to verify
 
-### Install
+## Installation
 
 ```bash
 # Option A: pip install (recommended)
@@ -26,7 +37,13 @@ cagent run tasks.txt
 python -m cagent run tasks.txt
 ```
 
-### Basic Workflow
+For development (adds mypy, pytest, pytest-asyncio, pytest-cov):
+
+```bash
+pip install -e ".[dev]"
+```
+
+## Quick Start
 
 ```bash
 # 1. Plan (optional) — decompose a goal into tasks
@@ -53,28 +70,31 @@ cagent push cagent/<run-id>/integration
 | `run --resume <run-id>` | Resume a previous run, skipping completed tasks |
 | `status [run-id]` | One-shot dashboard snapshot |
 | `watch [run-id]` | Live ANSI dashboard (press `q` to quit) |
+| `watch --web [port]` | WebSocket browser dashboard (default: 8080) |
 | `log <task-id>` | Show events for a task |
 | `cancel <task-id>` | Cancel a running task |
 | `clean [run-id]` | Clean up worktrees and branches |
 | `push <branch>` | Push to origin (requires y/N confirmation) |
-| `branches [run-id]` | List branches for a run |
+| `branches` | List cagent branches |
 
 ## Run Options
 
 ```
 -j, --jobs N              Concurrency (default: 4)
 --base <branch>           Base branch/SHA (default: HEAD)
+--strategy STR            Integration strategy: cherry-pick|merge|rebase
 --squash                  Squash integration into one commit
---keep-worktrees          Keep worktrees after run
---worker-model <id>       Model override for workers
---integrator-model <id>   Model override for integrator
 --timeout <sec>           Per-agent timeout (default: 1800)
 --retries N               Auto-retry on transient errors (timeout/rate-limit/network)
 --max-turns N             Per-task turn limit (passed to claude -p)
 --max-tokens N            Per-run token budget (checked between tasks)
+--worker-model <id>       Model override for workers
+--integrator-model <id>   Model override for integrator
 --post-integrate-cmd CMD  Validation command after integration (e.g. "pytest")
 --quiet                   Only print START/DONE/FAIL events
 --api-key KEY             Explicit API key (overrides env)
+--keep-worktrees          Keep worktrees after run
+--force                   Skip run lock check
 --dry-run                 Show planned execution without running
 ```
 
@@ -113,6 +133,42 @@ Create src/users.py implementing user CRUD.
 
 Conventions are loaded from `conventions.md` in the same directory, or from an inline `## Conventions` section.
 
+## Configuration File
+
+cagent reads defaults from configuration files, so you don't have to repeat common flags.
+
+**Lookup order** (first found wins):
+
+1. `.cagentrc` in the git repo root (TOML format)
+2. `[tool.cagent]` section in `pyproject.toml`
+
+CLI arguments always override configuration file values.
+
+**Example `.cagentrc`:**
+
+```toml
+jobs = 8
+timeout = 3600
+strategy = "merge"
+retries = 2
+quiet = true
+worker_model = "claude-sonnet-4-6"
+integrator_model = "claude-sonnet-4-6"
+max_turns = 20
+```
+
+**Example `pyproject.toml`:**
+
+```toml
+[tool.cagent]
+jobs = 8
+timeout = 3600
+strategy = "merge"
+retries = 2
+```
+
+Supported keys: `jobs`, `timeout`, `strategy`, `squash`, `quiet`, `retries`, `worker_model`, `integrator_model`, `max_turns`, `max_tokens`, `keep_worktrees`.
+
 ## Safety
 
 - cagent **never pushes automatically** — only `cagent push` with explicit y/N confirmation
@@ -132,20 +188,42 @@ Conventions are loaded from `conventions.md` in the same directory, or from an i
 ## Architecture
 
 ```
-cagent plan "build a REST API"
-    │
-    └── Architect Agent → tasks.md + conventions.md
-                              │
-cagent run tasks.md -j 4      │
-    │                         │
-    ├── Worker 1 (claude -p, depends_on: none) → branch task-001
-    ├── Worker 2 (claude -p, depends_on: 001)  → branch task-002  (waits for 001)
-    └── Worker N (claude -p, depends_on: none) → branch task-N
-           │
-           └── Integrator (cherry-pick + conflict resolution + post-integrate validation)
-                    │
-                    └── integration branch (ready to merge)
+CLI (argparse + config file)
+ │
+ ├── Dispatcher (asyncio + bounded semaphore)
+ │    ├── Task₁ → Agent → git worktree₁
+ │    ├── Task₂ → Agent → git worktree₂
+ │    └── Task₃ → Agent → git worktree₃
+ │
+ ├── Integrator (cherry-pick / merge / rebase)
+ │    └── Conflict → integrator agent → resolve
+ │
+ ├── Dashboard (async I/O worker)
+ │    ├── ANSI terminal (LinePrinter)
+ │    └── WebSocket server (DashboardServer)
+ │
+ └── Safety sandbox (PreToolUse hooks)
+      └── 20+ deny patterns + token-split detection
 ```
+
+### Module Map
+
+| Module | Purpose |
+|--------|---------|
+| `cagent/cli/` | CLI entry point, subcommands, config loading |
+| `cagent/config.py` | Configuration file loading (.cagentrc, pyproject.toml) |
+| `cagent/dispatcher.py` | Async task scheduling, dependency graph, retry, budget |
+| `cagent/agent.py` | Subprocess management, stream parsing, commit |
+| `cagent/integrator.py` | Branch integration, conflict resolution, post-validate |
+| `cagent/safety.py` | Sandbox hook generation, deny patterns |
+| `cagent/tasks.py` | Task data model, plain text / Markdown parsing |
+| `cagent/worktree.py` | Git worktree CRUD |
+| `cagent/memory.py` | Per-run shared memory between agents |
+| `cagent/progress.py` | Event parsing, dashboard state, async I/O |
+| `cagent/server.py` | HTTP + WebSocket dashboard server |
+| `cagent/log.py` | Async queue-based console output |
+| `cagent/git_utils.py` | Unified git command wrapper with timeout |
+| `cagent/compat.py` | Cross-platform compatibility layer |
 
 ## Known Limitations
 
@@ -153,8 +231,26 @@ cagent run tasks.md -j 4      │
 - **Write/Edit content false positives**: the safety hook applies deny patterns to file content (defense-in-depth), which may block legitimate writes containing command strings in comments, tests, or documentation.
 - **Indirect execution bypass**: compiled binaries or non-Bash interpreters (e.g., a Go program calling `exec("git push")`) can bypass the regex/token safety check. Full isolation requires Docker (not yet implemented).
 
-## Requirements
+## Development
 
-- Python >= 3.11 (zero third-party dependencies)
-- `claude` CLI in PATH, with `claude -p` able to authenticate
-- Git
+### Run tests
+
+```bash
+python -m pytest tests/ -v
+```
+
+### Run tests with coverage
+
+```bash
+python -m pytest tests/ --cov=cagent --cov-report=term-missing
+```
+
+### Type checking
+
+```bash
+python -m mypy cagent/
+```
+
+## License
+
+MIT
