@@ -57,6 +57,8 @@ async def run(
     Each task gets its own git worktree. Results are collected and returned
     in the same order as the input tasks list.
     """
+    if concurrency < 1:
+        raise ValueError(f"concurrency must be >= 1, got {concurrency}")
     sem = asyncio.Semaphore(concurrency)
     results: dict[str, AgentResult] = {}
     lock = asyncio.Lock()
@@ -73,7 +75,11 @@ async def run(
             _last_dump_time = now
 
     async def _reset_worktree(worktree_path: Path) -> None:
-        """Reset worktree to base_sha to undo partial changes before retry."""
+        """Reset worktree to base_sha to undo partial changes before retry.
+
+        This runs outside the claude sandbox context — uses git reset/clean
+        directly without safety checks.
+        """
         rc, _, stderr = await _run_git_async(
             "reset", "--hard", base_sha, cwd=worktree_path, timeout=60
         )

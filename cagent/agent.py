@@ -150,15 +150,18 @@ async def run_agent(
         pass  # Best effort
 
     try:
-        # Send prompt via stdin pipe
+        # Send prompt via stdin pipe (with timeout to avoid hanging on drain)
         if proc.stdin is None:
             raise RuntimeError("subprocess stdin pipe was not created")
         try:
             proc.stdin.write(prompt.encode("utf-8"))
-            await proc.stdin.drain()
+            await asyncio.wait_for(proc.stdin.drain(), timeout=30)
         finally:
             proc.stdin.close()
-            await proc.stdin.wait_closed()
+            try:
+                await asyncio.wait_for(proc.stdin.wait_closed(), timeout=5)
+            except (TimeoutError, OSError):
+                pass
 
         # 5. Stream stdout line by line (wrapped in timeout)
         if proc.stdout is None:
@@ -259,6 +262,55 @@ async def _run_git_async(
     return result.returncode, result.stdout, result.stderr
 
 
+async def _git_op(
+    op_name: str,
+    *args: str,
+    cwd: Path,
+    task: Task,
+    dashboard: Dashboard | None,
+    timeout: float = 60,
+) -> tuple[int, str, str] | AgentResult:
+    """Run a git operation with automatic GitTimeoutError handling.
+
+    op_name is both the git subcommand and the human-readable label.
+    Returns (returncode, stdout, stderr) on success.
+    Returns AgentResult(failed) on timeout.
+    """
+    try:
+        rc, stdout, stderr = await _run_git_async(op_name, *args, cwd=cwd, timeout=timeout)
+    except GitTimeoutError:
+        reason = f"git {op_name} timed out"
+        if dashboard:
+            dashboard.set_task_status(task.id, "failed", fail_reason=reason)
+        return AgentResult(task_id=task.id, status="failed", fail_reason=reason)
+    return rc, stdout, stderr
+
+
+async def _git_op_checked(
+    op_name: str,
+    *args: str,
+    cwd: Path,
+    task: Task,
+    dashboard: Dashboard | None,
+    timeout: float = 60,
+) -> tuple[bool, str, str] | AgentResult:
+    """Run a git operation, returning (True, stdout, stderr) on success.
+
+    Returns AgentResult(failed) on timeout or non-zero exit.
+    """
+    result = await _git_op(op_name, *args, cwd=cwd, task=task, dashboard=dashboard, timeout=timeout)
+    if isinstance(result, AgentResult):
+        return result
+    rc, stdout, stderr = result
+    if rc != 0:
+        err = stderr.strip()
+        reason = f"git {op_name} failed: {err}" if err else f"git {op_name} failed"
+        if dashboard:
+            dashboard.set_task_status(task.id, "failed", fail_reason=reason)
+        return AgentResult(task_id=task.id, status="failed", fail_reason=reason)
+    return True, stdout, stderr
+
+
 async def _commit_result(
     task: Task,
     worktree_path: Path,
@@ -266,14 +318,10 @@ async def _commit_result(
 ) -> AgentResult:
     """Check for changes in worktree and commit if any."""
     # Check git status
-    try:
-        returncode, stdout, stderr = await _run_git_async(
-            "status", "--porcelain", cwd=worktree_path, timeout=60
-        )
-    except GitTimeoutError:
-        if dashboard:
-            dashboard.set_task_status(task.id, "failed", fail_reason="git status timed out")
-        return AgentResult(task_id=task.id, status="failed", fail_reason="git status timed out")
+    result = await _git_op("status", "--porcelain", cwd=worktree_path, task=task, dashboard=dashboard)
+    if isinstance(result, AgentResult):
+        return result
+    _, stdout, _ = result
 
     status_output = stdout.strip()
 
@@ -287,10 +335,7 @@ async def _commit_result(
     first_line = task.prompt.strip().split("\n")[0][:72]
     commit_msg = f"task {task.id}: {first_line}"
 
-    # Exclude .claude/ sandbox files from commit. The sandbox creates
-    # .claude/settings.local.json and .claude/hooks/cagent-guard.py that
-    # should not be committed. We only delete these known sandbox artifacts,
-    # preserving any other legitimate .claude/ files (settings.json, commands/).
+    # Exclude .claude/ sandbox files from commit
     claude_dir = worktree_path / ".claude"
     sandbox_files = [
         claude_dir / "settings.local.json",
@@ -299,84 +344,39 @@ async def _commit_result(
     for f in sandbox_files:
         if f.exists():
             f.unlink()
-    # Remove hooks dir if empty
     hooks_dir = claude_dir / "hooks"
     if hooks_dir.exists() and not any(hooks_dir.iterdir()):
         hooks_dir.rmdir()
-    # Restore tracked .claude/ files from base (if any were deleted)
-    try:
-        rc, _, _ = await _run_git_async(
-            "checkout", "HEAD", "--", ".claude/", cwd=worktree_path, timeout=60
-        )
-    except GitTimeoutError:
-        if dashboard:
-            dashboard.set_task_status(task.id, "failed", fail_reason="git checkout .claude/ timed out")
-        return AgentResult(task_id=task.id, status="failed", fail_reason="git checkout .claude/ timed out")
 
-    # Restore .gitignore to base (sandbox may have modified it)
-    try:
-        rc, _, _ = await _run_git_async(
-            "checkout", "HEAD", "--", ".gitignore", cwd=worktree_path, timeout=60
-        )
-    except GitTimeoutError:
-        if dashboard:
-            dashboard.set_task_status(task.id, "failed", fail_reason="git checkout .gitignore timed out")
-        return AgentResult(task_id=task.id, status="failed", fail_reason="git checkout .gitignore timed out")
+    # Restore tracked .claude/ and .gitignore from base (best-effort, may not exist)
+    for path in (".claude/", ".gitignore"):
+        r = await _git_op("checkout", "HEAD", "--", path, cwd=worktree_path, task=task, dashboard=dashboard)
+        if isinstance(r, AgentResult):
+            return r
 
     # Verify sandbox files are cleared before staging
     for f in sandbox_files:
         if f.exists():
-            # Force remove if still present
             try:
                 f.unlink()
             except OSError:
                 pass
 
     # git add -A
-    try:
-        rc, add_out, add_err = await _run_git_async(
-            "add", "-A", cwd=worktree_path, timeout=60
-        )
-    except GitTimeoutError:
-        if dashboard:
-            dashboard.set_task_status(task.id, "failed", fail_reason="git add -A timed out")
-        return AgentResult(task_id=task.id, status="failed", fail_reason="git add -A timed out")
-    if rc != 0:
-        if dashboard:
-            dashboard.set_task_status(task.id, "failed", fail_reason="git add -A failed")
-        return AgentResult(task_id=task.id, status="failed", fail_reason="git add -A failed")
+    r = await _git_op_checked("add", "-A", cwd=worktree_path, task=task, dashboard=dashboard)
+    if isinstance(r, AgentResult):
+        return r
 
     # git commit
-    try:
-        rc, commit_out, commit_err = await _run_git_async(
-            "commit", "-m", commit_msg, cwd=worktree_path, timeout=60
-        )
-    except GitTimeoutError:
-        if dashboard:
-            dashboard.set_task_status(task.id, "failed", fail_reason="git commit timed out")
-        return AgentResult(task_id=task.id, status="failed", fail_reason="git commit timed out")
-    if rc != 0:
-        err = commit_err.strip()
-        fail_reason = f"git commit failed: {err}" if err else "git commit failed"
-        if dashboard:
-            dashboard.set_task_status(task.id, "failed", fail_reason=fail_reason)
-        return AgentResult(task_id=task.id, status="failed", fail_reason=fail_reason)
+    r = await _git_op_checked("commit", "-m", commit_msg, cwd=worktree_path, task=task, dashboard=dashboard)
+    if isinstance(r, AgentResult):
+        return r
 
     # Get commit SHA
-    try:
-        rc, sha_out, sha_err = await _run_git_async(
-            "rev-parse", "HEAD", cwd=worktree_path, timeout=60
-        )
-    except GitTimeoutError:
-        if dashboard:
-            dashboard.set_task_status(task.id, "failed", fail_reason="git rev-parse HEAD timed out")
-        return AgentResult(task_id=task.id, status="failed", fail_reason="git rev-parse HEAD timed out")
-    if rc != 0:
-        err = sha_err.strip()
-        fail_reason = f"git rev-parse HEAD failed: {err}" if err else "git rev-parse HEAD failed"
-        if dashboard:
-            dashboard.set_task_status(task.id, "failed", fail_reason=fail_reason)
-        return AgentResult(task_id=task.id, status="failed", fail_reason=fail_reason)
+    r = await _git_op_checked("rev-parse", "HEAD", cwd=worktree_path, task=task, dashboard=dashboard)
+    if isinstance(r, AgentResult):
+        return r
+    _, sha_out, _ = r
     commit_sha = sha_out.strip()
 
     if dashboard:

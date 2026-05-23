@@ -13,6 +13,7 @@ from cagent.integrator import (
     _post_integrate_validate,
     _run_git,
     _run_shell_cmd,
+    _validate_cmd_str,
     integrate,
 )
 from cagent.tasks import Task
@@ -601,3 +602,69 @@ async def test_integrate_strategy_default_cherry_pick(tmp_path: Path) -> None:
     # Verify cherry-pick was used
     git_cmds = [cmd[1] if len(cmd) > 1 else "" for cmd in call_log]
     assert "cherry-pick" in git_cmds
+
+
+# --- _validate_cmd_str tests ---
+
+
+class TestValidateCmdStr:
+    """Tests for _validate_cmd_str function."""
+
+    def test_simple_command(self) -> None:
+        from cagent.integrator import _validate_cmd_str
+        assert _validate_cmd_str("pytest") is True
+
+    def test_command_with_args(self) -> None:
+        from cagent.integrator import _validate_cmd_str
+        assert _validate_cmd_str("pytest tests/ -v") is True
+
+    def test_command_with_path(self) -> None:
+        from cagent.integrator import _validate_cmd_str
+        assert _validate_cmd_str("./run_tests.sh") is True
+
+    def test_command_with_flags(self) -> None:
+        from cagent.integrator import _validate_cmd_str
+        assert _validate_cmd_str("python -m pytest --tb=short") is True
+
+    def test_command_with_env_vars(self) -> None:
+        from cagent.integrator import _validate_cmd_str
+        assert _validate_cmd_str("PYTHONPATH=src pytest") is True
+
+    def test_command_with_pipes(self) -> None:
+        from cagent.integrator import _validate_cmd_str
+        # Pipes are allowed (user may want to pipe output)
+        assert _validate_cmd_str("pytest | tee output.txt") is True
+
+    def test_command_with_semicolons(self) -> None:
+        from cagent.integrator import _validate_cmd_str
+        # Semicolons are allowed (user may chain commands)
+        assert _validate_cmd_str("pytest; echo done") is True
+
+    def test_rejects_null_byte(self) -> None:
+        from cagent.integrator import _validate_cmd_str
+        assert _validate_cmd_str("pytest\x00") is False
+
+    def test_rejects_newline(self) -> None:
+        from cagent.integrator import _validate_cmd_str
+        assert _validate_cmd_str("pytest\necho hacked") is False
+
+    def test_rejects_carriage_return(self) -> None:
+        from cagent.integrator import _validate_cmd_str
+        assert _validate_cmd_str("pytest\r") is False
+
+    def test_rejects_tab(self) -> None:
+        from cagent.integrator import _validate_cmd_str
+        assert _validate_cmd_str("pytest\t") is False
+
+    def test_empty_string(self) -> None:
+        from cagent.integrator import _validate_cmd_str
+        assert _validate_cmd_str("") is False
+
+    def test_command_with_quotes(self) -> None:
+        from cagent.integrator import _validate_cmd_str
+        assert _validate_cmd_str('pytest -k "test_foo"') is True
+
+    def test_command_with_backticks(self) -> None:
+        from cagent.integrator import _validate_cmd_str
+        # Backticks are allowed (user may want command substitution)
+        assert _validate_cmd_str("echo `date`") is True

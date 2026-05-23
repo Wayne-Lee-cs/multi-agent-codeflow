@@ -153,6 +153,21 @@ async def integrate(
     return result.stdout.strip()
 
 
+def _validate_cmd_str(cmd_str: str) -> bool:
+    """Validate that a command string does not contain control characters.
+
+    This function validates trusted input from CLI arguments (--post-integrate-cmd).
+    The allowed character set includes shell metacharacters (|, &, ;, $, etc.) by
+    design, since the caller intentionally passes shell commands. This only rejects
+    control characters and null bytes that could cause unexpected behavior in
+    subprocess invocation.
+    """
+    import re
+    # Only match space (0x20), not other whitespace like \n, \r, \t
+    pattern = r'^[\w .\-\/\\:=+,@~()\[\]{}|&;!?\*#$%^\'"<>`]+$'
+    return bool(re.match(pattern, cmd_str))
+
+
 async def _run_shell_cmd(
     cmd_str: str,
     cwd: Path,
@@ -160,6 +175,9 @@ async def _run_shell_cmd(
 ) -> tuple[int, str]:
     """Run a shell command string and return (returncode, combined output)."""
     import sys as _sys
+
+    if not _validate_cmd_str(cmd_str):
+        return 1, f"Command rejected: contains disallowed characters. Only alphanumeric, spaces, and common shell characters are allowed."
 
     if _sys.platform == "win32":
         proc = await asyncio.create_subprocess_exec(

@@ -444,3 +444,27 @@ class TestTokenBudget:
                 )
 
         assert captured_kwargs[0]["max_turns"] == 15
+
+
+class TestConcurrencyValidation:
+    """Test that invalid concurrency values are rejected."""
+
+    @pytest.mark.asyncio
+    async def test_concurrency_zero_raises(self, run_dir: Path, repo_root: Path):
+        """Concurrency 0 should raise ValueError, not hang."""
+        tasks = [_make_task("001")]
+        with pytest.raises(ValueError, match="concurrency must be >= 1"):
+            await run(
+                tasks, concurrency=0, run_dir=run_dir,
+                base_sha="abc123", repo_root=repo_root,
+            )
+
+    @pytest.mark.asyncio
+    async def test_concurrency_negative_raises(self, run_dir: Path, repo_root: Path):
+        """Negative concurrency should raise ValueError."""
+        tasks = [_make_task("001")]
+        with pytest.raises(ValueError, match="concurrency must be >= 1"):
+            await run(
+                tasks, concurrency=-1, run_dir=run_dir,
+                base_sha="abc123", repo_root=repo_root,
+            )

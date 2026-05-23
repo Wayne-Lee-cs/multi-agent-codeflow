@@ -212,11 +212,19 @@ def _truncate_jsonl_if_large(path: Path, max_bytes: int, keep_ratio: float) -> N
         pass
 
 
+def _validate_task_id(task_id: str) -> str:
+    """Validate task_id to prevent path traversal attacks."""
+    if not task_id or ".." in task_id or "/" in task_id or "\\" in task_id:
+        raise ValueError(f"Invalid task_id: {task_id!r}")
+    return task_id
+
+
 class Dashboard:
     """Tracks progress of all tasks, persists to dashboard.json."""
 
     _DASHBOARD_THROTTLE = 1.0  # seconds between dashboard.json writes
     _IO_THROTTLE = 0.5  # seconds between per-task file writes
+    _VALID_STATUSES = frozenset({"pending", "running", "done", "failed", "noop"})
 
     def __init__(self, run_dir: Path):
         self.run_dir = run_dir
@@ -319,6 +327,7 @@ class Dashboard:
 
     def update(self, task_id: str, event: Event) -> None:
         """Update task progress with a new event and persist."""
+        _validate_task_id(task_id)
         if task_id not in self.tasks:
             self.tasks[task_id] = TaskProgress(task_id=task_id)
 
@@ -373,6 +382,9 @@ class Dashboard:
 
     def set_task_status(self, task_id: str, status: str, **kwargs) -> None:
         """Directly set task status (used by dispatcher for noop/failed)."""
+        _validate_task_id(task_id)
+        if status not in self._VALID_STATUSES:
+            raise ValueError(f"Invalid status: {status!r}")
         if task_id not in self.tasks:
             self.tasks[task_id] = TaskProgress(task_id=task_id)
         tp = self.tasks[task_id]
@@ -443,9 +455,9 @@ class Dashboard:
 
     def _flush_io(self) -> None:
         """Write all buffered events and dirty progress to disk."""
-        self._last_io_flush = time.time()
         # Atomic swap under lock to avoid losing events buffered during write
         with self._io_lock:
+            self._last_io_flush = time.time()
             buffers, self._event_buffers = self._event_buffers, {}
             dirty, self._dirty_progress = self._dirty_progress, set()
 
@@ -494,31 +506,34 @@ class Dashboard:
         for tid, tp_dict in full_snapshot.items():
             if tid not in self._last_dashboard_snapshot or tp_dict != self._last_dashboard_snapshot[tid]:
                 diff[tid] = tp_dict
-        # Update cache
-        self._last_dashboard_snapshot.update(diff)
+        # Update cache with full snapshot to track deletions
+        self._last_dashboard_snapshot = dict(full_snapshot)
 
         if self._io_queue is not None:
-            self._io_queue.put_nowait(("dashboard", {"diff": diff}))
+            self._io_queue.put_nowait(("dashboard", {"diff": diff, "full": full_snapshot}))
         else:
-            self._do_write_dashboard({"diff": diff})
+            self._do_write_dashboard({"diff": diff, "full": full_snapshot})
 
     def _do_write_dashboard(self, data: dict[str, Any]) -> None:
-        """Actually write dashboard.json (runs in thread, incremental merge)."""
+        """Actually write dashboard.json (runs in thread, full snapshot)."""
         target = self.run_dir / "dashboard.json"
         diff = data.get("diff", {})
-        if not diff:
+        full_snapshot = data.get("full")
+        if not diff and full_snapshot is None:
             return
-        # Merge diff into existing file
-        existing: dict[str, dict[str, Any]] = {}
-        if target.exists():
-            try:
-                existing = json.loads(target.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                pass
-        existing.update(diff)
+        # Use full snapshot to ensure deleted tasks are removed
+        if full_snapshot is None:
+            # Fallback: build from diff + existing (legacy path)
+            full_snapshot = {}
+            if target.exists():
+                try:
+                    full_snapshot = json.loads(target.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    pass
+            full_snapshot.update(diff)
         atomic_write(
             target,
-            json.dumps(existing, indent=2, ensure_ascii=False),
+            json.dumps(full_snapshot, indent=2, ensure_ascii=False),
         )
 
     def flush(self) -> None:

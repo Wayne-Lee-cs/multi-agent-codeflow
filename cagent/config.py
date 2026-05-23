@@ -7,18 +7,20 @@ from pathlib import Path
 from typing import Any
 
 
-_VALID_KEYS = {
-    "jobs": int,
-    "timeout": int,
-    "strategy": str,
-    "squash": bool,
-    "quiet": bool,
-    "retries": int,
-    "worker_model": str,
-    "integrator_model": str,
-    "max_turns": int,
-    "max_tokens": int,
-    "keep_worktrees": bool,
+# Config key validation: (type, min_value, max_value)
+# None means no bound check
+_VALID_KEYS: dict[str, tuple[type, int | None, int | None]] = {
+    "jobs": (int, 1, 64),
+    "timeout": (int, 1, 86400),  # 1s to 24h
+    "strategy": (str, None, None),
+    "squash": (bool, None, None),
+    "quiet": (bool, None, None),
+    "retries": (int, 0, 10),
+    "worker_model": (str, None, None),
+    "integrator_model": (str, None, None),
+    "max_turns": (int, 1, 1000),
+    "max_tokens": (int, 1, None),
+    "keep_worktrees": (bool, None, None),
 }
 
 
@@ -63,11 +65,18 @@ def _parse_and_validate(
         return {}
 
     result: dict[str, Any] = {}
-    for key, expected_type in _VALID_KEYS.items():
+    for key, (expected_type, min_val, max_val) in _VALID_KEYS.items():
         if key in data:
             value = data[key]
-            if isinstance(value, expected_type):
-                result[key] = value
+            if not isinstance(value, expected_type):
+                continue
+            # Value range validation for numeric types
+            if expected_type is int and isinstance(value, int):
+                if min_val is not None and value < min_val:
+                    continue
+                if max_val is not None and value > max_val:
+                    continue
+            result[key] = value
     return result
 
 

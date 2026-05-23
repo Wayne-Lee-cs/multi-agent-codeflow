@@ -24,12 +24,13 @@ _MAX_HTTP_HEADER_SIZE = 8192  # Max total HTTP header size
 def _is_localhost_origin(origin: str) -> bool:
     """Check if an Origin header value points to localhost.
 
-    Note: Empty origin is allowed because browsers may omit it for same-origin
-    requests, and non-browser clients (curl, custom scripts) can trivially
-    omit the header entirely. This is a best-effort defense for dev tooling.
+    Empty origin is rejected: browsers send Origin for cross-origin requests,
+    and same-origin requests from localhost will have an Origin header.
+    Non-browser clients that omit Origin are handled by allowing connections
+    without an Upgrade header (plain HTTP).
     """
     if not origin:
-        return True
+        return False
     try:
         parsed = urlparse(origin)
     except Exception:
@@ -212,15 +213,22 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
                 tbody.appendChild(tr);
             }
 
-            // Update budget
+            // Update budget — use DOM API to prevent XSS
             const budgetDiv = document.getElementById('budget');
             if (max_tokens) {
                 const combined = totalIn + totalOut;
                 const pct = Math.floor(combined * 100 / max_tokens);
                 budgetDiv.style.display = 'block';
-                budgetDiv.innerHTML = `Tokens: ${totalIn.toLocaleString()} in, ${totalOut.toLocaleString()} out ` +
-                    `(${combined.toLocaleString()} combined / ${max_tokens.toLocaleString()} budget` +
-                    `<span class="${pct >= 80 ? 'budget-warn' : ''}"> ${pct}%</span>)`;
+                budgetDiv.textContent = '';
+                budgetDiv.appendChild(document.createTextNode(
+                    `Tokens: ${totalIn.toLocaleString()} in, ${totalOut.toLocaleString()} out ` +
+                    `(${combined.toLocaleString()} combined / ${max_tokens.toLocaleString()} budget `
+                ));
+                const span = document.createElement('span');
+                span.className = pct >= 80 ? 'budget-warn' : '';
+                span.textContent = `${pct}%`;
+                budgetDiv.appendChild(span);
+                budgetDiv.appendChild(document.createTextNode(')'));
             } else if (totalIn || totalOut) {
                 budgetDiv.style.display = 'block';
                 budgetDiv.textContent = `Tokens: ${totalIn.toLocaleString()} in, ${totalOut.toLocaleString()} out (${(totalIn + totalOut).toLocaleString()} combined)`;
@@ -388,13 +396,22 @@ class DashboardServer:
                 writer_closed = True
                 return
 
+            # Handle CORS preflight
+            if method == "OPTIONS":
+                origin = headers.get("origin", "")
+                if origin and not _is_localhost_origin(origin):
+                    await self._send_http_response(writer, 403, b"Forbidden: non-localhost origin")
+                else:
+                    await self._send_cors_preflight(writer, origin)
+                return
+
             # Handle HTTP requests
             if method == "GET" and path in ("/", "/index.html"):
-                await self._serve_dashboard(writer)
+                await self._serve_dashboard(writer, headers)
             elif method == "GET" and path == "/api/data":
-                await self._serve_api_data(writer)
+                await self._serve_api_data(writer, headers)
             else:
-                await self._send_http_response(writer, 404, "Not Found")
+                await self._send_http_response(writer, 404, b"Not Found")
 
         except (asyncio.TimeoutError, ConnectionError, OSError):
             pass
@@ -415,7 +432,10 @@ class DashboardServer:
         # Perform WebSocket handshake
         key = headers.get("sec-websocket-key", "")
         if not key:
-            writer.close()
+            try:
+                writer.close()
+            except (ConnectionError, OSError):
+                pass
             return
 
         # Validate WebSocket version
@@ -428,14 +448,20 @@ class DashboardServer:
             )
             writer.write(response.encode())
             await writer.drain()
-            writer.close()
+            try:
+                writer.close()
+            except (ConnectionError, OSError):
+                pass
             return
 
         # Validate Origin — only allow localhost connections
         origin = headers.get("origin", "")
         if origin and not _is_localhost_origin(origin):
             await self._send_http_response(writer, 403, b"Forbidden: non-localhost origin")
-            writer.close()
+            try:
+                writer.close()
+            except (ConnectionError, OSError):
+                pass
             return
 
         accept_key = hashlib.sha1(
@@ -536,28 +562,64 @@ class DashboardServer:
             conn.connected = False
             if conn in self.connections:
                 self.connections.remove(conn)
+            # Send close frame before closing writer (RFC 6455 §5.5.1)
+            try:
+                close_frame = _encode_ws_frame(b"", 0x08)
+                writer.write(close_frame)
+                await writer.drain()
+            except (ConnectionError, OSError):
+                pass
             try:
                 writer.close()
             except (ConnectionError, OSError):
                 pass
 
-    async def _serve_dashboard(self, writer: asyncio.StreamWriter) -> None:
+    async def _send_cors_preflight(self, writer: asyncio.StreamWriter, origin: str) -> None:
+        """Handle OPTIONS preflight request with CORS headers."""
+        allow_origin = origin or "*"
+        extra_headers = (
+            f"Access-Control-Allow-Origin: {allow_origin}\r\n"
+            f"Access-Control-Allow-Methods: GET, OPTIONS\r\n"
+            f"Access-Control-Allow-Headers: Content-Type\r\n"
+            f"Access-Control-Max-Age: 600\r\n"
+        )
+        await self._send_http_response(writer, 204, b"", extra_headers=extra_headers)
+
+    async def _serve_dashboard(
+        self, writer: asyncio.StreamWriter, headers: dict[str, str] | None = None,
+    ) -> None:
         """Serve the HTML dashboard."""
         content = _DASHBOARD_HTML.encode("utf-8")
+        origin = (headers or {}).get("origin", "")
+        extra_headers = self._cors_headers(origin)
         await self._send_http_response(
-            writer, 200, content, content_type="text/html; charset=utf-8"
+            writer, 200, content, content_type="text/html; charset=utf-8",
+            extra_headers=extra_headers,
         )
 
-    async def _serve_api_data(self, writer: asyncio.StreamWriter) -> None:
+    async def _serve_api_data(
+        self, writer: asyncio.StreamWriter, headers: dict[str, str] | None = None,
+    ) -> None:
         """Serve dashboard data as JSON API."""
         data = self._get_dashboard_data()
+        origin = (headers or {}).get("origin", "")
+        extra_headers = self._cors_headers(origin)
         if data:
             content = json.dumps(data).encode("utf-8")
             await self._send_http_response(
-                writer, 200, content, content_type="application/json"
+                writer, 200, content, content_type="application/json",
+                extra_headers=extra_headers,
             )
         else:
-            await self._send_http_response(writer, 404, b'{"error": "no data"}')
+            await self._send_http_response(writer, 404, b'{"error": "no data"}',
+                                           extra_headers=extra_headers)
+
+    @staticmethod
+    def _cors_headers(origin: str) -> str:
+        """Return CORS headers string for a given Origin."""
+        if _is_localhost_origin(origin):
+            return f"Access-Control-Allow-Origin: {origin or '*'}\r\n"
+        return ""
 
     async def _send_http_response(
         self,
@@ -565,19 +627,25 @@ class DashboardServer:
         status: int,
         body: bytes | str,
         content_type: str = "text/plain",
+        extra_headers: str = "",
     ) -> None:
-        """Send an HTTP response."""
+        """Send an HTTP response with security headers."""
         if isinstance(body, str):
             body = body.encode("utf-8")
 
-        status_text = {200: "OK", 404: "Not Found", 431: "Request Header Fields Too Large", 500: "Internal Server Error"}.get(
-            status, "Unknown"
-        )
+        status_text = {
+            200: "OK", 204: "No Content", 403: "Forbidden",
+            404: "Not Found", 431: "Request Header Fields Too Large",
+            500: "Internal Server Error",
+        }.get(status, "Unknown")
 
         response = (
             f"HTTP/1.1 {status} {status_text}\r\n"
             f"Content-Type: {content_type}\r\n"
             f"Content-Length: {len(body)}\r\n"
+            f"X-Content-Type-Options: nosniff\r\n"
+            f"Content-Security-Policy: default-src 'self'; script-src 'unsafe-inline'\r\n"
+            f"{extra_headers}"
             f"Connection: close\r\n"
             f"\r\n"
         )
@@ -635,6 +703,10 @@ class DashboardServer:
                             for tid, tp in current_tasks.items():
                                 if tid not in self._last_tasks or tp != self._last_tasks[tid]:
                                     diff_tasks[tid] = tp
+                            # Remove deleted tasks from tracking
+                            deleted_tids = set(self._last_tasks) - set(current_tasks)
+                            for tid in deleted_tids:
+                                del self._last_tasks[tid]
                             self._last_tasks.update(diff_tasks)
 
                             if diff_tasks:

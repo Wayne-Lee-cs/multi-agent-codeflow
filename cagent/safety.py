@@ -20,17 +20,19 @@ import json
 import shlex
 import sys
 from pathlib import Path
-from string import Template
 
 # Patterns that should never run inside a cagent worktree.
 # Each entry is a regex string; the hook script checks Bash tool_input.command.
 # Uses \b word boundary instead of ^ anchor to catch commands in chains like
 # `cd /tmp && git push` or `mkdir dir && cd dir && git push`.
+#
+# Note: cagent internal code (e.g., dispatcher._reset_worktree) may use blocked
+# commands directly; the sandbox only applies to claude subprocess hooks.
 DENY_PATTERNS = [
     # Unix dangerous commands (word boundary anchored, matches in command chains)
     r"\bgit\s+push\b",
     r"\bgit\s+reset\s+--hard\b",
-    r"\bgit\s+clean\s+-[a-z]*f",
+    r"\bgit\s+clean\b(?=\s+.*(?:-[a-z]*f|--force))",
     # rm with recursive flag: -rf, -fr, -r, -R, --recursive, and variants.
     # Uses a single pattern to avoid gaps between separate rf/fr/r patterns.
     # Matches: rm -rf, rm -fr, rm -Rf, rm -r, rm --recursive, rm -r/tmp, etc.
@@ -48,8 +50,8 @@ DENY_PATTERNS = [
     # inline shell scripts are unnecessary and potentially dangerous.
     r"\bbash\s+-c\b",
     r"\bsh\s+-c\b",
-    r"\bpython[3]?\s+-c\b",
-    r"\|\s*(ba)?sh\b",
+    r"\bpython[3]?(?:\.\d+)?\s+-c\b",
+    r"\|\s*(?:ba|z|k|da|a)?sh\b",
     # Additional indirect execution paths (node, powershell, cmd, deno)
     r"\bnode\s+-e\b",
     r"\bp(?:owershell|wsh)\s+-[Cc](?:ommand)?\b",
@@ -86,9 +88,15 @@ def _check_tokens(cmd: str) -> str | None:
             flags: set[str] = set()
             has_recursive_long = False
             has_force_long = False
+            past_end_of_options = False
             for t in tokens[cmd_start + 1:]:
                 if t in ("&&", "||", ";", "|"):
                     break
+                if t == "--":
+                    past_end_of_options = True
+                    continue
+                if past_end_of_options:
+                    continue  # positional args after -- are not flags
                 if t.startswith("--"):
                     if t == "--recursive":
                         has_recursive_long = True
@@ -115,55 +123,30 @@ def _check_tokens(cmd: str) -> str | None:
     return None
 
 
+def _get_check_tokens_source() -> str:
+    """Extract _check_tokens source code for embedding in hook script."""
+    import inspect
+    src = inspect.getsource(_check_tokens)
+    # Remove the decorator line if present; keep only the function body
+    lines = src.split("\n")
+    # Find 'def _check_tokens' line
+    start = 0
+    for i, line in enumerate(lines):
+        if line.strip().startswith("def _check_tokens"):
+            start = i
+            break
+    return "\n".join(lines[start:])
+
+
 # Generate the hook script content — a Python script that reads stdin JSON,
 # extracts the Bash command or Write content, and checks all deny patterns.
 _HOOK_SCRIPT = '''\
 import json, re, shlex, sys
 
-DENY_PATTERNS = $patterns_json
+DENY_PATTERNS = __PATTERNS_JSON__
 
 
-def _check_tokens(cmd):
-    """Token-based check for split-flag patterns (e.g. rm -i -r -f dir/)."""
-    try:
-        tokens = shlex.split(cmd, posix=(sys.platform != "win32"))
-    except ValueError:
-        return None
-    i = 0
-    while i < len(tokens):
-        cmd_start = i
-        while cmd_start < len(tokens) and "=" in tokens[cmd_start] and not tokens[cmd_start].startswith("-"):
-            cmd_start += 1
-        if cmd_start >= len(tokens):
-            break
-        base = tokens[cmd_start].rstrip(";")
-        if base == "rm":
-            flags = set()
-            has_recursive_long = False
-            has_force_long = False
-            for t in tokens[cmd_start + 1:]:
-                if t in ("&&", "||", ";", "|"):
-                    break
-                if t.startswith("--"):
-                    if t == "--recursive":
-                        has_recursive_long = True
-                    elif t == "--force":
-                        has_force_long = True
-                elif t.startswith("-") and not t.startswith("--"):
-                    for ch in t[1:]:
-                        flags.add(ch)
-            has_r = "r" in flags or "R" in flags or has_recursive_long
-            has_f = "f" in flags or has_force_long
-            if has_r and has_f:
-                return "rm with recursive+force flags (split)"
-            if has_r:
-                return "rm with recursive flag (split)"
-        i = cmd_start + 1
-        while i < len(tokens) and tokens[i] not in ("&&", "||", ";", "|"):
-            i += 1
-        if i < len(tokens):
-            i += 1
-    return None
+__CHECK_TOKENS_SOURCE__
 
 
 try:
@@ -239,7 +222,12 @@ def prepare_sandbox(worktree_path: str | Path) -> None:
     hook_script_path = hooks_dir / "cagent-guard.py"
 
     patterns_json = json.dumps(DENY_PATTERNS, ensure_ascii=False)
-    script_content = Template(_HOOK_SCRIPT).safe_substitute(patterns_json=patterns_json)
+    check_tokens_src = _get_check_tokens_source()
+    script_content = (
+        _HOOK_SCRIPT
+        .replace("__PATTERNS_JSON__", patterns_json)
+        .replace("__CHECK_TOKENS_SOURCE__", check_tokens_src)
+    )
     hook_script_path.write_text(script_content, encoding="utf-8")
 
     # Use current Python executable and forward-slash path for cross-platform compat

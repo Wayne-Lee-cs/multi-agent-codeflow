@@ -40,7 +40,15 @@ def enable_ansi() -> None:
     in cmd.exe (Windows Terminal and PowerShell 7 already support them natively).
     """
     if _IS_WINDOWS:
-        os.system("")
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        # STD_OUTPUT_HANDLE = -11
+        handle = kernel32.GetStdHandle(-11)
+        # Get current console mode
+        mode = ctypes.c_ulong()
+        kernel32.GetConsoleMode(handle, ctypes.byref(mode))
+        # ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+        kernel32.SetConsoleMode(handle, mode.value | 0x0004)
 
 
 def atomic_write(path: Path, content: str) -> None:
@@ -48,9 +56,25 @@ def atomic_write(path: Path, content: str) -> None:
 
     Uses os.replace() which is atomic on both Windows and Unix,
     unlike Path.replace() which fails on Windows if the target exists.
+
+    Uses tempfile.mkstemp to generate a unique temporary filename,
+    preventing concurrent write conflicts.
     """
+    import tempfile
+
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(content, encoding="utf-8")
-    os.replace(str(tmp), str(path))
+
+    # Create unique temp file in the same directory
+    fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(tmp_path, str(path))
+    except Exception:
+        # Clean up temp file on failure
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise

@@ -182,10 +182,10 @@ class TestOriginValidation:
         assert _is_localhost_origin("http://192.168.1.1:8080") is False
         assert _is_localhost_origin("http://10.0.0.1:8080") is False
 
-    def test_empty_origin_allowed(self) -> None:
-        """Empty/missing origin is allowed (browsers may omit it)."""
+    def test_empty_origin_rejected(self) -> None:
+        """Empty/missing origin is rejected (browsers send Origin for cross-origin)."""
         from cagent.server import _is_localhost_origin
-        assert _is_localhost_origin("") is True
+        assert _is_localhost_origin("") is False
 
     @pytest.mark.asyncio
     async def test_websocket_rejects_non_localhost_origin(self, run_dir: Path) -> None:
@@ -241,6 +241,271 @@ class TestOriginValidation:
         response = b"".join(written_data)
         assert b"403" in response
         assert b"Forbidden" in response
+
+
+class TestCORSPreflight:
+    """Tests for Phase 62.4: OPTIONS preflight handling."""
+
+    @pytest.mark.asyncio
+    async def test_options_localhost_origin(self, run_dir: Path) -> None:
+        """OPTIONS with localhost origin returns CORS headers."""
+        server = DashboardServer(run_dir, port=8080)
+
+        reader = AsyncMock()
+        writer = AsyncMock()
+        writer.drain = AsyncMock()
+        writer.close = MagicMock()  # close() is synchronous, not async
+
+        request_data = (
+            b"OPTIONS /api/data HTTP/1.1\r\n"
+            b"Host: localhost:8080\r\n"
+            b"Origin: http://localhost:3000\r\n"
+            b"Access-Control-Request-Method: GET\r\n"
+            b"\r\n"
+        )
+
+        read_data = request_data
+
+        async def mock_readline():
+            nonlocal read_data
+            if not read_data:
+                return b""
+            idx = read_data.find(b"\r\n")
+            if idx == -1:
+                line = read_data
+                read_data = b""
+            else:
+                line = read_data[:idx + 2]
+                read_data = read_data[idx + 2:]
+            return line
+
+        reader.readline = mock_readline
+
+        written_data = []
+
+        def capture_write(data):
+            written_data.append(data)
+
+        writer.write = MagicMock(side_effect=capture_write)
+
+        await server._handle_connection(reader, writer)
+
+        response = b"".join(written_data)
+        assert b"204" in response
+        assert b"Access-Control-Allow-Origin: http://localhost:3000" in response
+        assert b"Access-Control-Allow-Methods: GET, OPTIONS" in response
+        assert b"Access-Control-Allow-Headers: Content-Type" in response
+
+    @pytest.mark.asyncio
+    async def test_options_non_localhost_rejected(self, run_dir: Path) -> None:
+        """OPTIONS with non-localhost origin returns 403."""
+        server = DashboardServer(run_dir, port=8080)
+
+        reader = AsyncMock()
+        writer = AsyncMock()
+        writer.drain = AsyncMock()
+        writer.close = MagicMock()  # close() is synchronous, not async
+
+        request_data = (
+            b"OPTIONS /api/data HTTP/1.1\r\n"
+            b"Host: localhost:8080\r\n"
+            b"Origin: http://evil.com:8080\r\n"
+            b"Access-Control-Request-Method: GET\r\n"
+            b"\r\n"
+        )
+
+        read_data = request_data
+
+        async def mock_readline():
+            nonlocal read_data
+            if not read_data:
+                return b""
+            idx = read_data.find(b"\r\n")
+            if idx == -1:
+                line = read_data
+                read_data = b""
+            else:
+                line = read_data[:idx + 2]
+                read_data = read_data[idx + 2:]
+            return line
+
+        reader.readline = mock_readline
+
+        written_data = []
+
+        def capture_write(data):
+            written_data.append(data)
+
+        writer.write = MagicMock(side_effect=capture_write)
+
+        await server._handle_connection(reader, writer)
+
+        response = b"".join(written_data)
+        assert b"403" in response
+        assert b"Forbidden" in response
+
+    @pytest.mark.asyncio
+    async def test_options_no_origin(self, run_dir: Path) -> None:
+        """OPTIONS without Origin header returns CORS headers with *."""
+        server = DashboardServer(run_dir, port=8080)
+
+        reader = AsyncMock()
+        writer = AsyncMock()
+        writer.drain = AsyncMock()
+        writer.close = MagicMock()  # close() is synchronous, not async
+
+        request_data = (
+            b"OPTIONS /api/data HTTP/1.1\r\n"
+            b"Host: localhost:8080\r\n"
+            b"Access-Control-Request-Method: GET\r\n"
+            b"\r\n"
+        )
+
+        read_data = request_data
+
+        async def mock_readline():
+            nonlocal read_data
+            if not read_data:
+                return b""
+            idx = read_data.find(b"\r\n")
+            if idx == -1:
+                line = read_data
+                read_data = b""
+            else:
+                line = read_data[:idx + 2]
+                read_data = read_data[idx + 2:]
+            return line
+
+        reader.readline = mock_readline
+
+        written_data = []
+
+        def capture_write(data):
+            written_data.append(data)
+
+        writer.write = MagicMock(side_effect=capture_write)
+
+        await server._handle_connection(reader, writer)
+
+        response = b"".join(written_data)
+        assert b"204" in response
+        assert b"Access-Control-Allow-Origin: *" in response
+
+    @pytest.mark.asyncio
+    async def test_get_response_includes_cors(self, run_dir: Path) -> None:
+        """GET response includes CORS header for localhost origin."""
+        server = DashboardServer(run_dir, port=8080)
+
+        reader = AsyncMock()
+        writer = AsyncMock()
+        writer.drain = AsyncMock()
+        writer.close = MagicMock()  # close() is synchronous, not async
+
+        request_data = (
+            b"GET /api/data HTTP/1.1\r\n"
+            b"Host: localhost:8080\r\n"
+            b"Origin: http://localhost:3000\r\n"
+            b"\r\n"
+        )
+
+        read_data = request_data
+
+        async def mock_readline():
+            nonlocal read_data
+            if not read_data:
+                return b""
+            idx = read_data.find(b"\r\n")
+            if idx == -1:
+                line = read_data
+                read_data = b""
+            else:
+                line = read_data[:idx + 2]
+                read_data = read_data[idx + 2:]
+            return line
+
+        reader.readline = mock_readline
+
+        written_data = []
+
+        def capture_write(data):
+            written_data.append(data)
+
+        writer.write = MagicMock(side_effect=capture_write)
+
+        await server._handle_connection(reader, writer)
+
+        response = b"".join(written_data)
+        assert b"200" in response
+        assert b"Access-Control-Allow-Origin: http://localhost:3000" in response
+
+
+class TestSecurityHeaders:
+    """Tests for HTTP security headers (57.3.3)."""
+
+    @pytest.mark.asyncio
+    async def test_response_includes_nosniff(self, run_dir: Path) -> None:
+        """HTTP responses include X-Content-Type-Options: nosniff."""
+        server = DashboardServer(run_dir, port=8080)
+
+        writer = AsyncMock()
+        writer.drain = AsyncMock()
+
+        written_data = []
+
+        def capture_write(data):
+            written_data.append(data)
+
+        writer.write = MagicMock(side_effect=capture_write)
+
+        await server._send_http_response(writer, 200, b"OK")
+
+        response = b"".join(written_data)
+        assert b"X-Content-Type-Options: nosniff" in response
+
+    @pytest.mark.asyncio
+    async def test_response_includes_csp(self, run_dir: Path) -> None:
+        """HTTP responses include restrictive Content-Security-Policy header."""
+        server = DashboardServer(run_dir, port=8080)
+
+        writer = AsyncMock()
+        writer.drain = AsyncMock()
+
+        written_data = []
+
+        def capture_write(data):
+            written_data.append(data)
+
+        writer.write = MagicMock(side_effect=capture_write)
+
+        await server._send_http_response(writer, 200, b"OK")
+
+        response = b"".join(written_data)
+        assert b"Content-Security-Policy: default-src 'self'" in response
+
+
+class TestXSSPrevention:
+    """Tests for XSS prevention in dashboard HTML (57.1.2)."""
+
+    def test_html_uses_dom_api_for_task_data(self) -> None:
+        """Dashboard HTML uses textContent/createElement for task data, not innerHTML."""
+        from cagent.server import _DASHBOARD_HTML
+
+        # innerHTML is only used to clear tbody (safe: no user data interpolation)
+        # Task data fields must use textContent to prevent XSS
+        assert "textContent" in _DASHBOARD_HTML
+        assert "createElement" in _DASHBOARD_HTML
+
+        # Task status and activity use textContent (not innerHTML with interpolated data)
+        assert ".textContent" in _DASHBOARD_HTML
+
+    def test_html_budget_uses_dom_api(self) -> None:
+        """Budget section uses textContent/appendChild instead of innerHTML."""
+        from cagent.server import _DASHBOARD_HTML
+
+        # The budget section was the specific XSS vector in REVIEW.md V1
+        assert "budgetDiv.textContent" in _DASHBOARD_HTML or "budgetDiv.appendChild" in _DASHBOARD_HTML
+        # Ensure no innerHTML for budget content
+        assert "budgetDiv.innerHTML" not in _DASHBOARD_HTML
 
 
 class TestDiffBroadcast:

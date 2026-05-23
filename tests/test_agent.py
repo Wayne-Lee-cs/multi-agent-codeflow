@@ -169,6 +169,52 @@ async def test_run_agent_commit_failure(
 
 
 @pytest.mark.asyncio
+async def test_run_agent_checkout_head_missing_paths(
+    sample_task: Task, tmp_worktree: Path, tmp_run_dir: Path,
+) -> None:
+    """Both git checkout HEAD calls fail (.claude/ and .gitignore missing) → still done."""
+    claude_proc = _make_process(returncode=0, stdout_lines=[b"output\n"])
+    git_status = _make_process(returncode=0, stdout=b" M file.py\n")
+    # Both checkout calls return non-zero (paths don't exist in base)
+    git_checkout_fail = _make_process(returncode=1, stderr=b"pathspec did not match\n")
+    git_add = _make_process(returncode=0)
+    git_commit = _make_process(returncode=0)
+    git_sha = _make_process(returncode=0, stdout=b"abc123\n")
+
+    checkout_count = 0
+
+    async def mock_exec(*args, **kwargs):
+        nonlocal checkout_count
+        cmd = args[0] if args else ""
+        if cmd == "claude":
+            return claude_proc
+        git_cmd = args[1] if len(args) > 1 else ""
+        if git_cmd == "checkout":
+            checkout_count += 1
+            return git_checkout_fail
+        if git_cmd == "status":
+            return git_status
+        if git_cmd == "add":
+            return git_add
+        if git_cmd == "commit":
+            return git_commit
+        if git_cmd == "rev-parse":
+            return git_sha
+        return _make_process(returncode=0)
+
+    with patch("cagent.agent._resolve_claude", return_value="claude"), \
+         patch("cagent.agent.asyncio.create_subprocess_exec", side_effect=mock_exec), \
+         patch("cagent.agent.prepare_sandbox"):
+        result = await run_agent(
+            task=sample_task, worktree_path=tmp_worktree, run_dir=tmp_run_dir,
+        )
+
+    assert result.status == "done"
+    assert result.commit_sha == "abc123"
+    assert checkout_count == 2  # Both .claude/ and .gitignore were attempted
+
+
+@pytest.mark.asyncio
 async def test_run_agent_no_changes(
     sample_task: Task, tmp_worktree: Path, tmp_run_dir: Path,
 ) -> None:

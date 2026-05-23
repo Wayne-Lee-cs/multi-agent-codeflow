@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import subprocess
 import sys
 from pathlib import Path
@@ -18,7 +19,7 @@ def _scan_dir_tree(path: Path, max_depth: int = 2, _depth: int = 0) -> str:
     lines = []
     try:
         entries = sorted(path.iterdir(), key=lambda p: (not p.is_dir(), p.name))
-    except PermissionError:
+    except (PermissionError, FileNotFoundError, OSError):
         return ""
     for entry in entries:
         if entry.name in skip or entry.name.startswith("."):
@@ -82,6 +83,8 @@ def _cmd_plan(args: argparse.Namespace) -> None:
                 claude_dir.rmdir()
         except OSError:
             pass
+
+    atexit.register(_cleanup_sandbox)
 
     try:
         goal = args.goal
@@ -226,4 +229,5 @@ Create both files now. Make tasks granular enough for parallel execution but not
         if conventions:
             print(f"  Conventions will be automatically injected into each worker.")
     finally:
+        atexit.unregister(_cleanup_sandbox)
         _cleanup_sandbox()

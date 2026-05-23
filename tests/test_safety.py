@@ -102,6 +102,35 @@ class TestDenyPatterns:
         assert any(re.search(p, cmd, re.IGNORECASE) for p in DENY_PATTERNS)
 
     @pytest.mark.parametrize("cmd", [
+        "python3.11 -c 'import os; os.system(\"rm -rf /\")'",
+        "python3.12 -c 'import subprocess'",
+        "python3.10 -c 'print(1)'",
+    ])
+    def test_python_versioned_binary_blocked(self, cmd):
+        """python3.x -c should be blocked (versioned binary bypass)."""
+        assert any(re.search(p, cmd, re.IGNORECASE) for p in DENY_PATTERNS)
+
+    @pytest.mark.parametrize("cmd", [
+        "echo 'test' | zsh",
+        "echo 'test' | ksh",
+        "echo 'test' | dash",
+        "echo 'test' | ash",
+        "cat file | zsh",
+    ])
+    def test_pipe_to_shell_extended_blocked(self, cmd):
+        """Piping to zsh/ksh/dash/ash should be blocked."""
+        assert any(re.search(p, cmd, re.IGNORECASE) for p in DENY_PATTERNS)
+
+    @pytest.mark.parametrize("cmd", [
+        "git clean --force",
+        "git clean --force -d",
+        "git clean -d --force",
+    ])
+    def test_git_clean_long_flag_blocked(self, cmd):
+        """git clean --force (long flag) should be blocked."""
+        assert any(re.search(p, cmd, re.IGNORECASE) for p in DENY_PATTERNS)
+
+    @pytest.mark.parametrize("cmd", [
         "git add .",
         "git commit -m 'test'",
         "git status",
@@ -165,6 +194,16 @@ class TestCheckTokens:
         """Env var prefix before rm is handled correctly."""
         reason = _check_tokens("PATH=/usr/bin rm -r -f /tmp")
         assert reason is not None
+
+    def test_end_of_options_separator(self):
+        """rm -r -f -- /tmp should still be caught (flags before --)."""
+        reason = _check_tokens("rm -r -f -- /tmp")
+        assert reason is not None
+
+    def test_end_of_options_no_flags_after(self):
+        """rm -- -r -f should NOT be caught (everything after -- is positional)."""
+        reason = _check_tokens("rm -- -r -f")
+        assert reason is None
 
     def test_hook_blocks_split_flags(self, tmp_path):
         """End-to-end: hook script blocks rm with split flags."""

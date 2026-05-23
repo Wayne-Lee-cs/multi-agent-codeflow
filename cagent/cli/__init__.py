@@ -6,6 +6,27 @@ import argparse
 import sys
 
 
+def _get_version() -> str:
+    """Get cagent version from package metadata or pyproject.toml."""
+    try:
+        from importlib.metadata import version
+        return version("cagent")
+    except Exception:
+        pass
+    # Fallback: read from pyproject.toml
+    try:
+        from pathlib import Path
+        pyproject = Path(__file__).parent.parent.parent / "pyproject.toml"
+        if pyproject.exists():
+            import re
+            match = re.search(r'version\s*=\s*"([^"]+)"', pyproject.read_text(encoding="utf-8"))
+            if match:
+                return match.group(1)
+    except Exception:
+        pass
+    return "unknown"
+
+
 def main() -> None:
     if sys.platform == "win32":
         import io
@@ -23,6 +44,7 @@ def main() -> None:
         prog="cagent",
         description="Concurrent agent workflow dispatcher",
     )
+    parser.add_argument("--version", action="version", version=f"cagent {_get_version()}")
     sub = parser.add_subparsers(dest="command")
 
     # --- run ---
@@ -38,7 +60,7 @@ def main() -> None:
     run_p.add_argument("--timeout", type=int, default=1800, help="Per-agent timeout in seconds")
     run_p.add_argument("--retries", type=int, default=0, help="Max retries for transient failures (default: 0)")
     run_p.add_argument("--quiet", action="store_true", help="Only print START/DONE/FAIL events")
-    run_p.add_argument("--api-key", default=None, help="Explicit API key for claude -p subprocesses")
+    run_p.add_argument("--api-key", default=None, help="Explicit API key for claude -p subprocesses (prefer ANTHROPIC_API_KEY env var for security — --api-key value appears in process listings)")
     run_p.add_argument("--dry-run", action="store_true", help="Show plan without executing")
     run_p.add_argument("--force", action="store_true", help="Skip run lock check (for concurrent runs)")
     run_p.add_argument("--resume", default=None, help="Resume from a previous run ID")

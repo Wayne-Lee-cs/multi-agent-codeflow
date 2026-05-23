@@ -296,6 +296,11 @@ class TestDashboard:
         dash.set_task_status("001", "noop")
         assert dash.tasks["001"].status == "noop"
 
+    def test_set_task_status_invalid(self, tmp_path):
+        dash = Dashboard(tmp_path)
+        with pytest.raises(ValueError, match="Invalid status"):
+            dash.set_task_status("001", "invalid_status")
+
     def test_event_handler_called(self, tmp_path):
         dash = Dashboard(tmp_path)
         received = []
@@ -349,6 +354,23 @@ class TestDashboard:
         assert tp.last_event is not None
         assert tp.last_event.kind == "text"  # default
 
+    def test_resume_ignores_unknown_fields(self, tmp_path):
+        """dashboard.json with unknown fields should not crash or set extra attrs."""
+        data = {
+            "001": {
+                "task_id": "001",
+                "status": "done",
+                "unknown_field": "should be ignored",
+                "another_extra": 42,
+            }
+        }
+        (tmp_path / "dashboard.json").write_text(json.dumps(data), encoding="utf-8")
+        dash = Dashboard(tmp_path)
+        assert "001" in dash.tasks
+        tp = dash.tasks["001"]
+        assert tp.status == "done"
+        assert not hasattr(tp, "unknown_field") or tp.unknown_field != "should be ignored"
+
     def test_done_event_accumulates_tokens(self, tmp_path):
         dash = Dashboard(tmp_path)
         usage = {"input_tokens": 2000, "output_tokens": 500}
@@ -386,6 +408,25 @@ class TestDashboard:
         dash2 = Dashboard(tmp_path)
         assert dash2.tasks["001"].tokens_in == 1000
         assert dash2.tasks["001"].tokens_out == 400
+
+    def test_path_traversal_rejected_in_update(self, tmp_path):
+        """task_id with path traversal components should be rejected."""
+        dash = Dashboard(tmp_path)
+        event = Event(ts=time.time(), kind="start", summary="start", raw={})
+        with pytest.raises(ValueError, match="Invalid task_id"):
+            dash.update("../../etc/passwd", event)
+        with pytest.raises(ValueError, match="Invalid task_id"):
+            dash.update("..\\windows\\system32", event)
+        with pytest.raises(ValueError, match="Invalid task_id"):
+            dash.update("task/../../../secret", event)
+
+    def test_path_traversal_rejected_in_set_task_status(self, tmp_path):
+        """task_id with path traversal should be rejected in set_task_status."""
+        dash = Dashboard(tmp_path)
+        with pytest.raises(ValueError, match="Invalid task_id"):
+            dash.set_task_status("../../etc/passwd", "done")
+        with pytest.raises(ValueError, match="Invalid task_id"):
+            dash.set_task_status("", "done")
 
 
 class TestAsyncIO:

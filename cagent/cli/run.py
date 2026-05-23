@@ -12,15 +12,19 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Literal
 
 if TYPE_CHECKING:
+    from cagent.agent import AgentResult
+    from cagent.memory import RunMemory
     from cagent.progress import Dashboard
+    from cagent.tasks import Task
 
 from .base import (
     _fmt_elapsed,
     _get_repo_root,
     _get_runs_dir,
+    _is_pid_active,
     _preflight_check,
     _prompt_clean_memory,
 )
@@ -47,7 +51,8 @@ def _run_lock(repo_root: Path, force: bool = False):
         if sys.platform == "win32":
             import msvcrt
             try:
-                msvcrt.locking(lock_fd.fileno(), msvcrt.LK_NBLCK, 1)
+                lock_fd.seek(0)
+                msvcrt.locking(lock_fd.fileno(), msvcrt.LK_NBLCK, 4096)
             except OSError:
                 lock_fd.close()
                 print(
@@ -74,21 +79,7 @@ def _run_lock(repo_root: Path, force: bool = False):
     finally:
         if lock_fd is not None:
             try:
-                try:
-                    if sys.platform == "win32":
-                        import msvcrt
-                        try:
-                            msvcrt.locking(lock_fd.fileno(), msvcrt.LK_UNLCK, 1)
-                        except OSError:
-                            pass
-                    else:
-                        import fcntl
-                        try:
-                            fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
-                        except OSError:
-                            pass
-                finally:
-                    lock_fd.close()
+                lock_fd.close()
             except (OSError, ValueError):
                 pass
         try:
@@ -119,18 +110,18 @@ def _print_task_timing(dashboard: "Dashboard") -> None:
 
 
 async def _dispatch_phase(
-    dispatch_tasks: list[Any],
-    all_tasks: list[Any],
+    dispatch_tasks: list["Task"],
+    all_tasks: list["Task"],
     args: argparse.Namespace,
     run_dir: Path,
     base_sha: str,
     repo_root: Path,
-    dashboard: Any,
-    memory: Any,
+    dashboard: "Dashboard",
+    memory: "RunMemory",
     conventions: str,
     api_key: str | None,
-    merge_results: Callable[..., Any] | None,
-) -> list[Any]:
+    merge_results: Callable[..., list["AgentResult"]] | None,
+) -> list["AgentResult"]:
     """Run the dispatcher and return merged results."""
     from cagent.dispatcher import run
 
@@ -151,7 +142,7 @@ async def _dispatch_phase(
         api_key=api_key,
     )
 
-    all_results: list[Any]
+    all_results: list["AgentResult"]
     if merge_results:
         all_results = merge_results(all_tasks, results)
     else:
@@ -169,15 +160,15 @@ async def _dispatch_phase(
 
 
 async def _integrate_phase(
-    all_tasks: list[Any],
-    all_results: list[Any],
+    all_tasks: list["Task"],
+    all_results: list["AgentResult"],
     run_id: str,
     run_dir: Path,
     base_sha: str,
     repo_root: Path,
     args: argparse.Namespace,
-    dashboard: Any,
-    memory: Any,
+    dashboard: "Dashboard",
+    memory: "RunMemory",
     api_key: str | None,
 ) -> str | None:
     """Write shared memory and run integration. Returns integration SHA or None."""
@@ -224,8 +215,8 @@ async def _integrate_phase(
 
 
 def _summary_phase(
-    all_tasks: list[Any],
-    results: list[Any],
+    all_tasks: list["Task"],
+    results: list["AgentResult"],
     run_id: str,
     run_dir: Path,
     base_sha: str,
@@ -256,8 +247,8 @@ def _summary_phase(
 
 
 def _execute_run(
-    all_tasks: list[Any],
-    dispatch_tasks: list[Any],
+    all_tasks: list["Task"],
+    dispatch_tasks: list["Task"],
     run_id: str,
     run_dir: Path,
     base_sha: str,
@@ -390,7 +381,7 @@ def _cmd_run_inner(args: argparse.Namespace, repo_root: Path) -> None:
 
     conventions = ""
     try:
-        if args.tasks_file.endswith(".md"):
+        if args.tasks_file.lower().endswith(".md"):
             from cagent.tasks import parse_tasks_md
             tasks, conventions = parse_tasks_md(args.tasks_file, run_id)
         else:
@@ -499,6 +490,17 @@ def _cmd_resume(args: argparse.Namespace, repo_root: Path) -> None:
     print()
 
     for t in pending_tasks:
+        # Check if task process is still active before cleaning up worktree
+        pid_file = run_dir / "pids" / f"task-{t.id}.pid"
+        if pid_file.exists():
+            try:
+                pid = int(pid_file.read_text(encoding="utf-8").strip())
+                if _is_pid_active(pid):
+                    print(f"  Warning: task {t.id} (PID {pid}) still active, skipping resume", file=sys.stderr)
+                    t.status = "running"
+                    continue
+            except (ValueError, OSError):
+                pass
         t.status = "pending"
         t.commit_sha = None
         wt_path = repo_root / ".cagent" / "worktrees" / run_id / f"task-{t.id}"
@@ -515,9 +517,12 @@ def _cmd_resume(args: argparse.Namespace, repo_root: Path) -> None:
                 ["git", "branch", "-D", t.branch],
                 cwd=repo_root, capture_output=True,
             )
-        except subprocess.CalledProcessError:
+        except (subprocess.CalledProcessError, OSError):
             pass
     dump_state(run_dir, tasks)
+
+    # Filter out tasks that are still running (skipped due to active PID)
+    pending_tasks = [t for t in tasks if t.status == "pending"]
 
     base_sha_file = run_dir / "base_sha"
     if base_sha_file.exists():
@@ -526,14 +531,17 @@ def _cmd_resume(args: argparse.Namespace, repo_root: Path) -> None:
         base_sha = current_head(repo_root)
         print(f"Warning: base_sha file not found in {run_dir.name}, falling back to HEAD ({base_sha[:12]})", file=sys.stderr)
 
-    def _merge_resume_results(all_tasks: list[Any], dispatch_results: list[Any]) -> list[Any]:
+    def _merge_resume_results(all_tasks: list["Task"], dispatch_results: list["AgentResult"]) -> list["AgentResult"]:
+        from cagent.agent import AgentResult
         result_map = {r.task_id: r for r in dispatch_results}
-        merged = []
+        merged: list["AgentResult"] = []
         for t in all_tasks:
             if t.id in result_map:
                 merged.append(result_map[t.id])
             else:
-                merged.append(AgentResult(task_id=t.id, status=t.status, commit_sha=t.commit_sha))
+                # Un-dispatched tasks were already done/noop before resume
+                status: Literal["done", "failed", "noop"] = t.status if t.status in ("done", "noop") else "failed"
+                merged.append(AgentResult(task_id=t.id, status=status, commit_sha=t.commit_sha))
         return merged
 
     _execute_run(
@@ -546,13 +554,14 @@ def _cmd_resume(args: argparse.Namespace, repo_root: Path) -> None:
         args=args,
         merge_results=_merge_resume_results,
         conventions=conventions,
+        api_key=getattr(args, "api_key", None),
     )
 
 
 def _write_summary(
     run_dir: Path,
-    tasks: list[Any],
-    results: list[Any],
+    tasks: list["Task"],
+    results: list["AgentResult"],
     base_sha: str,
     integration_sha: str | None,
     run_id: str,
@@ -614,7 +623,7 @@ def _write_summary(
     (run_dir / "summary.md").write_text("".join(lines), encoding="utf-8")
 
 
-def _clean_worktrees(repo_root: Path, run_dir: Path, tasks: list[Any], results: list[Any]) -> None:
+def _clean_worktrees(repo_root: Path, run_dir: Path, tasks: list["Task"], results: list["AgentResult"]) -> None:
     """Clean up worktrees based on success/failure status."""
     all_ok = all(r.status in ("done", "noop") for r in results)
     result_map = {r.task_id: r for r in results}
