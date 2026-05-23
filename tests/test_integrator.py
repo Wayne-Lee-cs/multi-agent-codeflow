@@ -11,6 +11,7 @@ import pytest
 from cagent.integrator import (
     _has_conflict_markers,
     _post_integrate_validate,
+    _run_claude_agent,
     _run_git,
     _run_shell_cmd,
     _validate_cmd_str,
@@ -666,5 +667,94 @@ class TestValidateCmdStr:
 
     def test_command_with_backticks(self) -> None:
         from cagent.integrator import _validate_cmd_str
-        # Backticks are allowed (user may want command substitution)
-        assert _validate_cmd_str("echo `date`") is True
+        # Backticks trigger command substitution in bash — rejected
+        assert _validate_cmd_str("echo `date`") is False
+
+
+# --- _run_claude_agent stdin timeout + FileNotFoundError tests ---
+
+
+class TestRunClaudeAgentStdinTimeout:
+    """Tests for _run_claude_agent stdin timeout protection (Phase 66.1)."""
+
+    @pytest.mark.asyncio
+    async def test_stdin_wait_closed_timeout_caught(self, tmp_path):
+        """wait_closed() raising TimeoutError is caught by try/except — no hang."""
+        from cagent.integrator import _run_claude_agent
+
+        proc = _make_process(returncode=0, stdout_lines=[])
+        proc.stdin.drain = AsyncMock(return_value=None)
+        proc.stdin.wait_closed = AsyncMock(side_effect=TimeoutError)
+
+        with patch("cagent.integrator._resolve_claude", return_value="claude"), \
+             patch("cagent.integrator.asyncio.create_subprocess_exec", return_value=proc):
+            result = await _run_claude_agent(
+                prompt="test",
+                worktree_path=tmp_path,
+                run_dir=tmp_path,
+                model_override=None,
+                timeout=60,
+                dashboard=None,
+            )
+        # wait_closed TimeoutError is caught, process completes normally
+        assert result == 0
+
+    @pytest.mark.asyncio
+    async def test_stdin_wait_closed_oserror_caught(self, tmp_path):
+        """wait_closed() raising OSError is caught by try/except."""
+        from cagent.integrator import _run_claude_agent
+
+        proc = _make_process(returncode=0, stdout_lines=[])
+        proc.stdin.drain = AsyncMock(return_value=None)
+        proc.stdin.wait_closed = AsyncMock(side_effect=OSError("broken pipe"))
+
+        with patch("cagent.integrator._resolve_claude", return_value="claude"), \
+             patch("cagent.integrator.asyncio.create_subprocess_exec", return_value=proc):
+            result = await _run_claude_agent(
+                prompt="test",
+                worktree_path=tmp_path,
+                run_dir=tmp_path,
+                model_override=None,
+                timeout=60,
+                dashboard=None,
+            )
+        # OSError in wait_closed is caught, process completes normally
+        assert result == 0
+
+
+class TestRunClaudeAgentFileNotFound:
+    """Tests for _run_claude_agent FileNotFoundError handling (Phase 66.2)."""
+
+    @pytest.mark.asyncio
+    async def test_file_not_found_returns_none(self, tmp_path):
+        from cagent.integrator import _run_claude_agent
+
+        with patch("cagent.integrator._resolve_claude", return_value="claude"), \
+             patch("cagent.integrator.asyncio.create_subprocess_exec",
+                   side_effect=FileNotFoundError("claude")):
+            result = await _run_claude_agent(
+                prompt="test",
+                worktree_path=tmp_path,
+                run_dir=tmp_path,
+                model_override=None,
+                timeout=60,
+                dashboard=None,
+            )
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_os_error_returns_none(self, tmp_path):
+        from cagent.integrator import _run_claude_agent
+
+        with patch("cagent.integrator._resolve_claude", return_value="claude"), \
+             patch("cagent.integrator.asyncio.create_subprocess_exec",
+                   side_effect=OSError("permission denied")):
+            result = await _run_claude_agent(
+                prompt="test",
+                worktree_path=tmp_path,
+                run_dir=tmp_path,
+                model_override=None,
+                timeout=60,
+                dashboard=None,
+            )
+        assert result is None

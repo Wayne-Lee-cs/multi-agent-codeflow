@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -193,28 +194,41 @@ def _task_progress_dict(tp: TaskProgress) -> dict[str, Any]:
 
 
 def _truncate_jsonl_if_large(path: Path, max_bytes: int, keep_ratio: float) -> None:
-    """Truncate a JSONL file from the beginning if it exceeds max_bytes."""
+    """Truncate a JSONL file from the beginning if it exceeds max_bytes.
+
+    For large files (>1MB), uses streaming seek to avoid full read.
+    For smaller files, reads lines directly (guarantees at least 1 line kept).
+    """
     try:
         size = path.stat().st_size
     except OSError:
         return
     if size <= max_bytes:
         return
+
+    _STREAMING_THRESHOLD = 1024 * 1024  # 1MB
     try:
-        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-    except OSError:
-        return
-    keep_count = max(1, int(len(lines) * keep_ratio))
-    truncated = lines[-keep_count:]
-    try:
-        path.write_text("".join(truncated), encoding="utf-8")
+        if size > _STREAMING_THRESHOLD:
+            keep_bytes = int(size * keep_ratio)
+            with open(path, "rb") as f:
+                f.seek(-keep_bytes, 2)
+                tail = f.read()
+            nl_idx = tail.find(b"\n")
+            if nl_idx >= 0:
+                tail = tail[nl_idx + 1:]
+            if tail:
+                path.write_bytes(tail)
+        else:
+            lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+            keep_count = max(1, int(len(lines) * keep_ratio))
+            path.write_text("".join(lines[-keep_count:]), encoding="utf-8")
     except OSError:
         pass
 
 
 def _validate_task_id(task_id: str) -> str:
-    """Validate task_id to prevent path traversal attacks."""
-    if not task_id or ".." in task_id or "/" in task_id or "\\" in task_id:
+    """Validate task_id to prevent path traversal and illegal filename chars."""
+    if not task_id or not re.match(r'^[a-zA-Z0-9_-]+$', task_id):
         raise ValueError(f"Invalid task_id: {task_id!r}")
     return task_id
 
@@ -238,6 +252,7 @@ class Dashboard:
         self._dashboard_dirty: bool = False
         self._event_buffers: dict[str, list[str]] = {}
         self._dirty_progress: set[str] = set()
+        self._dashboard_dirty_tasks: set[str] = set()
         self._last_io_flush: float = 0.0
         self._io_queue: asyncio.Queue[tuple[str, dict[str, Any]] | None] | None = None
         self._io_task: asyncio.Task[None] | None = None
@@ -371,6 +386,7 @@ class Dashboard:
 
         # Buffer per-task progress and event for periodic flush
         self._dirty_progress.add(task_id)
+        self._dashboard_dirty_tasks.add(task_id)
         self._buffer_event(task_id, event)
         # Notify event handler (LinePrinter)
         if self._on_event:
@@ -417,6 +433,7 @@ class Dashboard:
                 self._on_event(task_id, event)
 
         self._dirty_progress.add(task_id)
+        self._dashboard_dirty_tasks.add(task_id)
         is_final = status in ("done", "failed", "noop")
         if is_final:
             self._flush_io()
@@ -492,7 +509,11 @@ class Dashboard:
             atomic_write(target, json.dumps(d, indent=2, ensure_ascii=False))
 
     def _write_dashboard(self, force: bool = False) -> None:
-        """Write dashboard.json with time-based throttling (incremental)."""
+        """Write dashboard.json with time-based throttling (incremental).
+
+        Only serializes dirty tasks (O(dirty) not O(all)).
+        On force=True with no dirty tasks, falls back to full serialization.
+        """
         now = time.time()
         if not force and (now - self._last_dashboard_write) < self._DASHBOARD_THROTTLE:
             self._dashboard_dirty = True
@@ -500,14 +521,20 @@ class Dashboard:
         self._dashboard_dirty = False
         self._last_dashboard_write = now
 
-        # Build incremental snapshot: only include tasks that changed
-        full_snapshot = self.get_snapshot()
+        dirty, self._dashboard_dirty_tasks = self._dashboard_dirty_tasks, set()
+
+        # On force with no dirty tasks, serialize all (e.g. after flush clears dirty set)
+        if force and not dirty and self.tasks:
+            dirty = set(self.tasks.keys())
+
         diff: dict[str, dict[str, Any]] = {}
-        for tid, tp_dict in full_snapshot.items():
-            if tid not in self._last_dashboard_snapshot or tp_dict != self._last_dashboard_snapshot[tid]:
+        for tid in dirty:
+            if tid in self.tasks:
+                tp_dict = _task_progress_dict(self.tasks[tid])
+                self._last_dashboard_snapshot[tid] = tp_dict
                 diff[tid] = tp_dict
-        # Update cache with full snapshot to track deletions
-        self._last_dashboard_snapshot = dict(full_snapshot)
+
+        full_snapshot = self._last_dashboard_snapshot
 
         if self._io_queue is not None:
             self._io_queue.put_nowait(("dashboard", {"diff": diff, "full": full_snapshot}))

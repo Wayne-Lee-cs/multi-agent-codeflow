@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -69,6 +70,7 @@ async def integrate(
             run_dir=run_dir,
             repo_root=repo_root,
             integration_branch=integration_branch,
+            run_id=run_id,
             integrator_model_override=integrator_model_override,
             timeout=timeout,
             dashboard=dashboard,
@@ -146,7 +148,10 @@ async def integrate(
         await _run_git("rm", "--cached", "-r", ".claude/", cwd=worktree_path, check=False)
         summary_parts = [f"task {t.id}: {t.prompt.split(chr(10))[0][:50]}" for t in integrated]
         commit_msg = "integrate:\n" + "\n".join(f"- {s}" for s in summary_parts)
-        await _run_git("commit", "-m", commit_msg, cwd=worktree_path)
+        result = await _run_git("commit", "-m", commit_msg, cwd=worktree_path, check=False)
+        if result.returncode != 0:
+            # Rollback: reset to base to leave worktree in a clean state
+            await _run_git("reset", "--hard", base_sha, cwd=worktree_path, check=False)
 
     # Get final SHA
     result = await _run_git("rev-parse", "HEAD", cwd=worktree_path)
@@ -164,7 +169,7 @@ def _validate_cmd_str(cmd_str: str) -> bool:
     """
     import re
     # Only match space (0x20), not other whitespace like \n, \r, \t
-    pattern = r'^[\w .\-\/\\:=+,@~()\[\]{}|&;!?\*#$%^\'"<>`]+$'
+    pattern = r'^[\w .\-\/\\:=+,@~()\[\]{}|&;!?\*#$%^\'"<>]+$'
     return bool(re.match(pattern, cmd_str))
 
 
@@ -233,24 +238,32 @@ async def _run_claude_agent(
     subprocess_env = None
     if api_key:
         subprocess_env = {**os.environ, "ANTHROPIC_API_KEY": api_key}
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        cwd=str(worktree_path),
-        env=subprocess_env,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        stdin=asyncio.subprocess.PIPE,
-        creationflags=creation_flags,
-    )
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            cwd=str(worktree_path),
+            env=subprocess_env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            stdin=asyncio.subprocess.PIPE,
+            creationflags=creation_flags,
+        )
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return None
 
     if proc.stdin is None:
         return None
     try:
         proc.stdin.write(prompt.encode("utf-8"))
-        await proc.stdin.drain()
+        await asyncio.wait_for(proc.stdin.drain(), timeout=30)
     finally:
         proc.stdin.close()
-        await proc.stdin.wait_closed()
+        try:
+            await asyncio.wait_for(proc.stdin.wait_closed(), timeout=5)
+        except (TimeoutError, OSError):
+            pass
 
     log_path = run_dir / "logs" / f"task-{task_id}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -477,6 +490,7 @@ async def _resolve_conflicts(
         return False
 
     # Build integrator prompt — reference tasks already integrated with memory
+    _MAX_SUMMARIES_CHARS = 2000
     merged_summaries = ""
     for t in integrated_tasks:
         if t == task:
@@ -486,6 +500,9 @@ async def _resolve_conflicts(
             merged_summaries += f"  - task {t.id} ({t.prompt[:50]}):\n    {task_memory[:300]}\n"
         else:
             merged_summaries += f"  - task {t.id}: {t.prompt.split(chr(10))[0][:80]}\n"
+        if len(merged_summaries) > _MAX_SUMMARIES_CHARS:
+            merged_summaries += "  - ...(truncated)\n"
+            break
 
     conflict_list = "\n".join(f"  - {f}" for f in conflict_files)
 
@@ -564,12 +581,11 @@ async def _resolve_conflicts(
 
     # Clean sandbox artifacts before staging
     claude_dir = worktree_path / ".claude"
-    for f in [claude_dir / "settings.local.json", claude_dir / "hooks" / "cagent-guard.py"]:
-        if f.exists():
-            try:
-                f.unlink()
-            except OSError:
-                pass
+    if claude_dir.exists():
+        try:
+            shutil.rmtree(claude_dir)
+        except OSError:
+            pass
 
     env_continue = {**os.environ, "GIT_EDITOR": "true"}
     try:
@@ -612,6 +628,8 @@ async def _resolve_conflicts(
         return False
     task.commit_sha = result.stdout.strip()
     task.status = "done"
+    if dashboard:
+        dashboard.set_task_status(task.id, "done", commit_sha=task.commit_sha)
 
     return True
 
@@ -702,6 +720,7 @@ async def _merge_strategy(
     run_dir: Path,
     repo_root: Path,
     integration_branch: str,
+    run_id: str,
     integrator_model_override: str | None,
     timeout: int,
     dashboard: Dashboard | None,
@@ -728,7 +747,7 @@ async def _merge_strategy(
             dashboard.update("_integrator", event)
 
         # Create a temporary branch for the task (unique per run)
-        task_branch = f"cagent/{integration_branch.split('/')[1]}/task-{task.id}"
+        task_branch = f"cagent/{run_id}/task-{task.id}"
         temp_branches.append(task_branch)
         try:
             await _run_git("branch", "-f", task_branch, task.commit_sha, cwd=worktree_path, check=False)
@@ -800,7 +819,12 @@ async def _rebase_strategy(
     memory: RunMemory | None,
     api_key: str | None = None,
 ) -> tuple[list[Task], list[Task]]:
-    """Rebase strategy: replay task commits onto integration branch."""
+    """Rebase strategy: replay task commits onto integration branch.
+
+    Note: internally uses cherry-pick (not git rebase), which is equivalent
+    to a "replay" strategy. For single-commit branches this behaves identically
+    to rebase; for multi-commit branches, each commit is replayed independently.
+    """
     integrated = []
     failed = []
 

@@ -92,7 +92,8 @@ cagent push cagent/<run-id>/integration
 --integrator-model <id>   Model override for integrator
 --post-integrate-cmd CMD  Validation command after integration (e.g. "pytest")
 --quiet                   Only print START/DONE/FAIL events
---api-key KEY             Explicit API key (overrides env)
+--api-key KEY             Explicit API key (prefer ANTHROPIC_API_KEY env var;
+                          --api-key value is visible in process listings)
 --keep-worktrees          Keep worktrees after run
 --force                   Skip run lock check
 --dry-run                 Show planned execution without running
@@ -230,6 +231,7 @@ CLI (argparse + config file)
 - **Budget overshoot**: `--max-tokens` is checked between tasks; concurrent tasks may overshoot by `(concurrency - 1)` tasks worth of tokens.
 - **Write/Edit content false positives**: the safety hook applies deny patterns to file content (defense-in-depth), which may block legitimate writes containing command strings in comments, tests, or documentation.
 - **Indirect execution bypass**: compiled binaries or non-Bash interpreters (e.g., a Go program calling `exec("git push")`) can bypass the regex/token safety check. Full isolation requires Docker (not yet implemented).
+- **Rebase strategy uses cherry-pick**: `--strategy rebase` internally replays commits via `git cherry-pick`, not `git rebase --onto`. For single-commit branches this is identical; for multi-commit branches, each commit is replayed independently.
 
 ## Development
 

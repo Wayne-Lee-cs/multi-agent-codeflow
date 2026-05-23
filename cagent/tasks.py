@@ -196,8 +196,8 @@ def _extract_prompt(block: str) -> str:
         # Skip the ### Task header
         if stripped.startswith("### Task"):
             continue
-        # Skip field lines like **depends_on**: ...
-        if re.match(r"^\s*-\s*\*\*\w+\*\*\s*:", stripped):
+        # Skip field lines like **depends_on**: ... only before first content line
+        if not past_fields and re.match(r"^\s*-\s*\*\*\w+\*\*\s*:", stripped):
             continue
         # Once we hit non-field content, collect it
         if stripped:

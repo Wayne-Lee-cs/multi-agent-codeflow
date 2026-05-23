@@ -6,7 +6,9 @@
 > **v5.1 (2026-05-21)**: Phase 49-51 完成。多策略集成、WebSocket dashboard、异步 I/O。293 tests。
 > **v6.0 (2026-05-22)**: Phase 52-56 全部完成。324 tests。mypy 0 errors。
 > **v7.0 (2026-05-23)**: 全面评估发现 19 个新问题。342 tests, 59% 覆盖率, mypy 0 errors。
-> **v8.0 (2026-05-23)**: 二次全面评估发现 15 个新问题。407 tests, 65% 覆盖率, mypy 0 errors。
+> **v8.0 (2026-05-23)**: 二次全面评估发现 15 个新问题。460 tests, 68% 覆盖率, mypy 0 errors。
+> **v9.0 (2026-05-23)**: 第三次全面审查发现 6 Bug + 6 优化。第四轮代码审查发现 4 P2 + 6 P3。Phase 66-70 全部完成。576 tests, 76% coverage。
+> **v10.0 (2026-05-23)**: 第四次全面评估，综合评分 8.2/10。测试覆盖为最大短板（cli/run.py 49%, integrator.py 66%, server.py 64%）。Phase 71-74 规划。
 > This file tracks only **remaining** and **new** work.
 
 ---
@@ -575,7 +577,7 @@
 | Phase 63 (Bug 修复) | 8 | **DONE** (4/4, 含代码审查修复: 测试覆盖+PID竞态+Windows权限) |
 | Phase 64 (正确性加固) | 10 | **DONE** (5/5, status校验+atexit防护+版本号+env一致性) |
 | Phase 65 (性能与代码质量) | 12 | **Partial** (10/12, 65.2 deferred, 425 tests 68% coverage) |
-| **Total remaining** | **~2** | 65.2 日志截断内存优化 (deferred) |
+| **Total remaining** | **~2** | 65.2 日志截断内存优化 (deferred); v9.0 Phase 69.2 测试覆盖提升中 |
 
 ---
 
@@ -758,3 +760,264 @@
 ### 65.6 DENY_PATTERNS / dispatcher 文档补充
 - [x] **65.6.1** ✅ DENY_PATTERNS 注释添加 sandbox 边界说明
 - [x] **65.6.2** ✅ `_reset_worktree` docstring 注明运行在沙箱外
+
+---
+
+## v9.0 — Phase 66: Bug 修复 (P0, 2026-05-23)
+
+### 66.1 `integrator._run_claude_agent` stdin 超时保护
+- [x] **66.1.1** `integrator.py:249` — `await proc.stdin.drain()` 改为 `await asyncio.wait_for(proc.stdin.drain(), timeout=30)`
+- [x] **66.1.2** `integrator.py:252` — `await proc.stdin.wait_closed()` 包裹 `asyncio.wait_for(..., timeout=5)` + try/except `(TimeoutError, OSError)`
+- [x] **66.1.3** 测试：mock stdin.wait_closed 超时 → 函数不挂起，继续执行
+
+### 66.2 `integrator._run_claude_agent` FileNotFoundError 处理
+- [x] **66.2.1** `integrator.py:236` — `create_subprocess_exec` 包裹 try/except `FileNotFoundError` → 返回 None
+- [x] **66.2.2** `integrator.py:236` — 同时捕获 `OSError`（权限/路径问题）→ 返回 None
+- [x] **66.2.3** 测试：mock `create_subprocess_exec` 抛出 `FileNotFoundError`/`OSError` → 验证返回 None
+
+### 66.3 `RunMemory` agent_id 路径遍历验证
+- [x] **66.3.1** `memory.py` — 顶部添加 `_validate_agent_id(agent_id)` 函数（检查 `..`、`/`、`\`、空值）
+- [x] **66.3.2** `memory.py:28,33,42` — `write/append/read` 方法入口调用 `_validate_agent_id`
+- [x] **66.3.3** `memory.py:49` — `read_all` 方法不需校验（遍历 glob 结果）
+- [x] **66.3.4** 测试：8 个用例（`../evil` → ValueError、`sub/dir` → ValueError、`sub\dir` → ValueError、空字符串 → ValueError、正常 ID 通过、`_integrator` 通过、append/read 拒绝穿越）
+
+### 66.4 `_extract_prompt` 误过滤 prompt 中的 field 行
+- [x] **66.4.1** `tasks.py:200` — 添加 `not past_fields and` 条件：遇到第一个非 field 非空行后停止 field 检查
+- [x] **66.4.2** 确保现有测试通过（正常的 depends_on/files field 仍被跳过）
+- [x] **66.4.3** 测试：prompt 含 `- **endpoint**: /users` 行 → 该行保留在解析结果
+
+---
+
+## v9.0 — Phase 67: 安全加固 (P1, 2026-05-23)
+
+### 67.1 CORS preflight 无 Origin 修复
+- [x] **67.1.1** `server.py:579` — `_send_cors_preflight` 在 `origin` 为空时返回 204 无 CORS 头
+- [x] **67.1.2** `server.py:401-405` — `_handle_connection` OPTIONS 处理逻辑保持不变（已拒绝非 localhost origin）
+- [x] **67.1.3** 测试：OPTIONS 请求无 Origin header → 响应不含 `Access-Control-Allow-Origin`
+
+### 67.2 `_validate_cmd_str` 移除反引号
+- [x] **67.2.1** `integrator.py:168` — 正则白名单移除 `` ` `` 字符
+- [x] **67.2.2** 测试：`` pytest `echo hacked` `` → `_validate_cmd_str` 返回 False
+
+---
+
+## v9.0 — Phase 68: 性能优化 (P2, 2026-05-23)
+
+### 68.1 Dashboard 增量序列化
+- [x] **68.1.1** `progress.py:_write_dashboard` — 引入 `_dashboard_dirty_tasks` 集合，在 `update()/set_task_status()` 时记录脏 task ID
+- [x] **68.1.2** `progress.py:_write_dashboard` — 只对 `_dashboard_dirty_tasks` 中的 task 调用 `_task_progress_dict()`，然后更新 `_last_dashboard_snapshot`
+- [x] **68.1.3** `progress.py:_write_dashboard` — 写入磁盘仍用完整 `_last_dashboard_snapshot`（保证文件完整性）
+- [x] **68.1.4** 现有测试通过，force=True 时回退全量序列化
+
+### 68.2 `_resolve_claude` 负缓存修复
+- [x] **68.2.1** `agent.py:24` — 移除 `@lru_cache`，改为模块级 `_claude_path_cache: str | None = None` 手动缓存
+- [x] **68.2.2** `agent.py:_resolve_claude` — 只在 `shutil.which` 找到时缓存，fallback `"claude"` 不缓存
+- [x] **68.2.3** 测试：首次查找失败 → 不缓存 → 修复后二次查找成功
+
+### 68.3 `_truncate_jsonl_if_large` 流式处理
+- [x] **68.3.1** `progress.py` — 大文件(>1MB)使用 `seek(-keep_bytes, SEEK_END)` 流式读取，小文件保持行级读取
+- [x] **68.3.2** 现有截断测试全部通过（含至少保留 1 行）
+
+---
+
+## v9.0 — Phase 69: 代码质量与测试 (P2, 2026-05-23)
+
+### 69.1 rebase 策略命名修正
+- [x] **69.1.1** `integrator.py:791` — `_rebase_strategy` docstring 注明 "replay via cherry-pick" 语义
+- [x] **69.1.2** `README.md` Known Limitations — 添加 rebase 策略实际行为说明 ✅
+
+### 69.2 测试覆盖率 68% → 75%
+- [x] **69.2.1** `cli/__init__.py` — 14 tests（subcommand routing + options），覆盖率 15% → 93%
+- [x] **69.2.2** `cli/logcmd.py` — 12 tests（raw/formatted/follow），覆盖率 47% → 100%
+- [x] **69.2.3** `cli/watch.py` — 23 tests（budget/table/status/watch），覆盖率 49% → 68%
+- [x] **69.2.4** `server.py` — 40+ tests（WS帧/CORS/HTTP/连接），覆盖率 53% → 64%
+- [x] **69.2.5** `pyproject.toml` — `fail_under` 65 → 75，576 tests, 76.17% coverage
+
+### 69.3 EventParser 非 JSON 行优化
+- [x] **69.3.1** defer — 当前实现已足够高效，P3 优先级
+
+### 69.4 遗留未完成项收尾
+- [x] **69.4.1** Phase 58.2 — `README.md` `--api-key` 安全风险说明 ✅
+- [x] **69.4.2** Phase 61.6 — print → logging 统一（defer，CLI 工具 print(stderr) 是正确做法）
+- [x] **69.4.3** Phase 62.2 — Dashboard 类拆分（defer，可选）
+- [x] **69.4.4** Phase 62.3 — 异步信号处理（defer，可选）
+
+---
+
+## v9.0 — Phase 70: 代码审查修复 (2026-05-23)
+
+### 70.1 P2 Bug 修复
+
+- [x] **70.1.1** `integrator.py:621` — `_resolve_conflicts` 更新 `task.commit_sha` 后未同步 dashboard。添加 `dashboard.set_task_status(task.id, "done", commit_sha=task.commit_sha)`
+- [x] **70.1.2** `integrator.py:144-149` — squash 路径 `git reset --soft` + `git commit` 无回滚。commit 失败时 `git reset --hard base_sha` 恢复
+- [x] **70.1.3** `progress.py:230` — `_validate_task_id` 允许 `:*?"<>|` 等 Windows 非法文件名字符。改为 `re.match(r'^[a-zA-Z0-9_-]+$', task_id)`
+- [x] **70.1.4** `integrator.py:739` — `integration_branch.split('/')[1]` 硬编码假设分支格式。改为显式传入 `run_id` 参数
+
+### 70.2 P3 修复
+
+- [x] **70.2.1** `agent.py:341` — whitespace-only prompt 导致空 commit message。添加 `or "(no description)"` fallback
+- [x] **70.2.2** `integrator.py:489-496` — conflict prompt 中 `merged_summaries` 无上限。添加 `_MAX_SUMMARIES_CHARS = 2000` 截断
+- [x] **70.2.3** `integrator.py:573-580` — sandbox 清理硬编码两个文件路径。改为 `shutil.rmtree(claude_dir)` 清理整个 `.claude/` 目录
+
+---
+
+## v9.0 Progress Summary
+
+| Phase | Items | Status |
+|-------|-------|--------|
+| Phase 66 (Bug 修复 P0) | 13 | **DONE** (13/13) |
+| Phase 67 (安全加固 P1) | 5 | **DONE** (5/5) |
+| Phase 68 (性能优化 P2) | 9 | **DONE** (9/9) |
+| Phase 69 (代码质量 P2) | 14 | **DONE** (12/14, 2 defer: 69.3+69.4.2) |
+| Phase 70 (代码审查修复) | 7 | **DONE** (7/7) |
+| **Total v9.0** | **48** | **46/48 完成** |
+
+---
+
+## v10.0 — Phase 71: 测试覆盖提升 — cli/run.py (P0, 2026-05-23)
+
+> 目标: cli/run.py 覆盖率 49% → 65%+。核心执行路径缺覆盖是最大风险。
+> 详见 [SPEC_v10.md](SPEC_v10.md) OPT-1。
+
+### 71.1 `_dispatch_phase` mock 测试
+
+- [ ] **71.1.1** `_dispatch_phase` 正常路径 — mock dispatcher.run 返回成功结果 → 验证 done/failed/noop 计数正确
+- [ ] **71.1.2** `_dispatch_phase` 部分失败 — mock dispatcher.run 返回混合结果 → 验证 failed 计数
+- [ ] **71.1.3** `_dispatch_phase` budget 超限 — mock dashboard 显示 token 超限 → 验证 budget_exceeded 输出
+- [ ] **71.1.4** `_dispatch_phase` dispatcher 异常 — mock dispatcher.run 抛出异常 → 验证错误处理
+
+### 71.2 `_integrate_phase` mock 测试
+
+- [ ] **71.2.1** `_integrate_phase` 正常路径 — mock integrator.integrate 返回 SHA → 验证 memory.write_shared 调用
+- [ ] **71.2.2** `_integrate_phase` 无 done tasks — 所有 task 失败 → 验证跳过 integration
+- [ ] **71.2.3** `_integrate_phase` integration 失败 — mock integrator.integrate 抛出异常 → 验证错误输出
+
+### 71.3 `_summary_phase` mock 测试
+
+- [ ] **71.3.1** `_summary_phase` 正常路径 — mock dashboard.flush_async + worktree 清理 → 验证 summary 写入
+- [ ] **71.3.2** `_summary_phase` keep_worktrees — --keep-worktrees 标志 → 验证不调用 clean_worktrees
+
+### 71.4 `_execute_run` 完整路径 mock 测试
+
+- [ ] **71.4.1** `_execute_run` 三阶段串联 — mock 三个 phase → 验证顺序调用 + 参数传递
+- [ ] **71.4.2** `_execute_run` KeyboardInterrupt — mock dispatcher.run 期间中断 → 验证 dump_state 调用
+- [ ] **71.4.3** `_execute_run` async I/O 启动/停止 — 验证 dashboard.start_async_io / stop_async_io 调用
+
+### 71.5 `_cmd_run_inner` 完整 run 路径
+
+- [ ] **71.5.1** `_cmd_run_inner` 正常 run — mock _execute_run → 验证参数传递（tasks, concurrency, base_sha 等）
+- [ ] **71.5.2** `_cmd_run_inner` --dry-run — 已有测试，验证不调用 _execute_run
+- [ ] **71.5.3** `_cmd_run_inner` --resume — mock _cmd_resume 路径 → 验证 resume 逻辑
+
+### 71.6 `_cmd_resume` 实际执行路径
+
+- [ ] **71.6.1** `_cmd_resume` 正常 resume — mock load_state + _execute_run → 验证跳过已完成 task
+- [ ] **71.6.2** `_cmd_resume` base_sha fallback — base_sha 文件不存在 → 验证 fallback 到 current_head
+- [ ] **71.6.3** `_cmd_resume` 无 pending tasks — 所有 task 已完成 → 验证直接返回
+
+---
+
+## v10.0 — Phase 72: 测试覆盖提升 — integrator.py (P1, 2026-05-23)
+
+> 目标: integrator.py 覆盖率 66% → 80%+。冲突解决路径测试不足。
+> 详见 [SPEC_v10.md](SPEC_v10.md) OPT-2。
+
+### 72.1 `_resolve_conflicts` 完整成功路径
+
+- [ ] **72.1.1** 冲突解决成功 — mock _run_claude_agent 返回 0 + git grep 无残留 → 验证 task.status="done" + dashboard 同步
+- [ ] **72.1.2** 冲突解决成功 — 验证 memory.append 写入冲突解决记录
+
+### 72.2 `_resolve_conflicts` 冲突标记残留
+
+- [ ] **72.2.1** 冲突标记残留 — mock git grep 返回残留标记 → 验证 abort_operation 调用 + 返回 False
+
+### 72.3 `_post_integrate_validate` repair 成功
+
+- [ ] **72.3.1** repair 成功 — mock 第一轮 _run_shell_cmd 失败 + _run_claude_agent 返回 0 + 第二轮成功 → 验证返回 True
+- [ ] **72.3.2** repair agent 无变更 — mock _run_claude_agent 返回 0 但 git status 为空 → 验证跳过 commit
+
+### 72.4 `_merge_strategy` 冲突解决成功
+
+- [ ] **72.4.1** merge 冲突解决 — mock merge 返回冲突 + _resolve_conflicts 返回 True → 验证 integrated 列表
+- [ ] **72.4.2** merge 无冲突 — mock merge 返回成功 → 验证直接加入 integrated
+
+### 72.5 `_rebase_strategy` 冲突解决成功
+
+- [ ] **72.5.1** rebase 冲突解决 — mock cherry-pick 返回冲突 + _resolve_conflicts 返回 True → 验证 integrated 列表
+- [ ] **72.5.2** rebase 无冲突 — mock cherry-pick 返回成功 → 验证直接加入 integrated
+
+### 72.6 squash commit 失败回滚
+
+- [ ] **72.6.1** squash commit 失败 — mock git commit 返回非零 → 验证 git reset --hard base_sha 调用
+
+### 72.7 `_rebase_strategy` run_id 显式传参
+
+- [ ] **72.7.1** run_id 参数 — 移除 `integration_branch.split("/")[1]`，新增 run_id 参数 → 验证 temp_branch 命名正确
+
+---
+
+## v10.0 — Phase 73: 测试覆盖提升 — server.py (P1, 2026-05-23)
+
+> 目标: server.py 覆盖率 64% → 75%+。WebSocket 帧处理和连接管理路径未充分覆盖。
+> 详见 [SPEC_v10.md](SPEC_v10.md) OPT-3。
+
+### 73.1 WebSocket 多帧拼接解码
+
+- [ ] **73.1.1** 多帧拼接 — 构造 FIN=0 中间帧 + FIN=1 终止帧 → 验证消息正确拼接
+- [ ] **73.1.2** 分片文本消息 — 多个 text frame 拼接 → 验证完整消息
+
+### 73.2 WebSocket ping/pong 处理
+
+- [ ] **73.2.1** ping 帧 — 发送 opcode 0x9 ping 帧 → 验证自动回复 opcode 0xA pong
+- [ ] **73.2.2** pong 帧 — 发送 unsolicited pong → 验证不报错
+
+### 73.3 连接异常断开清理
+
+- [ ] **73.3.1** ConnectionResetError — mock writer.write 抛出 ConnectionResetError → 验证连接从 clients 移除
+- [ ] **73.3.2** BrokenPipeError — mock writer.drain 抛出 BrokenPipeError → 验证清理
+
+### 73.4 HTTP 非 GET 方法处理
+
+- [ ] **73.4.1** POST 请求 — 发送 POST / 请求 → 验证返回 405 Method Not Allowed
+- [ ] **73.4.2** PUT 请求 — 发送 PUT / 请求 → 验证返回 405
+
+### 73.5 边界情况
+
+- [ ] **73.5.1** 超大帧 — 发送超过 _MAX_WS_FRAME_SIZE 的帧 → 验证连接关闭
+- [ ] **73.5.2** 空帧 — 发送空 payload 帧 → 验证不崩溃
+- [ ] **73.5.3** 无效 opcode — 发送未知 opcode → 验证忽略或关闭
+
+---
+
+## v10.0 — Phase 74: 收尾与文档同步 (P2, 2026-05-23)
+
+### 74.1 README.md 版本号同步
+
+- [ ] **74.1.1** `README.md:3` — `v6.0.0` → `v9.0.0`，更新测试数（326 → 576）和覆盖率（新增 76%）
+- [ ] **74.1.2** `README.md` — 更新 Known Limitations 中的 `--api-key` 说明（已在 58.2.2 更新 help 文本）
+
+### 74.2 pyproject.toml fail_under 提升
+
+- [ ] **74.2.1** `pyproject.toml` — `fail_under` 从 75 提升到 78
+
+### 74.3 全量验证
+
+- [ ] **74.3.1** `python -m pytest tests/ -v` — 0 failures
+- [ ] **74.3.2** `python -m pytest tests/ --cov=cagent --cov-report=term-missing` — 覆盖率 ≥ 78%
+- [ ] **74.3.3** `python -m mypy cagent/` — 0 errors
+
+### 74.4 PLAN/CHECKLIST 状态同步
+
+- [ ] **74.4.1** 更新 PLAN.md 和 CHECKLIST.md 中所有已完成项状态
+
+---
+
+## v10.0 Progress Summary
+
+| Phase | Items | Status |
+|-------|-------|--------|
+| Phase 71 (cli/run.py 测试 P0) | 18 | **TODO** |
+| Phase 72 (integrator.py 测试 P1) | 13 | **TODO** |
+| Phase 73 (server.py 测试 P1) | 10 | **TODO** |
+| Phase 74 (收尾文档 P2) | 6 | **TODO** |
+| **Total v10.0** | **47** | **0/47 完成** |

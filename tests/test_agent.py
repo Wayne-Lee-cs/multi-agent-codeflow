@@ -466,3 +466,39 @@ async def test_run_git_async_timeout(tmp_worktree: Path) -> None:
     with patch("cagent.git_utils.asyncio.create_subprocess_exec", side_effect=mock_exec):
         with pytest.raises(GitTimeoutError, match="timed out"):
             await _run_git_async("rev-parse", "HEAD", cwd=tmp_worktree, timeout=0.1)
+
+
+# --- _resolve_claude negative cache test ---
+
+
+class TestResolveClaudeNegativeCache:
+    """Tests for Phase 68.2: _resolve_claude does not cache failures."""
+
+    def test_failure_not_cached_retries_on_next_call(self):
+        """When claude is not found, subsequent calls still attempt lookup."""
+        import cagent.agent as mod
+
+        call_count = 0
+
+        def mock_which(name):
+            nonlocal call_count
+            call_count += 1
+            # First _resolve_claude call iterates 3 names (claude, claude.cmd, claude.exe)
+            # Second call iterates 3 more names — return found on 7th call
+            if call_count <= 6:
+                return None
+            return "/usr/bin/claude"
+
+        mod._claude_path_cache = None
+        with patch("cagent.agent.shutil.which", side_effect=mock_which):
+            result1 = mod._resolve_claude()
+            assert result1 == "claude"  # fallback
+            assert mod._claude_path_cache is None  # not cached
+
+            result2 = mod._resolve_claude()
+            assert result2 == "claude"  # still fallback
+            assert mod._claude_path_cache is None  # still not cached
+
+            result3 = mod._resolve_claude()
+            assert result3 == "/usr/bin/claude"  # found on 3rd attempt
+            assert mod._claude_path_cache == "/usr/bin/claude"  # now cached

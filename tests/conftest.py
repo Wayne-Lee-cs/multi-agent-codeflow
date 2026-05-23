@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+import cagent.agent as _agent_module
 from cagent.agent import _resolve_claude
 
 
@@ -69,10 +70,10 @@ def _make_process(
 
 @pytest.fixture(autouse=True)
 def _clear_resolve_claude_cache():
-    """Clear lru_cache on _resolve_claude between tests to ensure isolation."""
-    _resolve_claude.cache_clear()
+    """Clear manual cache on _resolve_claude between tests to ensure isolation."""
+    _agent_module._claude_path_cache = None
     yield
-    _resolve_claude.cache_clear()
+    _agent_module._claude_path_cache = None
 
 
 @pytest.fixture

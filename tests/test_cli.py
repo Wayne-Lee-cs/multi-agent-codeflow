@@ -1081,3 +1081,341 @@ class TestCleanWorktrees:
         mock_run = MagicMock(side_effect=subprocess.CalledProcessError(1, "git"))
         with patch("cagent.cli.run.subprocess.run", mock_run):
             _clean_worktrees(repo_root, run_dir, tasks, results)  # should not raise
+
+
+class TestCmdPush:
+    """Tests for _cmd_push — branch push with confirmation."""
+
+    def test_push_branch_not_found(self, tmp_path, capsys):
+        """Push with non-existent branch exits with error."""
+        from cagent.cli.misc import _cmd_push
+
+        args = MagicMock()
+        args.branch = "nonexistent-branch"
+
+        def mock_run(cmd, **kwargs):
+            if "rev-parse" in cmd:
+                result = MagicMock()
+                result.returncode = 1
+                return result
+            if "--list" in cmd:
+                result = MagicMock()
+                result.stdout = "cagent/run-001/task-001\n"
+                return result
+            return MagicMock(returncode=0)
+
+        with patch("cagent.cli.misc._get_repo_root", return_value=tmp_path), \
+             patch("cagent.cli.misc.subprocess.run", side_effect=mock_run), \
+             pytest.raises(SystemExit, match="1"):
+            _cmd_push(args)
+
+        err = capsys.readouterr().err
+        assert "not found" in err
+        assert "cagent/run-001/task-001" in err
+
+    def test_push_branch_not_found_no_cagent_branches(self, tmp_path, capsys):
+        """Push with non-existent branch and no cagent branches shows no list."""
+        from cagent.cli.misc import _cmd_push
+
+        args = MagicMock()
+        args.branch = "nonexistent-branch"
+
+        def mock_run(cmd, **kwargs):
+            if "rev-parse" in cmd:
+                result = MagicMock()
+                result.returncode = 1
+                return result
+            if "--list" in cmd:
+                result = MagicMock()
+                result.stdout = ""
+                return result
+            return MagicMock(returncode=0)
+
+        with patch("cagent.cli.misc._get_repo_root", return_value=tmp_path), \
+             patch("cagent.cli.misc.subprocess.run", side_effect=mock_run), \
+             pytest.raises(SystemExit, match="1"):
+            _cmd_push(args)
+
+        err = capsys.readouterr().err
+        assert "not found" in err
+
+    def test_push_aborted_by_user(self, tmp_path, capsys):
+        """Push aborted when user says no."""
+        from cagent.cli.misc import _cmd_push
+
+        args = MagicMock()
+        args.branch = "my-branch"
+
+        def mock_run(cmd, **kwargs):
+            if "rev-parse" in cmd:
+                return MagicMock(returncode=0)
+            if "log" in cmd and "HEAD.." in cmd:
+                return MagicMock(stdout="abc1234 feat: something\n")
+            return MagicMock(returncode=0)
+
+        with patch("cagent.cli.misc._get_repo_root", return_value=tmp_path), \
+             patch("cagent.cli.misc.subprocess.run", side_effect=mock_run), \
+             patch("builtins.input", return_value="n"):
+            _cmd_push(args)
+
+        out = capsys.readouterr().out
+        assert "Aborted" in out
+
+    def test_push_aborted_by_eof(self, tmp_path, capsys):
+        """Push aborted on EOFError."""
+        from cagent.cli.misc import _cmd_push
+
+        args = MagicMock()
+        args.branch = "my-branch"
+
+        def mock_run(cmd, **kwargs):
+            if "rev-parse" in cmd:
+                return MagicMock(returncode=0)
+            if "log" in cmd:
+                return MagicMock(stdout="abc1234 feat: something\n")
+            return MagicMock(returncode=0)
+
+        with patch("cagent.cli.misc._get_repo_root", return_value=tmp_path), \
+             patch("cagent.cli.misc.subprocess.run", side_effect=mock_run), \
+             patch("builtins.input", side_effect=EOFError):
+            _cmd_push(args)
+
+        out = capsys.readouterr().out
+        assert "Aborted" in out
+
+    def test_push_success(self, tmp_path, capsys):
+        """Push succeeds when user confirms."""
+        from cagent.cli.misc import _cmd_push
+
+        args = MagicMock()
+        args.branch = "my-branch"
+
+        def mock_run(cmd, **kwargs):
+            if "rev-parse" in cmd:
+                return MagicMock(returncode=0)
+            if "log" in cmd and "HEAD.." in cmd:
+                return MagicMock(stdout="abc1234 feat: something\n")
+            if "push" in cmd:
+                return MagicMock(returncode=0)
+            return MagicMock(returncode=0)
+
+        with patch("cagent.cli.misc._get_repo_root", return_value=tmp_path), \
+             patch("cagent.cli.misc.subprocess.run", side_effect=mock_run), \
+             patch("builtins.input", return_value="y"):
+            _cmd_push(args)
+
+        out = capsys.readouterr().out
+        assert "Pushed" in out
+
+    def test_push_shows_recent_commits_when_nothing_to_push(self, tmp_path, capsys):
+        """Shows recent commits when there's nothing new to push."""
+        from cagent.cli.misc import _cmd_push
+
+        args = MagicMock()
+        args.branch = "my-branch"
+
+        def mock_run(cmd, **kwargs):
+            if "rev-parse" in cmd:
+                return MagicMock(returncode=0, stdout="")
+            # Check if any element in cmd list starts with "HEAD.."
+            if any(c.startswith("HEAD..") for c in cmd):
+                return MagicMock(returncode=0, stdout="")  # nothing to push
+            if "-5" in cmd:
+                return MagicMock(returncode=0, stdout="abc1234 old commit\n")
+            return MagicMock(returncode=0, stdout="")
+
+        with patch("cagent.cli.misc._get_repo_root", return_value=tmp_path), \
+             patch("cagent.cli.misc.subprocess.run", side_effect=mock_run), \
+             patch("builtins.input", return_value="n"):
+            _cmd_push(args)
+
+        out = capsys.readouterr().out
+        assert "Recent commits" in out
+
+    def test_push_git_push_failure(self, tmp_path, capsys):
+        """Push failure prints error and exits."""
+        from cagent.cli.misc import _cmd_push
+
+        args = MagicMock()
+        args.branch = "my-branch"
+
+        def mock_run(cmd, **kwargs):
+            if "rev-parse" in cmd:
+                return MagicMock(returncode=0)
+            if "HEAD.." in cmd:
+                return MagicMock(stdout="abc1234 feat\n")
+            if "push" in cmd:
+                return MagicMock(returncode=1, stderr="Permission denied (publickey)", stdout="")
+            return MagicMock(returncode=0)
+
+        with patch("cagent.cli.misc._get_repo_root", return_value=tmp_path), \
+             patch("cagent.cli.misc.subprocess.run", side_effect=mock_run), \
+             patch("builtins.input", return_value="y"), \
+             pytest.raises(SystemExit, match="1"):
+            _cmd_push(args)
+
+        err = capsys.readouterr().err
+        assert "Push failed" in err
+        assert "Permission denied" in err
+
+    def test_push_git_push_failure_no_stderr(self, tmp_path, capsys):
+        """Push failure with no stderr message shows generic error."""
+        from cagent.cli.misc import _cmd_push
+
+        args = MagicMock()
+        args.branch = "my-branch"
+
+        def mock_run(cmd, **kwargs):
+            if "rev-parse" in cmd:
+                return MagicMock(returncode=0)
+            if "HEAD.." in cmd:
+                return MagicMock(stdout="abc1234 feat\n")
+            if "push" in cmd:
+                return MagicMock(returncode=1, stderr="", stdout="")
+            return MagicMock(returncode=0)
+
+        with patch("cagent.cli.misc._get_repo_root", return_value=tmp_path), \
+             patch("cagent.cli.misc.subprocess.run", side_effect=mock_run), \
+             patch("builtins.input", return_value="y"), \
+             pytest.raises(SystemExit, match="1"):
+            _cmd_push(args)
+
+        err = capsys.readouterr().err
+        assert "Push failed" in err
+
+
+class TestCmdCancelExtra:
+    """Extra tests for _cmd_cancel edge cases."""
+
+    def test_cancel_invalid_pid_file(self, tmp_path, capsys):
+        """Cancel with non-numeric PID file exits with error."""
+        from cagent.cli.misc import _cmd_cancel
+
+        run_dir = tmp_path / "run"
+        pid_dir = run_dir / "pids"
+        pid_dir.mkdir(parents=True)
+        (pid_dir / "task-001.pid").write_text("not-a-number", encoding="utf-8")
+
+        args = MagicMock()
+        args.task_id = "001"
+        args.run = None
+
+        with patch("cagent.cli.misc._get_repo_root", return_value=tmp_path), \
+             patch("cagent.cli.misc._find_run_dir", return_value=run_dir), \
+             pytest.raises(SystemExit, match="1"):
+            _cmd_cancel(args)
+
+        err = capsys.readouterr().err
+        assert "Failed to read PID" in err
+
+
+class TestCmdCleanExtra:
+    """Extra tests for _cmd_clean edge cases."""
+
+    def test_clean_specific_run_not_found(self, tmp_path, capsys):
+        """Clean with non-existent run_id exits with error."""
+        from cagent.cli.misc import _cmd_clean
+
+        runs_dir = tmp_path / ".cagent" / "runs"
+        runs_dir.mkdir(parents=True)
+
+        args = MagicMock()
+        args.all = False
+        args.run_id = "nonexistent-run"
+        args.force = True
+        args.memory = False
+
+        with patch("cagent.cli.misc._get_repo_root", return_value=tmp_path), \
+             pytest.raises(SystemExit, match="1"):
+            _cmd_clean(args)
+
+        err = capsys.readouterr().err
+        assert "Run not found" in err
+
+    def test_clean_latest_no_runs(self, tmp_path, capsys):
+        """Clean latest when no runs exist exits with error."""
+        from cagent.cli.misc import _cmd_clean
+
+        runs_dir = tmp_path / ".cagent" / "runs"
+        runs_dir.mkdir(parents=True)
+
+        args = MagicMock()
+        args.all = False
+        args.run_id = None
+        args.force = True
+        args.memory = False
+
+        with patch("cagent.cli.misc._get_repo_root", return_value=tmp_path), \
+             pytest.raises(SystemExit, match="1"):
+            _cmd_clean(args)
+
+        err = capsys.readouterr().err
+        assert "No runs found" in err
+
+    def test_clean_aborted_by_user(self, tmp_path, capsys):
+        """Clean aborted when user says no."""
+        from cagent.cli.misc import _cmd_clean
+
+        runs_dir = tmp_path / ".cagent" / "runs"
+        run_dir = runs_dir / "test-run"
+        run_dir.mkdir(parents=True)
+        (run_dir / "dashboard.json").write_text("{}", encoding="utf-8")
+
+        args = MagicMock()
+        args.all = True
+        args.run_id = None
+        args.force = False
+        args.memory = False
+
+        with patch("cagent.cli.misc._get_repo_root", return_value=tmp_path), \
+             patch("builtins.input", return_value="n"):
+            _cmd_clean(args)
+
+        out = capsys.readouterr().out
+        assert "Aborted" in out
+
+    def test_clean_aborted_by_eof(self, tmp_path, capsys):
+        """Clean aborted on EOFError."""
+        from cagent.cli.misc import _cmd_clean
+
+        runs_dir = tmp_path / ".cagent" / "runs"
+        run_dir = runs_dir / "test-run"
+        run_dir.mkdir(parents=True)
+        (run_dir / "dashboard.json").write_text("{}", encoding="utf-8")
+
+        args = MagicMock()
+        args.all = True
+        args.run_id = None
+        args.force = False
+        args.memory = False
+
+        with patch("cagent.cli.misc._get_repo_root", return_value=tmp_path), \
+             patch("builtins.input", side_effect=EOFError):
+            _cmd_clean(args)
+
+        out = capsys.readouterr().out
+        assert "Aborted" in out
+
+    def test_clean_with_memory_count(self, tmp_path, capsys):
+        """Clean shows memory file count in output."""
+        from cagent.cli.misc import _cmd_clean
+
+        runs_dir = tmp_path / ".cagent" / "runs"
+        run_dir = runs_dir / "test-run"
+        run_dir.mkdir(parents=True)
+        (run_dir / "dashboard.json").write_text("{}", encoding="utf-8")
+        mem_dir = run_dir / "memory"
+        mem_dir.mkdir()
+        (mem_dir / "task-001.md").write_text("content", encoding="utf-8")
+
+        args = MagicMock()
+        args.all = True
+        args.run_id = None
+        args.force = True
+        args.memory = True
+
+        with patch("cagent.cli.misc._get_repo_root", return_value=tmp_path):
+            _cmd_clean(args)
+
+        out = capsys.readouterr().out
+        assert "memory" in out.lower()

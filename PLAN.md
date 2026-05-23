@@ -1,12 +1,14 @@
-# Code Architecture Plan — v8.0 (2026-05-23)
+# Code Architecture Plan — v10.0 (2026-05-23)
 
-> Phase 1-62 mostly completed. 407 pytest pass, 0 failures. Historical details in [ARCHIVE.md](ARCHIVE.md).
+> Phase 1-70 completed. 576 pytest pass, 0 failures. Historical details in [ARCHIVE.md](ARCHIVE.md).
 
 ## Current Status
 
 **v6.0 已发布** — 安全加固 + 运行时稳健性 + 性能优化 + 代码质量 + 可观测性，342 自动化测试覆盖。
 **v7.0 大部分完成** — 全面评估发现 19 个新问题。Phase 57-62 大部分完成。407 tests, 65% coverage, mypy 0 errors。
-**v8.0 大部分完成** — Phase 63-65 完成。425 tests, 68% coverage, mypy 0 errors, 0 RuntimeWarning。
+**v8.0 已发布** — Phase 63-65 完成。460 tests, 68% coverage, mypy 0 errors, 0 RuntimeWarning。
+**v9.0 完成** — Phase 66-70 全部完成。576 tests, 76% coverage, mypy 0 errors。Bug修复+安全加固+性能优化+测试覆盖提升+代码审查修复。
+**v10.0 进行中** — 第四次全面评估。综合评分 8.2/10。重点：测试覆盖缺口修复（cli/run.py 49%, integrator.py 66%, server.py 64%）+ 文档同步。
 
 ### v5.1 已完成项
 
@@ -172,6 +174,123 @@
 | D.6 | `--worker-model claude-haiku-4-5` 时 worker 命令行含 `--model` |
 | D.7 | 不可执行任务 → 标 noop，integrator 跳过 |
 | D.8 | `--timeout 1` → 标 failed，integrator 合入成功部分 |
+
+---
+
+## v9.0 Roadmap
+
+### Phase 66: Bug 修复 (P0) 🔴
+
+| # | 任务 | 风险 | 说明 |
+|---|------|------|------|
+| 66.1 | `integrator._run_claude_agent` stdin 超时保护 | **高** | `integrator.py:249-253` — `drain()/wait_closed()` 无超时，可能永久挂起。与 `agent.py:158-164` 对齐，添加 30s/5s 超时 |
+| 66.2 | `integrator._run_claude_agent` FileNotFoundError 处理 | **高** | `integrator.py:236` — `create_subprocess_exec` 未捕获 `FileNotFoundError`/`OSError`。claude 不在 PATH 时 traceback 不友好。返回 None（调用方已处理） |
+| 66.3 | `RunMemory` agent_id 路径遍历验证 | 中 | `memory.py:28,33,42` — `write/append/read` 直接拼接 agent_id 到路径，无 `../`/`/` 检查。添加 `_validate_agent_id()` 校验 |
+| 66.4 | `_extract_prompt` 误过滤 prompt 中的 field 行 | 中 | `tasks.py:200` — prompt 含 `- **word**: value` 格式行时被错误跳过。改为仅在 heading 后连续 field 区检查 |
+
+### Phase 67: 安全加固 (P1) 🟡
+
+| # | 任务 | 风险 | 说明 |
+|---|------|------|------|
+| 67.1 | CORS preflight 无 Origin 返回 `*` | 中 | `server.py:401-405,579` — 无 Origin 的 OPTIONS 请求返回 `Allow-Origin: *`。改为无 Origin 时不设置 CORS 头 |
+| 67.2 | `_validate_cmd_str` 允许反引号 | 低 | `integrator.py:168` — 白名单含 `` ` ``，bash 中触发命令替换。移除反引号 |
+
+### Phase 68: 性能优化 (P2) 🟢
+
+| # | 任务 | 风险 | 说明 |
+|---|------|------|------|
+| 68.1 | Dashboard 增量序列化 | 低 | `progress.py:494-515` — `_write_dashboard` 改为只序列化 `_dirty_progress` 中的 task，从 O(N) 降至 O(dirty) |
+| 68.2 | `_resolve_claude` 负缓存修复 | 低 | `agent.py:24` — `@lru_cache` 缓存失败结果。改为只缓存正值 |
+| 68.3 | `_truncate_jsonl_if_large` 流式处理 | 低 | `progress.py:195-212` — 5MB 文件全量读入。改为尾部 seek 查找截断点 |
+
+### Phase 69: 代码质量与测试 (P2) 🟢
+
+| # | 任务 | 风险 | 说明 |
+|---|------|------|------|
+| 69.1 | rebase 策略命名修正 | 低 | `integrator.py:791-879` — 内部用 cherry-pick 实现，文档/注释注明 "replay" 语义 |
+| 69.2 | 测试覆盖率 68% → 75% | 低 | 重点: `cli/__init__.py` 15%→50%, `cli/run.py` 49%→65%, `server.py` 53%→70% |
+| 69.3 | EventParser 非 JSON 行优化 | 低 | `progress.py:56-63` — 合并连续非 JSON 行，减少 Event 对象分配 |
+| 69.4 | 遗留 Phase 58-62 未完成项收尾 | 低 | 58.2(README api-key), 60.6(fail_under), 61.6(统一日志) |
+
+### Phase 70: 代码审查修复 (P2-P3) ✅
+
+| # | 任务 | 风险 | 说明 |
+|---|------|------|------|
+| 70.1 | Dashboard commit SHA 同步 | 中 | `integrator.py:621` — `_resolve_conflicts` 更新 `task.commit_sha` 后需同步 `dashboard.set_task_status` |
+| 70.2 | squash 回滚保护 | 中 | `integrator.py:144-149` — `git commit` 失败时 `git reset --hard` 恢复 |
+| 70.3 | `_validate_task_id` 加固 | 低 | `progress.py:230` — 改为 `^[a-zA-Z0-9_-]+$`，拒绝 Windows 非法文件名字符 |
+| 70.4 | branch name 显式传参 | 低 | `integrator.py:739` — 移除 `split('/')[1]` 硬编码，`_merge_strategy` 接受 `run_id` 参数 |
+| 70.5 | 空 prompt commit message | 低 | `agent.py:341` — `first_line` 为空时 fallback `"(no description)"` |
+| 70.6 | conflict prompt 大小限制 | 低 | `integrator.py:489` — `merged_summaries` 超过 2000 字符截断 |
+| 70.7 | sandbox 清理泛化 | 低 | `integrator.py:573` — `shutil.rmtree(.claude/)` 替代硬编码文件列表 |
+
+### 遗留手动验证 (P3, 不阻塞发布)
+
+| # | 验证项 |
+|---|--------|
+| D.3 | `cagent watch` TTY 下 1s 刷新表格 + `q` 退出 |
+| D.4 | `cagent watch` 非 TTY 下退化为单次 status |
+| D.5 | `cagent push` 输入 `n` / 回车 / Ctrl-C → 无 push 发生 |
+| D.6 | `--worker-model claude-haiku-4-5` 时 worker 命令行含 `--model` |
+| D.7 | 不可执行任务 → 标 noop，integrator 跳过 |
+| D.8 | `--timeout 1` → 标 failed，integrator 合入成功部分 |
+
+---
+
+## v10.0 Roadmap
+
+> 第四次全面评估（2026-05-23）。综合评分 8.2/10，测试充分性 7.5/10 为主要短板。
+> 详见 [SPEC_v10.md](SPEC_v10.md)。
+
+### Phase 71: 测试覆盖提升 — cli/run.py (P0) 🔴
+
+**目标**: cli/run.py 覆盖率 49% → 65%+
+
+| # | 任务 | 风险 | 说明 |
+|---|------|------|------|
+| 71.1 | `_dispatch_phase` mock 测试 | 中 | mock dispatcher.run，验证结果合并 + 计数输出 + budget 超限 |
+| 71.2 | `_integrate_phase` mock 测试 | 中 | mock integrator.integrate，验证 memory 写入 + 跳过 + 失败 |
+| 71.3 | `_summary_phase` mock 测试 | 低 | mock dashboard.flush + worktree 清理 + summary 输出 |
+| 71.4 | `_execute_run` 完整路径 mock 测试 | 中 | 三阶段串联 + KeyboardInterrupt + 异常处理 |
+| 71.5 | `_cmd_run_inner` 完整 run 路径 | 中 | mock _execute_run，验证参数传递 + config 加载 |
+| 71.6 | `_cmd_resume` 实际执行路径 | 中 | mock load_state + _execute_run，验证 base_sha fallback |
+
+### Phase 72: 测试覆盖提升 — integrator.py (P1) 🟡
+
+**目标**: integrator.py 覆盖率 66% → 80%+
+
+| # | 任务 | 风险 | 说明 |
+|---|------|------|------|
+| 72.1 | `_resolve_conflicts` 完整成功路径 | 中 | mock agent 返回 0 + grep 无残留 → done + dashboard 同步 |
+| 72.2 | `_resolve_conflicts` 冲突标记残留 | 低 | mock grep 发现残留 → abort_operation |
+| 72.3 | `_post_integrate_validate` repair 成功 | 中 | mock 第一轮失败 + agent 修复 + 第二轮成功 → True |
+| 72.4 | `_merge_strategy` 冲突解决成功 | 中 | mock merge 冲突 → resolve → integrated |
+| 72.5 | `_rebase_strategy` 冲突解决成功 | 中 | mock cherry-pick 冲突 → resolve → integrated |
+| 72.6 | squash commit 失败回滚 | 低 | mock commit 失败 → reset --hard base_sha |
+| 72.7 | `_rebase_strategy` run_id 显式传参 | 低 | 移除 `split('/')[1]` 硬编码，新增 run_id 参数 |
+
+### Phase 73: 测试覆盖提升 — server.py (P1) 🟡
+
+**目标**: server.py 覆盖率 64% → 75%+
+
+| # | 任务 | 风险 | 说明 |
+|---|------|------|------|
+| 73.1 | WebSocket 多帧拼接解码 | 低 | 构造 multi-frame payload 验证正确拼接 |
+| 73.2 | WebSocket ping/pong 处理 | 低 | 发送 ping 帧验证自动 pong 响应 |
+| 73.3 | 连接异常断开清理 | 低 | mock ConnectionResetError → 资源清理 |
+| 73.4 | HTTP 非 GET 方法处理 | 低 | POST/PUT → 405 Method Not Allowed |
+| 73.5 | 边界情况（超大帧、空帧） | 低 | 超过 _MAX_WS_FRAME_SIZE → 关闭连接 |
+
+### Phase 74: 收尾与文档同步 (P2) 🟢
+
+| # | 任务 | 风险 | 说明 |
+|---|------|------|------|
+| 74.1 | README.md 版本号同步 | 低 | v6.0.0 → v9.0.0，更新测试数和覆盖率 |
+| 74.2 | pyproject.toml fail_under 提升 | 低 | 75 → 78，与实际覆盖率匹配 |
+| 74.3 | 全量验证 | 低 | mypy 0 errors + 576+ tests + coverage ≥ 78% |
+| 74.4 | PLAN/CHECKLIST 状态同步 | 低 | 更新文档至最新状态 |
+
+---
 
 ## Architecture
 

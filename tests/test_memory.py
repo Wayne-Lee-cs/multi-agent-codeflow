@@ -164,3 +164,47 @@ class TestFileIsolation:
         mem2.write("task-001", "run 2 output")
         assert mem1.read("task-001") == "run 1 output"
         assert mem2.read("task-001") == "run 2 output"
+
+
+class TestAgentIdValidation:
+    """Tests for _validate_agent_id path traversal prevention (Phase 66.3)."""
+
+    def test_dotdot_slash_raises_value_error(self, tmp_path):
+        mem = RunMemory(tmp_path)
+        with pytest.raises(ValueError, match="Invalid agent_id"):
+            mem.write("../../../etc/passwd", "evil")
+
+    def test_slash_raises_value_error(self, tmp_path):
+        mem = RunMemory(tmp_path)
+        with pytest.raises(ValueError, match="Invalid agent_id"):
+            mem.write("sub/dir", "evil")
+
+    def test_backslash_raises_value_error(self, tmp_path):
+        mem = RunMemory(tmp_path)
+        with pytest.raises(ValueError, match="Invalid agent_id"):
+            mem.write("sub\\dir", "evil")
+
+    def test_empty_string_raises_value_error(self, tmp_path):
+        mem = RunMemory(tmp_path)
+        with pytest.raises(ValueError, match="Invalid agent_id"):
+            mem.write("", "content")
+
+    def test_normal_id_passes(self, tmp_path):
+        mem = RunMemory(tmp_path)
+        mem.write("task-001", "safe content")
+        assert mem.read("task-001") == "safe content"
+
+    def test_integrator_literal_passes(self, tmp_path):
+        mem = RunMemory(tmp_path)
+        mem.write("_integrator", "integrator output")
+        assert mem.read("_integrator") == "integrator output"
+
+    def test_append_rejects_traversal(self, tmp_path):
+        mem = RunMemory(tmp_path)
+        with pytest.raises(ValueError, match="Invalid agent_id"):
+            mem.append("../evil", "content")
+
+    def test_read_rejects_traversal(self, tmp_path):
+        mem = RunMemory(tmp_path)
+        with pytest.raises(ValueError, match="Invalid agent_id"):
+            mem.read("../evil")

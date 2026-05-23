@@ -5,6 +5,13 @@ from __future__ import annotations
 from pathlib import Path
 
 
+def _validate_agent_id(agent_id: str) -> str:
+    """Validate agent_id to prevent path traversal attacks."""
+    if not agent_id or ".." in agent_id or "/" in agent_id or "\\" in agent_id:
+        raise ValueError(f"Invalid agent_id: {agent_id!r}")
+    return agent_id
+
+
 class RunMemory:
     """Manages per-run, per-agent memory files.
 
@@ -25,12 +32,14 @@ class RunMemory:
 
     def write(self, agent_id: str, content: str) -> None:
         """Write memory for a specific agent (worker or integrator)."""
+        _validate_agent_id(agent_id)
         path = self._dir / f"{agent_id}.md"
         path.write_text(content, encoding="utf-8")
         self._version += 1
 
     def append(self, agent_id: str, content: str) -> None:
         """Append memory for a specific agent (preserves previous entries)."""
+        _validate_agent_id(agent_id)
         path = self._dir / f"{agent_id}.md"
         with open(path, "a", encoding="utf-8") as f:
             if f.seek(0, 2) > 0:
@@ -40,6 +49,7 @@ class RunMemory:
 
     def read(self, agent_id: str) -> str:
         """Read memory for a specific agent. Returns empty string if not found."""
+        _validate_agent_id(agent_id)
         path = self._dir / f"{agent_id}.md"
         if path.exists():
             return path.read_text(encoding="utf-8")

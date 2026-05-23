@@ -237,3 +237,19 @@ class TestParseTasksMd:
         tasks, conv = parse_tasks_md(f, "run-001")
         assert "Python 3.11+" in conv
         assert len(tasks) == 1
+
+    def test_field_format_lines_in_prompt_preserved(self, tmp_path):
+        """Prompt lines like '- **endpoint**: /users' should not be skipped (Phase 66.4)."""
+        f = tmp_path / "tasks.md"
+        f.write_text(
+            "### Task 001\n"
+            "- **depends_on**: none\n\n"
+            "Create the API endpoint.\n"
+            "- **endpoint**: /users\n"
+            "- **method**: GET\n",
+            encoding="utf-8",
+        )
+        tasks, _ = parse_tasks_md(f, "run-001")
+        assert len(tasks) == 1
+        assert "- **endpoint**: /users" in tasks[0].prompt
+        assert "- **method**: GET" in tasks[0].prompt

@@ -576,9 +576,11 @@ class DashboardServer:
 
     async def _send_cors_preflight(self, writer: asyncio.StreamWriter, origin: str) -> None:
         """Handle OPTIONS preflight request with CORS headers."""
-        allow_origin = origin or "*"
+        if not origin:
+            await self._send_http_response(writer, 204, b"")
+            return
         extra_headers = (
-            f"Access-Control-Allow-Origin: {allow_origin}\r\n"
+            f"Access-Control-Allow-Origin: {origin}\r\n"
             f"Access-Control-Allow-Methods: GET, OPTIONS\r\n"
             f"Access-Control-Allow-Headers: Content-Type\r\n"
             f"Access-Control-Max-Age: 600\r\n"

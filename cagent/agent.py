@@ -21,12 +21,18 @@ from cagent.safety import prepare_sandbox
 from cagent.tasks import Task
 
 
-@functools.lru_cache(maxsize=1)
+_claude_path_cache: str | None = None
+
+
 def _resolve_claude() -> str:
     """Find the claude CLI executable, handling Windows .cmd extension."""
+    global _claude_path_cache
+    if _claude_path_cache is not None:
+        return _claude_path_cache
     for name in ("claude", "claude.cmd", "claude.exe"):
         path = shutil.which(name)
         if path:
+            _claude_path_cache = path
             return path
     return "claude"  # fallback, will fail at launch with clear error
 
@@ -332,7 +338,7 @@ async def _commit_result(
         return AgentResult(task_id=task.id, status="noop")
 
     # Stage and commit
-    first_line = task.prompt.strip().split("\n")[0][:72]
+    first_line = task.prompt.strip().split("\n")[0][:72] or "(no description)"
     commit_msg = f"task {task.id}: {first_line}"
 
     # Exclude .claude/ sandbox files from commit

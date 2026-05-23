@@ -1,6 +1,6 @@
 [project]
 name = "cagent"
-version = "8.0.0"
+version = "9.0.0"
 description = "Concurrent agent workflow dispatcher — run multiple claude -p workers in parallel git worktrees"
 requires-python = ">=3.11"
 dependencies = []
@@ -34,7 +34,7 @@ source = ["cagent"]
 
 [tool.coverage.report]
 show_missing = true
-fail_under = 65
+fail_under = 75
 exclude_lines = [
     "pragma: no cover",
     "if __name__ == .__main__.",
