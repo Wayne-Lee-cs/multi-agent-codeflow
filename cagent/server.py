@@ -35,6 +35,8 @@ def _is_localhost_origin(origin: str) -> bool:
         parsed = urlparse(origin)
     except Exception:
         return False
+    if parsed.scheme not in ("http", "https"):
+        return False
     hostname = parsed.hostname or ""
     return hostname in ("127.0.0.1", "localhost", "::1")
 
@@ -291,11 +293,51 @@ class WebSocketConnection:
         except (ConnectionError, OSError):
             pass
 
+    async def read_frame(self) -> tuple[int, bytes] | None:
+        """Read one complete WebSocket frame (header + payload).
+
+        Returns (opcode, payload) or None on error/disconnect.
+        """
+        hdr = await self.reader.read(2)
+        if not hdr or len(hdr) < 2:
+            return None
+        first_byte = hdr[0]
+        second_byte = hdr[1]
+        opcode = first_byte & 0x0F
+        masked = bool(second_byte & 0x80)
+        payload_len = second_byte & 0x7F
+        if not masked:
+            return None
+        if payload_len == 126:
+            ext = await self.reader.read(2)
+            if len(ext) < 2:
+                return None
+            payload_len = struct.unpack(">H", ext)[0]
+        elif payload_len == 127:
+            ext = await self.reader.read(8)
+            if len(ext) < 8:
+                return None
+            payload_len = struct.unpack(">Q", ext)[0]
+        if payload_len > _MAX_WS_FRAME_SIZE:
+            return None
+        mask_key = await self.reader.read(4)
+        if len(mask_key) < 4:
+            return None
+        payload = await self.reader.read(payload_len)
+        if len(payload) < payload_len:
+            return None
+        payload = bytes(
+            b ^ mask_key[i % 4] for i, b in enumerate(payload)
+        )
+        return opcode, payload
+
 
 class DashboardServer:
     """HTTP + WebSocket server for live dashboard updates."""
 
-    def __init__(self, run_dir: Path, port: int = 8080, host: str = "127.0.0.1"):
+    _MAX_CONNECTIONS = 50
+
+    def __init__(self, run_dir: Path, port: int = 8080, host: str = "127.0.0.1", poll_interval: float = 1.0):
         self.run_dir = run_dir
         self.port = port
         self.host = host
@@ -305,6 +347,7 @@ class DashboardServer:
         self._last_tasks: dict[str, dict[str, Any]] = {}  # task_id -> last known state for diff
         self._server: asyncio.Server | None = None
         self._watch_task: asyncio.Task[None] | None = None
+        self._poll_interval = poll_interval
 
     async def start(self) -> None:
         """Start the HTTP/WebSocket server."""
@@ -406,7 +449,9 @@ class DashboardServer:
                 return
 
             # Handle HTTP requests
-            if method == "GET" and path in ("/", "/index.html"):
+            if method not in ("GET", "OPTIONS"):
+                await self._send_http_response(writer, 405, b"Method Not Allowed")
+            elif method == "GET" and path in ("/", "/index.html"):
                 await self._serve_dashboard(writer, headers)
             elif method == "GET" and path == "/api/data":
                 await self._serve_api_data(writer, headers)
@@ -464,6 +509,15 @@ class DashboardServer:
                 pass
             return
 
+        # Connection limit
+        if len(self.connections) >= self._MAX_CONNECTIONS:
+            await self._send_http_response(writer, 503, b"Service Unavailable: max connections reached")
+            try:
+                writer.close()
+            except (ConnectionError, OSError):
+                pass
+            return
+
         accept_key = hashlib.sha1(
             (key + "258EAFA5-E914-47DA-95CA-5AB5DC76E4B5").encode()
         ).digest()
@@ -491,48 +545,10 @@ class DashboardServer:
             # Keep connection alive and handle incoming frames
             while conn.connected:
                 try:
-                    frame = await asyncio.wait_for(reader.read(2), timeout=30.0)
-                    if not frame or len(frame) < 2:
+                    frame = await asyncio.wait_for(conn.read_frame(), timeout=30.0)
+                    if frame is None:
                         break
-
-                    # Parse frame header
-                    first_byte = frame[0]
-                    second_byte = frame[1]
-                    opcode = first_byte & 0x0F
-                    masked = bool(second_byte & 0x80)
-                    payload_len = second_byte & 0x7F
-
-                    # RFC 6455: server MUST close if client frame is not masked
-                    if not masked:
-                        break
-
-                    if payload_len == 126:
-                        ext = await reader.read(2)
-                        if len(ext) < 2:
-                            break
-                        payload_len = struct.unpack(">H", ext)[0]
-                    elif payload_len == 127:
-                        ext = await reader.read(8)
-                        if len(ext) < 8:
-                            break
-                        payload_len = struct.unpack(">Q", ext)[0]
-
-                    # Enforce frame size limit
-                    if payload_len > _MAX_WS_FRAME_SIZE:
-                        break
-
-                    mask_key = await reader.read(4)
-                    if len(mask_key) < 4:
-                        break
-
-                    payload = await reader.read(payload_len)
-                    if len(payload) < payload_len:
-                        break
-
-                    # Unmask payload
-                    payload = bytes(
-                        b ^ mask_key[i % 4] for i, b in enumerate(payload)
-                    )
+                    opcode, payload = frame
 
                     # Handle close frame
                     if opcode == 0x08:
@@ -691,7 +707,7 @@ class DashboardServer:
                     try:
                         mtime = os.stat(dashboard_path).st_mtime
                     except OSError:
-                        await asyncio.sleep(1)
+                        await asyncio.sleep(self._poll_interval)
                         continue
 
                     if mtime != self._last_mtime:
@@ -720,28 +736,30 @@ class DashboardServer:
                                 }
                                 await self._broadcast(json.dumps(msg))
 
-                await asyncio.sleep(1)
+                await asyncio.sleep(self._poll_interval)
             except asyncio.CancelledError:
                 break
             except Exception:
-                await asyncio.sleep(1)
+                await asyncio.sleep(self._poll_interval)
 
     async def _broadcast(self, message: str) -> None:
         """Send a message to all connected clients."""
-        disconnected = []
-        for conn in self.connections[:]:  # Copy list to allow removal during iteration
-            if conn.connected:
-                try:
-                    await conn.send(message)
-                except (ConnectionError, OSError):
-                    disconnected.append(conn)
-            else:
-                disconnected.append(conn)
+        if not self.connections:
+            return
+
+        active = [c for c in self.connections if c.connected]
+        results = await asyncio.gather(
+            *(c.send(message) for c in active),
+            return_exceptions=True,
+        )
 
         # Clean up disconnected clients
-        for conn in disconnected:
-            if conn in self.connections:
-                self.connections.remove(conn)
+        for conn, result in zip(active, results):
+            if isinstance(result, Exception) or not conn.connected:
+                if conn in self.connections:
+                    self.connections.remove(conn)
+        # Also remove any that were already disconnected before the send
+        self.connections[:] = [c for c in self.connections if c.connected]
 
 
 async def run_dashboard_server(run_dir: Path, port: int = 8080) -> None:

@@ -4,11 +4,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
+__all__ = ["RunMemory"]
+
 
 def _validate_agent_id(agent_id: str) -> str:
     """Validate agent_id to prevent path traversal attacks."""
+    import re
     if not agent_id or ".." in agent_id or "/" in agent_id or "\\" in agent_id:
         raise ValueError(f"Invalid agent_id: {agent_id!r}")
+    if "\x00" in agent_id:
+        raise ValueError(f"Invalid agent_id (null byte): {agent_id!r}")
+    if not re.match(r"^[a-zA-Z0-9_-]+$", agent_id):
+        raise ValueError(f"Invalid agent_id (must be alphanumeric/dash/underscore): {agent_id!r}")
     return agent_id
 
 

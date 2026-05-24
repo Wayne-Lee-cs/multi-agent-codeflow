@@ -140,7 +140,7 @@ def _print_auth_diagnostics() -> None:
         if val is None:
             print(f"  {var}: not set", file=sys.stderr)
         elif var == "ANTHROPIC_API_KEY":
-            print(f"  {var}: {val[:8]}...{val[-4:]}" if len(val) > 12 else f"  {var}: (set, short)", file=sys.stderr)
+            print(f"  {var}: (set, length={len(val)})", file=sys.stderr)
         else:
             print(f"  {var}: {val}", file=sys.stderr)
 
@@ -156,7 +156,7 @@ def _get_repo_root() -> Path:
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, check=True,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", check=True,
         )
     except subprocess.CalledProcessError:
         print("Error: not inside a git repository.", file=sys.stderr)

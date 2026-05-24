@@ -193,6 +193,14 @@ class TestOriginValidation:
         from cagent.server import _is_localhost_origin
         assert _is_localhost_origin("") is False
 
+    def test_non_http_scheme_rejected(self) -> None:
+        """Non-http/https schemes are rejected to prevent bypass."""
+        from cagent.server import _is_localhost_origin
+        assert _is_localhost_origin("file://localhost") is False
+        assert _is_localhost_origin("ftp://localhost") is False
+        assert _is_localhost_origin("ws://localhost:8080") is False
+        assert _is_localhost_origin("custom://127.0.0.1") is False
+
     @pytest.mark.asyncio
     async def test_websocket_rejects_non_localhost_origin(self, run_dir: Path) -> None:
         """WebSocket upgrade with non-localhost origin returns 403."""
@@ -1188,6 +1196,38 @@ class TestBroadcast:
         await server._broadcast('{"type": "test"}')
 
         assert conn not in server.connections
+
+    @pytest.mark.asyncio
+    async def test_max_connections_limit(self, run_dir: Path) -> None:
+        """New connections are rejected when max limit is reached."""
+        server = DashboardServer(run_dir, port=8080)
+
+        # Fill up connections to the limit
+        for _ in range(DashboardServer._MAX_CONNECTIONS):
+            mock_conn = AsyncMock()
+            mock_conn.connected = True
+            server.connections.append(mock_conn)
+
+        # Simulate a new WebSocket connection attempt
+        reader = AsyncMock()
+        writer = AsyncMock()
+        writer.drain = AsyncMock()
+        writer.close = MagicMock()
+        writer.write = MagicMock()
+
+        # Simulate headers with valid WebSocket key and localhost origin
+        headers = {
+            "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==",
+            "sec-websocket-version": "13",
+            "origin": "http://localhost:8080",
+        }
+
+        await server._handle_websocket(reader, writer, headers)
+
+        # Should get 503 response
+        written = writer.write.call_args[0][0]
+        assert b"503" in written
+        writer.close.assert_called()
 
 
 class TestHandleConnectionHeaderLimits:

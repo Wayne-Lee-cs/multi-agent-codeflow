@@ -7,6 +7,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+__all__ = ["GitTimeoutError", "GitResult", "run_git", "run_git_async"]
+
 
 class GitTimeoutError(RuntimeError):
     """Raised when a git command exceeds its timeout."""
@@ -27,7 +29,12 @@ def run_git(
     cwd: str | Path | None = None,
     timeout: int = 60,
 ) -> subprocess.CompletedProcess[str]:
-    """Run a git command synchronously, raising RuntimeError on failure."""
+    """Run a git command synchronously.
+
+    Raises:
+        GitTimeoutError: when the command exceeds *timeout* seconds.
+        RuntimeError: when git is not found or returns a non-zero exit code.
+    """
     try:
         return subprocess.run(
             ["git", *args],
@@ -42,7 +49,7 @@ def run_git(
     except FileNotFoundError:
         raise RuntimeError("'git' not found in PATH. Please install Git.")
     except subprocess.TimeoutExpired:
-        raise RuntimeError(f"git {' '.join(args)} timed out after {timeout}s")
+        raise GitTimeoutError(f"git {' '.join(args)} timed out after {timeout}s")
     except subprocess.CalledProcessError as e:
         raise RuntimeError(
             f"git {' '.join(args)} failed (exit {e.returncode}): {e.stderr.strip()}"

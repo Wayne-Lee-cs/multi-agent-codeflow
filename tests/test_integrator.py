@@ -670,6 +670,19 @@ class TestValidateCmdStr:
         # Backticks trigger command substitution in bash — rejected
         assert _validate_cmd_str("echo `date`") is False
 
+    def test_trailing_newline_rejected(self) -> None:
+        """Python's $ matches before trailing \\n — re.fullmatch closes this."""
+        from cagent.integrator import _validate_cmd_str
+        assert _validate_cmd_str("safe\n") is False
+
+    def test_trailing_crlf_rejected(self) -> None:
+        from cagent.integrator import _validate_cmd_str
+        assert _validate_cmd_str("safe\r\n") is False
+
+    def test_embedded_newline_rejected(self) -> None:
+        from cagent.integrator import _validate_cmd_str
+        assert _validate_cmd_str("safe\nrm -rf /") is False
+
 
 # --- _run_claude_agent stdin timeout + FileNotFoundError tests ---
 

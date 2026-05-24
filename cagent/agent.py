@@ -20,6 +20,7 @@ from cagent.progress import Dashboard, EventParser, _truncate_jsonl_if_large
 from cagent.safety import prepare_sandbox
 from cagent.tasks import Task
 
+__all__ = ["AgentResult", "run_agent"]
 
 _claude_path_cache: str | None = None
 

@@ -15,6 +15,8 @@ from cagent.progress import Dashboard
 from cagent.tasks import Task, dump_state
 from cagent.worktree import create_worktree
 
+__all__ = ["run"]
+
 _RETRYABLE_PATTERNS = [
     _re.compile(r"\btimeout\b", _re.IGNORECASE),
     _re.compile(r"\brate[\s_]limit\b", _re.IGNORECASE),

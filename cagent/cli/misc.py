@@ -57,6 +57,16 @@ def _cmd_clean(args: argparse.Namespace) -> None:
         if response not in ("y", "yes"):
             print("Aborted.")
             return
+    elif args.all:
+        # --all --force: require explicit confirmation since this deletes everything
+        try:
+            response = input("\nWARNING: --all --force will permanently delete ALL run data. Type 'yes' to confirm: ").strip().lower()
+        except EOFError:
+            print("Aborted.")
+            return
+        if response != "yes":
+            print("Aborted.")
+            return
 
     for run_dir in target_runs:
         if not run_dir.is_dir():
@@ -64,13 +74,10 @@ def _cmd_clean(args: argparse.Namespace) -> None:
         wt_base = repo_root / ".cagent" / "worktrees" / run_dir.name
         if wt_base.exists():
             for wt in list(wt_base.iterdir()):
-                try:
-                    subprocess.run(
-                        ["git", "worktree", "remove", "--force", str(wt)],
-                        cwd=repo_root, capture_output=True,
-                    )
-                except subprocess.CalledProcessError:
-                    pass
+                subprocess.run(
+                    ["git", "worktree", "remove", "--force", str(wt)],
+                    cwd=repo_root, capture_output=True,
+                )
             try:
                 wt_base.rmdir()
             except OSError:
@@ -80,7 +87,7 @@ def _cmd_clean(args: argparse.Namespace) -> None:
         try:
             result = subprocess.run(
                 ["git", "branch", "--list", f"cagent/{run_id}/*"],
-                cwd=repo_root, capture_output=True, text=True,
+                cwd=repo_root, capture_output=True, text=True, encoding="utf-8", errors="replace",
             )
             for branch in result.stdout.splitlines():
                 branch = branch.strip().removeprefix("* ")
@@ -113,13 +120,13 @@ def _cmd_push(args: argparse.Namespace) -> None:
 
     check = subprocess.run(
         ["git", "rev-parse", "--verify", branch],
-        cwd=repo_root, capture_output=True, text=True,
+        cwd=repo_root, capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if check.returncode != 0:
         print(f"Error: branch '{branch}' not found.", file=sys.stderr)
         result = subprocess.run(
             ["git", "branch", "--list", "cagent/*"],
-            cwd=repo_root, capture_output=True, text=True,
+            cwd=repo_root, capture_output=True, text=True, encoding="utf-8", errors="replace",
         )
         branches = [b.strip().removeprefix("* ") for b in result.stdout.splitlines() if b.strip()]
         if branches:
@@ -130,7 +137,7 @@ def _cmd_push(args: argparse.Namespace) -> None:
 
     result = subprocess.run(
         ["git", "log", "--oneline", f"HEAD..{branch}"],
-        cwd=repo_root, capture_output=True, text=True,
+        cwd=repo_root, capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if result.stdout.strip():
         print("Commits to push:")
@@ -138,7 +145,7 @@ def _cmd_push(args: argparse.Namespace) -> None:
     else:
         result = subprocess.run(
             ["git", "log", "--oneline", "-5", branch],
-            cwd=repo_root, capture_output=True, text=True,
+            cwd=repo_root, capture_output=True, text=True, encoding="utf-8", errors="replace",
         )
         print(f"Recent commits on {branch}:")
         print(result.stdout)
@@ -155,7 +162,7 @@ def _cmd_push(args: argparse.Namespace) -> None:
     result = subprocess.run(
         ["git", "push", "-u", "origin", branch],
         cwd=repo_root,
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if result.returncode == 0:
         print(f"Pushed {branch} to origin.")
@@ -201,7 +208,7 @@ def _cmd_branches(args: argparse.Namespace) -> None:
             "--format=%(refname:short)|%(objectname:short)|%(subject)",
             "refs/heads/cagent/",
         ],
-        cwd=repo_root, capture_output=True, text=True,
+        cwd=repo_root, capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if not result.stdout.strip():
         print("No cagent branches found.")

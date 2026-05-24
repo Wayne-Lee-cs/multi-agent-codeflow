@@ -270,7 +270,8 @@ class TestCmdClean:
         args.force = True
         args.memory = True
 
-        with patch("cagent.cli.misc._get_repo_root", return_value=tmp_path):
+        with patch("cagent.cli.misc._get_repo_root", return_value=tmp_path), \
+             patch("builtins.input", return_value="yes"):
             _cmd_clean(args)
 
         assert not run_dir.exists()
@@ -293,7 +294,8 @@ class TestCmdClean:
         args.force = True
         args.memory = False
 
-        with patch("cagent.cli.misc._get_repo_root", return_value=tmp_path):
+        with patch("cagent.cli.misc._get_repo_root", return_value=tmp_path), \
+             patch("builtins.input", return_value="yes"):
             _cmd_clean(args)
 
         assert mem_dir.exists()
@@ -967,6 +969,22 @@ class TestCmdResume:
         assert merged[1].status == "done"
         assert merged[1].commit_sha == "b" * 40
 
+    def test_resume_path_traversal_rejected(self, tmp_path, capsys):
+        """Path traversal in --resume argument is rejected."""
+        from cagent.cli.run import _cmd_resume
+
+        args = MagicMock()
+        args.resume = "../../etc/passwd"
+
+        runs_dir = tmp_path / ".cagent" / "runs"
+        runs_dir.mkdir(parents=True)
+
+        with pytest.raises(SystemExit, match="1"):
+            _cmd_resume(args, tmp_path)
+
+        err = capsys.readouterr().err
+        assert "path traversal" in err.lower()
+
 
 class TestCleanWorktrees:
     """Tests for _clean_worktrees (60.2.4)."""
@@ -1414,7 +1432,8 @@ class TestCmdCleanExtra:
         args.force = True
         args.memory = True
 
-        with patch("cagent.cli.misc._get_repo_root", return_value=tmp_path):
+        with patch("cagent.cli.misc._get_repo_root", return_value=tmp_path), \
+             patch("builtins.input", return_value="yes"):
             _cmd_clean(args)
 
         out = capsys.readouterr().out

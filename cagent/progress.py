@@ -17,6 +17,12 @@ from cagent.compat import atomic_write
 _log = logging.getLogger(__name__)
 
 
+_VALID_EVENT_KINDS = frozenset({
+    "start", "tool_use", "tool_result", "text", "thinking",
+    "denied", "done", "error",
+})
+
+
 @dataclass
 class Event:
     ts: float
@@ -269,9 +275,12 @@ class Dashboard:
                     for k, v in tp_dict.items():
                         if k == "last_event" and v is not None:
                             # Defensive rebuild: handle missing fields gracefully
+                            event_kind = v.get("kind", "text")
+                            if event_kind not in _VALID_EVENT_KINDS:
+                                event_kind = "text"
                             tp.last_event = Event(
                                 ts=v.get("ts", 0.0),
-                                kind=v.get("kind", "text"),
+                                kind=event_kind,
                                 summary=v.get("summary", ""),
                                 raw=v.get("raw", {}),
                             )

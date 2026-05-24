@@ -11,6 +11,8 @@ from typing import Any, Literal
 
 from cagent.compat import atomic_write
 
+__all__ = ["Task", "parse_tasks_file", "parse_tasks_md", "dump_state", "load_state"]
+
 
 @dataclass
 class Task:
@@ -172,6 +174,11 @@ def _split_task_blocks(markdown: str) -> list[str]:
             if current:
                 blocks.append("\n".join(current))
             current = [line]
+        elif line.strip().startswith("## ") and not line.strip().startswith("### "):
+            # Stop at ## headings (like ## Conventions) but not ### sub-headings
+            if current:
+                blocks.append("\n".join(current))
+                current = []
         elif current:
             current.append(line)
     if current:

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Literal
 
 from cagent.agent import _resolve_claude
 from cagent.git_utils import GitResult
@@ -16,6 +18,8 @@ from cagent.memory import RunMemory
 from cagent.progress import Dashboard, Event, EventParser
 from cagent.safety import prepare_sandbox
 from cagent.tasks import Task
+
+__all__ = ["integrate"]
 
 
 async def integrate(
@@ -89,6 +93,7 @@ async def integrate(
             dashboard=dashboard,
             memory=memory,
             api_key=api_key,
+            run_id=run_id,
         )
     else:
         # Default: cherry-pick
@@ -143,7 +148,11 @@ async def integrate(
 
     # Squash if requested
     if squash:
-        await _run_git("reset", "--soft", base_sha, cwd=worktree_path)
+        try:
+            await _run_git("reset", "--soft", base_sha, cwd=worktree_path)
+        except RuntimeError:
+            await _run_git("reset", "--hard", base_sha, cwd=worktree_path, check=False)
+            raise
         # Remove sandbox files from index (they may have been committed during conflict resolution)
         await _run_git("rm", "--cached", "-r", ".claude/", cwd=worktree_path, check=False)
         summary_parts = [f"task {t.id}: {t.prompt.split(chr(10))[0][:50]}" for t in integrated]
@@ -167,10 +176,14 @@ def _validate_cmd_str(cmd_str: str) -> bool:
     control characters and null bytes that could cause unexpected behavior in
     subprocess invocation.
     """
-    import re
+    # Defense-in-depth: explicitly reject control characters before regex check.
+    # Python's $ anchor matches before trailing \n, so re.match alone allows
+    # "safe\n" to pass. Rejecting upfront closes this edge case.
+    if any(c in cmd_str for c in '\n\r\t\x00'):
+        return False
     # Only match space (0x20), not other whitespace like \n, \r, \t
     pattern = r'^[\w .\-\/\\:=+,@~()\[\]{}|&;!?\*#$%^\'"<>]+$'
-    return bool(re.match(pattern, cmd_str))
+    return bool(re.fullmatch(pattern, cmd_str))
 
 
 async def _run_shell_cmd(
@@ -179,12 +192,10 @@ async def _run_shell_cmd(
     timeout: float = 300,
 ) -> tuple[int, str]:
     """Run a shell command string and return (returncode, combined output)."""
-    import sys as _sys
-
     if not _validate_cmd_str(cmd_str):
         return 1, f"Command rejected: contains disallowed characters. Only alphanumeric, spaces, and common shell characters are allowed."
 
-    if _sys.platform == "win32":
+    if sys.platform == "win32":
         proc = await asyncio.create_subprocess_exec(
             "cmd", "/c", cmd_str,
             cwd=str(cwd),
@@ -662,6 +673,16 @@ async def _run_git(
     )
 
 
+def _report(
+    dashboard: Dashboard | None,
+    kind: Literal["start", "tool_use", "tool_result", "text", "thinking", "denied", "done", "error"],
+    summary: str,
+) -> None:
+    """Send an event to the dashboard if available."""
+    if dashboard:
+        dashboard.update("_integrator", Event(ts=time.time(), kind=kind, summary=summary, raw={}))
+
+
 async def _cherry_pick_strategy(
     tasks: list[Task],
     worktree_path: Path,
@@ -691,26 +712,12 @@ async def _cherry_pick_strategy(
             )
         except Exception as e:
             success = False
-            if dashboard:
-                event = Event(
-                    ts=time.time(),
-                    kind="error",
-                    summary=f"cherry-pick task {task.id} exception: {e}",
-                    raw={},
-                )
-                dashboard.update("_integrator", event)
+            _report(dashboard, "error", f"cherry-pick task {task.id} exception: {e}")
         if success:
             integrated.append(task)
         else:
             failed.append(task)
-            if dashboard:
-                event = Event(
-                    ts=time.time(),
-                    kind="error",
-                    summary=f"cherry-pick task {task.id} failed, skipping",
-                    raw={},
-                )
-                dashboard.update("_integrator", event)
+            _report(dashboard, "error", f"cherry-pick task {task.id} failed, skipping")
     return integrated, failed
 
 
@@ -737,14 +744,7 @@ async def _merge_strategy(
             failed.append(task)
             continue
 
-        if dashboard:
-            event = Event(
-                ts=time.time(),
-                kind="text",
-                summary=f"merging task {task.id}...",
-                raw={},
-            )
-            dashboard.update("_integrator", event)
+        _report(dashboard, "text", f"merging task {task.id}...")
 
         # Create a temporary branch for the task (unique per run)
         task_branch = f"cagent/{run_id}/task-{task.id}"
@@ -757,14 +757,7 @@ async def _merge_strategy(
 
             if result.returncode == 0:
                 integrated.append(task)
-                if dashboard:
-                    event = Event(
-                        ts=time.time(),
-                        kind="text",
-                        summary=f"task {task.id} merged successfully",
-                        raw={},
-                    )
-                    dashboard.update("_integrator", event)
+                _report(dashboard, "text", f"task {task.id} merged successfully")
             else:
                 # Check for conflicts
                 status = await _run_git("status", "--porcelain", cwd=worktree_path, check=False)
@@ -791,14 +784,7 @@ async def _merge_strategy(
                     await _run_git("merge", "--abort", cwd=worktree_path, check=False)
         except Exception as e:
             failed.append(task)
-            if dashboard:
-                event = Event(
-                    ts=time.time(),
-                    kind="error",
-                    summary=f"merge task {task.id} exception: {e}",
-                    raw={},
-                )
-                dashboard.update("_integrator", event)
+            _report(dashboard, "error", f"merge task {task.id} exception: {e}")
 
     # Clean up temporary branches
     for branch in temp_branches:
@@ -818,6 +804,7 @@ async def _rebase_strategy(
     dashboard: Dashboard | None,
     memory: RunMemory | None,
     api_key: str | None = None,
+    run_id: str = "",
 ) -> tuple[list[Task], list[Task]]:
     """Rebase strategy: replay task commits onto integration branch.
 
@@ -834,21 +821,15 @@ async def _rebase_strategy(
         return [], list(tasks)
 
     # Create a temporary branch (unique per run)
-    run_id = integration_branch.split("/")[1]
+    if not run_id:
+        run_id = integration_branch.split("/")[1]
     temp_branch = f"cagent/{run_id}/temp-rebase"
     try:
         # Create temp branch from current HEAD
         await _run_git("checkout", "-b", temp_branch, cwd=worktree_path, check=True)
 
         for task, sha in task_commits:
-            if dashboard:
-                event = Event(
-                    ts=time.time(),
-                    kind="text",
-                    summary=f"rebasing task {task.id}...",
-                    raw={},
-                )
-                dashboard.update("_integrator", event)
+            _report(dashboard, "text", f"rebasing task {task.id}...")
 
             # Try cherry-pick during rebase
             result = await _run_git("cherry-pick", sha, cwd=worktree_path, check=False)
@@ -887,14 +868,7 @@ async def _rebase_strategy(
         await _run_git("checkout", integration_branch, cwd=worktree_path, check=False)
 
     except Exception as e:
-        if dashboard:
-            event = Event(
-                ts=time.time(),
-                kind="error",
-                summary=f"rebase strategy exception: {e}",
-                raw={},
-            )
-            dashboard.update("_integrator", event)
+        _report(dashboard, "error", f"rebase strategy exception: {e}")
         failed = [t for t in tasks if t not in integrated]
     finally:
         # Clean up temp branch

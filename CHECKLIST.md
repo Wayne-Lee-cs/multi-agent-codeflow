@@ -8,7 +8,8 @@
 > **v7.0 (2026-05-23)**: 全面评估发现 19 个新问题。342 tests, 59% 覆盖率, mypy 0 errors。
 > **v8.0 (2026-05-23)**: 二次全面评估发现 15 个新问题。460 tests, 68% 覆盖率, mypy 0 errors。
 > **v9.0 (2026-05-23)**: 第三次全面审查发现 6 Bug + 6 优化。第四轮代码审查发现 4 P2 + 6 P3。Phase 66-70 全部完成。576 tests, 76% coverage。
-> **v10.0 (2026-05-23)**: 第四次全面评估，综合评分 8.2/10。测试覆盖为最大短板（cli/run.py 49%, integrator.py 66%, server.py 64%）。Phase 71-74 规划。
+> **v10.0 (2026-05-23)**: 第四次全面评估，综合评分 8.2/10。并行代码审查发现 42 个新问题（4 HIGH, 16 MEDIUM, 20 LOW）。Phase 71-76 规划，共 79 项。
+> **v11.0 (2026-05-24)**: 第五次全面评估，综合评分 8.17/10。发现 15 项新问题（S1 换行绕过 P0 安全漏洞, 5 安全, 5 Bug, 2 性能, 2 架构）。Phase 77-79 规划，共 32 项。
 > This file tracks only **remaining** and **new** work.
 
 ---
@@ -513,9 +514,9 @@
 ## v7.0 — Phase 62: 架构优化 (P2-P3, 2026-05-23)
 
 ### 62.1 配置值范围校验
-- [ ] **62.1.1** `config.py` — `_VALID_KEYS` 扩展为 `{key: (type, min, max)}` 格式
-- [ ] **62.1.2** `_parse_and_validate` 中添加 `jobs >= 1`, `timeout > 0`, `retries >= 0` 约束
-- [ ] **62.1.3** 测试：越界值被忽略（不加载到 config）
+- [x] **62.1.1** `config.py` — `_VALID_KEYS` 扩展为 `{key: (type, min, max)}` 格式 *(已修复)*
+- [x] **62.1.2** `_parse_and_validate` 中添加 `jobs >= 1`, `timeout > 0`, `retries >= 0` 约束 *(已修复)*
+- [x] **62.1.3** 测试：越界值被忽略（不加载到 config） *(已修复: strategy 校验 + 范围校验)*
 
 ### 62.2 Dashboard 类拆分
 - [ ] **62.2.1** 提取 `EventTracker` — 负责 TaskProgress 更新 + 事件回调
@@ -1012,6 +1013,106 @@
 
 ---
 
+## v10.0 — Phase 75: 代码审查修复 — HIGH (P0, 2026-05-23)
+
+### 75.1 git_utils 异常类型统一
+
+- [x] **75.1.1** `git_utils.py:45` — `run_git` 超时从 `RuntimeError` 改为 `GitTimeoutError`
+- [x] **75.1.2** `git_utils.py:84` — 确认 `run_git_async` 已使用 `GitTimeoutError`
+- [x] **75.1.3** 全局搜索 — `except RuntimeError` 已兼容（`GitTimeoutError` 继承 `RuntimeError`）
+- [x] **75.1.4** 测试 — 添加 `run_git` 超时抛 `GitTimeoutError` 的测试
+
+### 75.2 `_HOOK_SCRIPT` 模板安全
+
+- [x] **75.2.1** `safety.py:226-229` — `.replace()` 改为 `string.Template.substitute()`
+- [ ] **75.2.2** 测试 — 验证 DENY_PATTERNS 含特殊字符时 hook 脚本仍正确生成
+
+### 75.3 `_is_localhost_origin` scheme 校验
+
+- [x] **75.3.1** `server.py:24-39` — 添加 `parsed.scheme in ("http", "https")` 校验
+- [x] **75.3.2** 测试 — `file://localhost` 返回 False，`http://localhost` 返回 True
+
+### 75.4 `_run_lock` 过期锁检测
+
+- [x] **75.4.1** `cli/run.py:34-88` — 获取锁前读取 PID，检查是否活跃，过期则清理
+- [x] **75.4.2** `cli/run.py:44-46` — `--force` 改为打印警告后继续（而非完全跳过）
+- [ ] **75.4.3** 测试 — 过期锁文件被自动清理的测试
+
+---
+
+## v10.0 — Phase 76: 代码审查修复 — MEDIUM (P1, 2026-05-23)
+
+### 76.1 `enable_ansi()` 返回值
+
+- [ ] **76.1.1** `compat.py:46-51` — Windows 分支 `try/except OSError`，返回 `bool`
+- [ ] **76.1.2** 调用方 — `cli/watch.py` 等根据返回值决定是否使用 ANSI
+
+### 76.2 `run_git_async` Windows 子进程清理
+
+- [ ] **76.2.1** `git_utils.py:80-81` — Windows 上超时时用 `taskkill /F /T /PID` 杀进程树
+
+### 76.3 `_validate_agent_id` null byte
+
+- [ ] **76.3.1** `memory.py:10` — 添加 `"\x00" in agent_id` 检查
+- [ ] **76.3.2** 测试 — 含 null byte 的 agent_id 被拒绝
+
+### 76.4 `memory.py` OSError 处理
+
+- [ ] **76.4.1** `memory.py:37` — `append()` 添加 `try/except OSError`
+- [ ] **76.4.2** `memory.py:44-47` — `write()` 添加 `try/except OSError`
+- [ ] **76.4.3** `memory.py:55` — `read()` 添加 `try/except OSError`
+
+### 76.5 `DENY_PATTERNS` 绝对路径
+
+- [x] **76.5.1** `safety.py:33-62` — `_check_tokens` 中检测绝对路径调用并拒绝 *(已修复: Path(base).name 提取基础命令名)*
+
+### 76.6 close 帧状态码
+
+- [ ] **76.6.1** `server.py:538-539` — 解析 close 帧 2 字节状态码并回送
+
+### 76.7 `ensure_future` → `create_task`
+
+- [ ] **76.7.1** `server.py:760-766` — 替换 `asyncio.ensure_future()` 为 `asyncio.create_task()`
+
+### 76.8 API key 诊断泄露
+
+- [x] **76.8.1** `cli/base.py:143` — `_print_auth_diagnostics` 仅输出 `(set, length=N)` *(已修复)*
+
+### 76.9 `auth_ok` 并发写入
+
+- [ ] **76.9.1** `cli/base.py:67-76` — 使用 `atomic_write` 替代 `write_text`
+
+### 76.10 `_is_pid_active` PID 复用
+
+- [ ] **76.10.1** `cli/base.py:196-204` — Windows 上使用 `GetExitCodeProcess` 检查
+
+### 76.11 `_run_lock` force 模式
+
+- [ ] **76.11.1** `cli/run.py:44-46` — `--force` 获取锁失败时打印警告但仍继续
+
+### 76.12 CLI git 操作统一
+
+- [ ] **76.12.1** `cli/run.py:367,509,516` — 迁移到 `git_utils` 封装
+- [ ] **76.12.2** `cli/misc.py:68,80,88,114,131,139,155,198` — 迁移到 `git_utils` 封装
+
+### 76.13 symlink 循环保护
+
+- [x] **76.13.1** `cli/plan.py:14-35` — 检查 `entry.is_symlink()` 并跳过 *(已修复)*
+
+### 76.14 `_cleanup_sandbox` 双重执行
+
+- [ ] **76.14.1** `cli/plan.py:87` — 不在 finally 中 `atexit.unregister`，让 atexit 作为兜底
+
+### 76.15 `_follow_file` 文件消失检测
+
+- [ ] **76.15.1** `cli/logcmd.py:48-60` — 添加文件存在性检查，连续空读超限后退出
+
+### 76.16 `_cmd_clean --all --force` 确认
+
+- [x] **76.16.1** `cli/misc.py:24-25` — `--all --force` 组合要求输入 "yes" 确认 *(已修复)*
+
+---
+
 ## v10.0 Progress Summary
 
 | Phase | Items | Status |
@@ -1020,4 +1121,108 @@
 | Phase 72 (integrator.py 测试 P1) | 13 | **TODO** |
 | Phase 73 (server.py 测试 P1) | 10 | **TODO** |
 | Phase 74 (收尾文档 P2) | 6 | **TODO** |
-| **Total v10.0** | **47** | **0/47 完成** |
+| Phase 75 (审查修复 HIGH P0) | 10 | **9/10 完成** |
+| Phase 76 (审查修复 MEDIUM P1) | 22 | **6/22 完成** (76.5+76.8+76.13+76.16 + encoding fixes) |
+| **Total v10.0** | **79** | **15/79 完成** |
+
+---
+
+## Phase 77: 安全修复 (P0) 🔴 — v11.0 评估 (2026-05-24)
+
+> S1 `_validate_cmd_str` 换行符绕过 — P0 安全漏洞，立即修复。
+
+### 77.1 `_validate_cmd_str` 换行符/tab/CR 绕过修复
+
+- [x] **77.1.1** `integrator.py:166-177` — `re.match` 只检查首行，`\n` 后的内容不受验证。改用 `re.fullmatch` 使整个字符串必须匹配 *(已修复)*
+- [x] **77.1.2** `integrator.py:167` — 字符白名单已不含 `\n`/`\r`/`\t`，添加前置检查作为 defense-in-depth *(已修复)*
+- [x] **77.1.3** `integrator.py:166` — 添加前置检查: `if any(c in cmd_str for c in '\n\r\t\x00'): return False` *(已修复)*
+- [x] **77.1.4** 测试 — `_validate_cmd_str("safe\nunsafe")` 返回 False *(已添加 test_trailing_newline_rejected)*
+- [x] **77.1.5** 测试 — `_validate_cmd_str("safe\r\nunsafe")` 返回 False *(已添加 test_trailing_crlf_rejected)*
+- [x] **77.1.6** 测试 — `_validate_cmd_str("echo\there")` 返回 False *(已有 test_tab_char_rejected)*
+
+---
+
+## Phase 78: 安全+健壮性 (P1) 🟡 — v11.0
+
+### 78.1 WebSocket 最大连接数限制
+
+- [x] **78.1.1** `server.py` — 添加类常量 `_MAX_CONNECTIONS = 50` *(已修复)*
+- [x] **78.1.2** `server.py` `_handle_websocket` — 连接前检查 `len(self.connections) >= _MAX_CONNECTIONS`，超限返回 503 并关闭 *(已修复)*
+- [x] **78.1.3** 测试 — 超过最大连接数时新连接被拒绝 *(已添加 test_max_connections_limit)*
+
+### 78.2 `args.resume` 路径遍历防护
+
+- [x] **78.2.1** `cli/run.py:486` — `Path(args.resume).resolve()` 后校验路径在 `.cagent/runs/` 下 *(已修复)*
+- [x] **78.2.2** `cli/run.py` — 非法路径抛出 `SystemExit` *(已修复)*
+- [x] **78.2.3** 测试 — `--resume ../../etc/passwd` 被拒绝 *(已添加 test_resume_path_traversal_rejected)*
+- [x] **78.2.4** 测试 — `--resume .cagent/runs/valid-run` 正常通过 *(已有 test_resume_calls_execute_run 覆盖)*
+
+### 78.3 `_broadcast` 并行发送
+
+- [x] **78.3.1** `server.py` — 改为 `asyncio.gather()` 并行发送 *(已修复)*
+- [x] **78.3.2** `server.py` — gather 返回异常的连接标记为断开并移除 *(已修复)*
+
+### 78.4 DENY_PATTERNS 补充 ruby/perl
+
+- [x] **78.4.1** `safety.py:63` — 添加 `r"\bruby\s+-e\b"` 和 `r"\bperl\s+-e\b"` 到 DENY_PATTERNS *(已修复)*
+- [x] **78.4.2** 测试 — `ruby -e 'system("rm -rf /")'` 被拒绝 *(已添加)*
+- [x] **78.4.3** 测试 — `perl -e 'exec("git push")'` 被拒绝 *(已添加)*
+
+### 78.5 `env_continue` 冗余构建 — ~~误报~~
+
+- ~~**78.5.1**~~ 代码审查：`_ensure_no_claude_dir` 不存在，`env_continue` 已在 597 行构建一次复用。无需修改。
+
+### 78.6 `_broadcast` 错误连接未移除 — ~~误报~~
+
+- ~~**78.6.1**~~ 代码审查：`_broadcast` 已在 742-745 行正确清理断开连接。无需修改。
+
+---
+
+## Phase 79: 代码质量 (P2) 🟢 — v11.0
+
+### 79.1 `ref_content` 截断提示
+
+- [x] **79.1.1** `cli/plan.py` — `ref_content[:4000]` 截断时打印 `"Warning: reference content truncated from N to 4000 chars"` *(已修复)*
+
+### 79.2 `_summary_phase` memory_dir 异常保护
+
+- [x] **79.2.1** `cli/run.py` — `any(memory_dir.iterdir())` 包裹 `try/except (OSError, PermissionError)` *(已修复)*
+
+### 79.3 Dashboard 加载 kind 值验证
+
+- [x] **79.3.1** `progress.py` — 加载 dashboard 时校验 `kind` 值在 `_VALID_EVENT_KINDS` 内，无效值 fallback 为 "text" *(已修复)*
+
+### 79.4 `_read_frame` 提取为方法
+
+- [x] **79.4.1** `server.py` — `_read_frame` 从 while 循环内闭包提取为 `WebSocketConnection.read_frame()` 实例方法 *(已修复)*
+- [x] **79.4.2** 验证 — 585 测试全部通过 *(已验证)*
+
+### 79.5 integrator 策略代码去重
+
+- [x] **79.5.1** `integrator.py` — 提取 `_report()` helper 统一 dashboard 事件发送，三策略中 14 处 Event 构造简化 *(已修复)*
+- [x] **79.5.2** `_cherry_pick_strategy` / `_merge_strategy` / `_rebase_strategy` 调用 `_report()` *(已修复)*
+- [x] **79.5.3** 验证 — mypy 0 errors + 585 测试全部通过 *(已验证)*
+
+### 79.6 `__all__` 导出控制
+
+- [x] **79.6.1** `agent.py` — 添加 `__all__ = ["AgentResult", "run_agent"]` *(已修复)*
+- [x] **79.6.2** 核心模块 (`agent.py`, `dispatcher.py`, `integrator.py`, `tasks.py`, `memory.py`, `git_utils.py`) — 添加 `__all__` *(已修复)*
+
+### 79.7 `_rebase_strategy` run_id 参数化
+
+- [x] **79.7.1** `integrator.py` — `_rebase_strategy` 接受显式 `run_id` 参数，调用方传入，fallback 保留 *(已修复)*
+
+### 79.8 `_watch_dashboard` 轮询间隔可配置
+
+- [x] **79.8.1** `server.py` — 硬编码 1s 改为 `self._poll_interval`，构造函数接受 `poll_interval` 参数 *(已修复)*
+
+---
+
+## v11.0 Progress Summary
+
+| Phase | Items | Status |
+|-------|-------|--------|
+| Phase 77 (安全修复 P0) | 6 | **6/6 完成** |
+| Phase 78 (安全+健壮性 P1) | 14 | **14/14 完成** (2 项为误报) |
+| Phase 79 (代码质量 P2) | 12 | **12/12 完成** |
+| **Total v11.0** | **32** | **32/32 完成** |

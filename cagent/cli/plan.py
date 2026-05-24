@@ -24,6 +24,8 @@ def _scan_dir_tree(path: Path, max_depth: int = 2, _depth: int = 0) -> str:
     for entry in entries:
         if entry.name in skip or entry.name.startswith("."):
             continue
+        if entry.is_symlink():
+            continue
         indent = "  " * _depth
         if entry.is_dir():
             lines.append(f"{indent}{entry.name}/")
@@ -106,6 +108,8 @@ def _cmd_plan(args: argparse.Namespace) -> None:
 {goal}
 """
         if ref_content:
+            if len(ref_content) > 4000:
+                print(f"Warning: reference content truncated from {len(ref_content)} to 4000 chars")
             prompt += f"""
 ## Reference Document
 ```

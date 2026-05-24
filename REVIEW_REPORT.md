@@ -1,25 +1,23 @@
 # cagent — Code Review & Evaluation Report
 
-> v2.1 audit complete. Historical findings (all resolved) archived in [ARCHIVE.md](ARCHIVE.md).
-> This file tracks only **open issues** and **evaluation scores**.
+> v10.0 并行代码审查完成（2026-05-23）。6 个审查任务中 4 个成功，2 个因 stream 解析限制失败。
+> 历史已修复发现归档在 [ARCHIVE.md](ARCHIVE.md)。本文件追踪 **当前 OPEN 问题** 和 **评估分数**。
 
 ---
 
-## Current Scores (v5.0, 2026-05-21)
+## Current Scores (v10.0, 2026-05-23)
 
-> **评分基准**: 全量代码审读 + Phase 45-48 修复后重新校准。275 pytest pass。
+> **评分基准**: 第四次全面评估。576 tests pass, 76% coverage, mypy 0 errors。
 
-| Dimension | Score (1-5) | v4.0 | 变化原因 |
-|-----------|-------------|------|----------|
-| 功能完整度 | 4.8 | 4.5 | ↑ E2E 验证通过 (Phase 45: auth + 2-task + dep chain + conflict + budget) |
-| 代码质量 | 4.8 | 4.6 | ↑ git_utils.py 统一 3 套 helper (Phase 47)，json import 去重，commit msg 修复 |
-| 安全性 | 4.5 | 4.3 | ↑ Write 工具内容扫描 (Phase 48)，shlex token 化。间接执行仍需 Docker |
-| 可观测性 | 4.8 | 4.8 | → Dashboard/events/budget 设计优秀，无新变化 |
-| 跨平台 | 4.7 | 4.5 | ↑ CTRL_BREAK_EVENT + CREATE_NEW_PROCESS_GROUP 实现 (Phase 47) |
-| 测试覆盖 | 4.6 | 4.3 | ↑ 275 tests，含 5 个 fake-claude E2E 测试 (test_e2e.py) |
-| 文档 | 4.5 | 3.5 | ↑ README.md 完整用户文档 (Phase 46)，PLAN.md 精简为路线图 |
-
-**Overall: 4.67/5** (275 pytest pass。核心差距：Docker 沙箱 + integrator 多策略 + 手动验证场景)
+| Dimension | Score (1-10) | 说明 |
+|-----------|-------------|------|
+| 架构设计 | 9 | 清晰分层、零依赖、职责单一 |
+| 代码质量 | 8 | 类型完备、防御编程、原子操作 |
+| 安全性 | 8 | 多层防御、已知限制记录清晰 |
+| 测试充分性 | 7.5 | 量够但核心路径覆盖不足 |
+| 可维护性 | 8.5 | 模块化好、文档完善 |
+| 跨平台支持 | 8 | Windows/Unix 双路径覆盖 |
+| **综合** | **8.2/10** | **生产就绪，测试缺口需补** |
 
 ---
 
@@ -347,3 +345,89 @@ Full re-read of all 13 modules post-Phase 39. **No new P0/P1 issues found.** Cod
 | cagent (j=4 parallel) | 16.7s | 4 | **2.86x** |
 
 Speedup scales with task weight and count. 4 lightweight tasks is near the lower bound.
+
+---
+
+## Open Issues — 并行代码审查 (2026-05-23)
+
+> cagent 并行审查：6 个任务，4 个成功（task-001/002/003/005），2 个失败（task-004 dispatcher+integrator, task-006 test infra）。
+> 以下为 **新发现的 OPEN 问题**，尚未修复。
+
+### HIGH — 4 items
+
+| # | Module | Issue | Impact | Fix |
+|---|--------|-------|--------|-----|
+| T1 | git_utils.py:45/84 | `run_git` 超时抛 `RuntimeError`，`run_git_async` 超时抛 `GitTimeoutError`，异常类型不一致 | 调用者无法用统一 except 捕获超时 | `run_git` 也抛 `GitTimeoutError` | **FIXED** |
+| T2 | safety.py:226-229 | `_HOOK_SCRIPT` 用 `.replace()` 模板注入，`__PATTERNS_JSON__` 和 `__CHECK_TOKENS_SOURCE__` 二次替换可能互相干扰 | 未来修改 DENY_PATTERNS 若包含模板标记字面量会破坏 hook | 改用 `string.Template` | **FIXED** |
+| T3 | server.py:24-39 | `_is_localhost_origin` 未校验 scheme，`file://localhost` 或自定义 scheme 可绕过 | 非浏览器客户端可构造任意 Origin 绕过检查 | 添加 `parsed.scheme in ("http", "https")` | **FIXED** |
+| T18 | cli/run.py:34-88 | `_run_lock` 文件锁在进程被 kill -9 后残留，`--force` 完全跳过锁机制 | 残留锁文件可能误导用户；`--force` 允许真正并发运行 | 获取锁前检查 PID 活跃性，清理过期锁 | **FIXED** |
+
+### MEDIUM — 16 items
+
+| # | Module | Issue | Impact | Fix |
+|---|--------|-------|--------|-----|
+| T4 | compat.py:46-51 | `enable_ansi()` 中 `ctypes.windll.kernel32` 调用未检查返回值 | CI/管道环境可能抛未处理 `OSError` | `try/except OSError` 包裹 Windows 分支 |
+| T5 | git_utils.py:80-81 | `run_git_async` 超时时 `proc.kill()` 在 Windows 上不杀子进程 | 超时场景残留僵尸进程 | Windows 上用 `taskkill /T` 或渐进 terminate→kill |
+| T6 | memory.py:10 | `_validate_agent_id` 缺少 null byte (`\x00`) 检查 | 安全校验层不完整 | 添加 `"\x00" in agent_id` 检查 |
+| T7 | memory.py:37/44-47/55 | `write()`/`append()`/`read()` 均未处理 `OSError` | 磁盘错误导致未预期异常传播 | `append()` 至少加 `try/except OSError` |
+| T8 | safety.py:33-62 | `DENY_PATTERNS` 不覆盖绝对路径调用（如 `/usr/bin/git push`） | 绝对路径可绕过所有 deny 模式 | `_check_tokens` 中解析 PATH 或添加绝对路径模式 |
+| T9 | server.py:538-539 | close 帧未解析状态码，未回送带状态码的 close 帧 | RFC 6455 协议不合规 | 解析 close 帧 2 字节状态码并回送 |
+| T10 | server.py:760-766 | 信号处理使用 `asyncio.ensure_future()`（Python 3.10+ 已废弃） | 未来 Python 版本可能移除 | 替换为 `asyncio.create_task()` |
+| T19 | cli/base.py:143 | `_print_auth_diagnostics` 泄露 API key 前 8 位和后 4 位 | 共享终端/日志收集中泄露凭据 | 仅输出 `(set, length=N)` |
+| T20 | cli/base.py:67-76 | `_auth_preflight_check` 缓存文件无并发保护 | 多进程竞争写 auth_ok | 使用 `atomic_write` |
+| T21 | cli/base.py:196-204 | `_is_pid_active` 在 Windows 上可能因 PID 复用误判 | 终止不相关进程 | 使用 `GetExitCodeProcess` 检查 |
+| T22 | cli/run.py:44-46 | `_run_lock` 的 `force=True` 完全跳过锁，允许真正并发 | worktree 和 git 分支冲突 | `--force` 应获取锁失败时警告但继续 |
+| T23 | cli/run.py:367-371 | `_cmd_run_inner` 直接调用 `subprocess.run` 而非 `git_utils` | 违反全局 git 操作统一规范 | 封装到 `git_utils.py` |
+| T24 | cli/plan.py:14-35 | `_scan_dir_tree` 无 symlink 循环保护 | 符号链接循环导致无限递归 | 检查 `entry.is_symlink()` 并跳过 |
+| T25 | cli/plan.py:87 | `_cleanup_sandbox` 在 `_cmd_plan` 结尾执行两次（atexit + finally） | atexit 被 unregister 后无兜底 | 不在 finally 中 unregister |
+| T26 | cli/logcmd.py:48-60 | `_follow_file` 文件被删除后进入无限空读循环 | 无法检测文件消失 | 添加文件存在性检查 |
+| T27 | cli/misc.py:24-25 | `_cmd_clean --all --force` 无二次确认 | 误操作永久删除所有运行记录 | `--all --force` 要求输入 "yes" |
+
+### LOW — 20 items
+
+| # | Module | Issue |
+|---|--------|-------|
+| T11 | compat.py:69-73 | `atomic_write` 中 `os.replace()` 跨卷会失败 |
+| T12 | compat.py:69-73 | Unix 上 `mkstemp` 创建文件权限 `0o600`，替换后继承 |
+| T13 | git_utils.py:56 | `cwd` 不存在时误报 "'git' not found" |
+| T14 | safety.py:73-74 | `shlex.split` 失败时直接返回安全，引号错误可绕过 split-flag 检测 |
+| T15 | config.py:15 | `strategy` 只检查类型，不验证合法值 |
+| T16 | config.py:55-56 | TOML 解析错误被静默吞掉 |
+| T17 | server.py:379-385 | HTTP 请求行未校验方法白名单和版本格式 |
+| T28 | cli/__init__.py:153-160 | `__getattr__` 中 `ImportError` 未转换为 `AttributeError` |
+| T29 | cli/__init__.py:13-15 | `_get_version` 的 `except Exception` 过于宽泛 |
+| T30 | cli/base.py:221-222 | `_terminate_pid` 的 `CTRL_BREAK_EVENT` 可能影响其他进程 |
+| T31 | cli/base.py:157-164 | `_get_repo_root` 未捕获 `FileNotFoundError` |
+| T32 | cli/run.py:586-595 | `_write_summary` 每次从磁盘重新读取 dashboard.json |
+| T33 | cli/plan.py:103-107 | `goal` 参数未经转义直接嵌入 prompt |
+| T34 | cli/logcmd.py:65-67 | `_print_event_line` 静默吞掉 JSON 解析错误 |
+| T35 | cli/logcmd.py:79-89 | 颜色代码硬编码，无 `--no-color` 选项 |
+| T36 | cli/watch.py:97 | `_load_budget` 每次刷新时重新读取文件 |
+| T37 | cli/watch.py:96 | ANSI 清屏在非 ANSI 终端上产生乱码 |
+| T38 | cli/watch.py:136-142 | 列宽固定，长 task ID 被截断 |
+| T39 | cli/misc.py:168-192 | `_cmd_cancel` 未检查任务状态，PID 复用风险 |
+| T40 | cli/misc.py:148-150 | `_cmd_push` 非交互终端 EOFError 时退出原因不明确 |
+
+### 跨模块问题
+
+| # | 严重程度 | Issue | 涉及文件 |
+|---|---------|-------|---------|
+| X1 | MEDIUM | 多处直接调用 `subprocess.run` 进行 git 操作，违反统一规范 | run.py:367,509,516; misc.py:68,80,88,114,131,139,155,198 |
+| X2 | LOW | 错误处理风格不一致（sys.exit(1) vs sys.exit(130) vs 静默返回） | 全部 CLI 模块 |
+
+### 未覆盖的审查范围
+
+| 范围 | 原因 | 状态 |
+|------|------|------|
+| dispatcher.py + integrator.py (Task 004) | stream 解析错误 "chunk longer than limit" | 需手动审查或重跑 |
+| test infrastructure (Task 006) | 同上 | 需手动审查或重跑 |
+
+### 汇总
+
+| 严重程度 | OPEN | FIXED |
+|---------|------|-------|
+| HIGH | 0 | 4 |
+| MEDIUM | 16 | 0 |
+| LOW | 20 | 0 |
+| 跨模块 | 2 | 0 |
+| **总计** | **38** | **4** |

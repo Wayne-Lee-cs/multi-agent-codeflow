@@ -452,7 +452,7 @@ async def test_run_git_async_success(tmp_worktree: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_run_git_async_timeout(tmp_worktree: Path) -> None:
-    """_run_git_async raises RuntimeError on timeout."""
+    """_run_git_async raises GitTimeoutError on timeout."""
     async def mock_exec(*args, **kwargs):
         proc = AsyncMock()
         proc.returncode = 0
@@ -466,6 +466,17 @@ async def test_run_git_async_timeout(tmp_worktree: Path) -> None:
     with patch("cagent.git_utils.asyncio.create_subprocess_exec", side_effect=mock_exec):
         with pytest.raises(GitTimeoutError, match="timed out"):
             await _run_git_async("rev-parse", "HEAD", cwd=tmp_worktree, timeout=0.1)
+
+
+def test_run_git_timeout_raises_git_timeout_error(tmp_worktree: Path) -> None:
+    """run_git (sync) raises GitTimeoutError (not plain RuntimeError) on timeout."""
+    from cagent.git_utils import run_git
+
+    with patch("cagent.git_utils.subprocess.run") as mock_run:
+        import subprocess
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd="git", timeout=0.1)
+        with pytest.raises(GitTimeoutError, match="timed out"):
+            run_git("rev-parse", "HEAD", cwd=tmp_worktree, timeout=0.1)
 
 
 # --- _resolve_claude negative cache test ---

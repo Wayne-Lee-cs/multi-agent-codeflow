@@ -36,18 +36,37 @@ def _run_lock(repo_root: Path, force: bool = False):
 
     Uses OS-level file locking: msvcrt on Windows, fcntl on Unix.
     The lock is held until the context manager exits.
+
+    If a stale lock file remains from a crashed process, it is automatically
+    cleaned up when the recorded PID is no longer active.
     """
     lock_dir = repo_root / ".cagent"
     lock_dir.mkdir(parents=True, exist_ok=True)
     lock_path = lock_dir / "run.lock"
 
     if force:
+        print(
+            "Warning: --force used, skipping run lock. "
+            "Ensure no other cagent run is active.",
+            file=sys.stderr,
+        )
         yield
         return
 
+    # Clean up stale lock files from crashed processes
+    if lock_path.exists():
+        try:
+            stale_pid = int(lock_path.read_text(encoding="utf-8").strip())
+            from .base import _is_pid_active
+            if not _is_pid_active(stale_pid):
+                lock_path.unlink(missing_ok=True)
+        except (ValueError, OSError):
+            # Corrupted or unreadable lock file — remove it
+            lock_path.unlink(missing_ok=True)
+
     lock_fd = None
     try:
-        lock_fd = open(lock_path, "w")
+        lock_fd = open(lock_path, "w", encoding="utf-8")
         if sys.platform == "win32":
             import msvcrt
             try:
@@ -241,7 +260,11 @@ def _summary_phase(
         print(f"Run completed in {elapsed} with no successful tasks to integrate.")
 
     memory_dir = run_dir / "memory"
-    if memory_dir.exists() and any(memory_dir.iterdir()):
+    try:
+        has_memory = memory_dir.exists() and any(memory_dir.iterdir())
+    except (OSError, PermissionError):
+        has_memory = False
+    if has_memory:
         print(f"\n  Subagent memory: {memory_dir}")
         _prompt_clean_memory(memory_dir)
 
@@ -329,6 +352,16 @@ def _execute_run(
         if retry_hint:
             print(f"\n  {retry_hint}")
         sys.exit(130)
+    except Exception as e:
+        elapsed = _fmt_elapsed(time.time() - run_start)
+        print(f"\n\nError after {elapsed}: {e}", file=sys.stderr)
+        try:
+            dump_state(run_dir, all_tasks)
+        except OSError:
+            pass
+        print(f"  State saved to {run_dir}", file=sys.stderr)
+        print(f"  To clean up worktrees:  cagent clean {run_dir.name}", file=sys.stderr)
+        sys.exit(1)
 
     elapsed = _fmt_elapsed(time.time() - run_start)
     _summary_phase(
@@ -366,7 +399,7 @@ def _cmd_run_inner(args: argparse.Namespace, repo_root: Path) -> None:
         try:
             result = subprocess.run(
                 ["git", "rev-parse", args.base],
-                cwd=repo_root, capture_output=True, text=True, check=True,
+                cwd=repo_root, capture_output=True, text=True, encoding="utf-8", errors="replace", check=True,
             )
             base_sha = result.stdout.strip()
         except subprocess.CalledProcessError:
@@ -454,7 +487,11 @@ def _cmd_resume(args: argparse.Namespace, repo_root: Path) -> None:
     from cagent.worktree import current_head
 
     runs_dir = _get_runs_dir(repo_root)
-    run_dir = runs_dir / args.resume
+    run_dir = (runs_dir / args.resume).resolve()
+    # Path traversal protection: resolved path must stay under runs_dir
+    if not str(run_dir).startswith(str(runs_dir.resolve())):
+        print(f"Error: invalid resume path (path traversal detected): {args.resume}", file=sys.stderr)
+        sys.exit(1)
     if not run_dir.exists():
         print(f"Run not found: {args.resume}", file=sys.stderr)
         print(f"Available runs:")

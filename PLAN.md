@@ -9,6 +9,7 @@
 **v8.0 已发布** — Phase 63-65 完成。460 tests, 68% coverage, mypy 0 errors, 0 RuntimeWarning。
 **v9.0 完成** — Phase 66-70 全部完成。576 tests, 76% coverage, mypy 0 errors。Bug修复+安全加固+性能优化+测试覆盖提升+代码审查修复。
 **v10.0 进行中** — 第四次全面评估。综合评分 8.2/10。重点：测试覆盖缺口修复（cli/run.py 49%, integrator.py 66%, server.py 64%）+ 文档同步。
+**v11.0 评估完成** — 第五次全面评估（2026-05-24）。综合评分 8.17/10。发现 S1 `_validate_cmd_str` 换行绕过（P0 安全漏洞）等 15 项新问题。Phase 77-79 规划。
 
 ### v5.1 已完成项
 
@@ -289,6 +290,88 @@
 | 74.2 | pyproject.toml fail_under 提升 | 低 | 75 → 78，与实际覆盖率匹配 |
 | 74.3 | 全量验证 | 低 | mypy 0 errors + 576+ tests + coverage ≥ 78% |
 | 74.4 | PLAN/CHECKLIST 状态同步 | 低 | 更新文档至最新状态 |
+
+---
+
+## v10.0 Roadmap — 代码审查修复 (2026-05-23 并行审查)
+
+> cagent 并行审查发现 42 个新问题。详见 [REVIEW_REPORT.md](REVIEW_REPORT.md)。
+
+### Phase 75: 代码审查修复 — HIGH (P0) 🔴
+
+| # | 任务 | 风险 | 说明 |
+|---|------|------|------|
+| 75.1 | git_utils 异常类型统一 | 高 | `run_git` 抛 `RuntimeError`，`run_git_async` 抛 `GitTimeoutError`，统一为 `GitTimeoutError` |
+| 75.2 | `_HOOK_SCRIPT` 模板安全 | 高 | `.replace()` 二次替换可能互相干扰，改用 `string.Template` |
+| 75.3 | `_is_localhost_origin` scheme 校验 | 高 | 未校验 scheme，`file://localhost` 可绕过 |
+| 75.4 | `_run_lock` 过期锁检测 | 高 | 进程 kill -9 后锁文件残留，获取锁前检查 PID 活跃性 |
+
+### Phase 76: 代码审查修复 — MEDIUM (P1) 🟡
+
+| # | 任务 | 风险 | 说明 |
+|---|------|------|------|
+| 76.1 | `enable_ansi()` 返回值 | 中 | ctypes 调用未检查返回值 |
+| 76.2 | `run_git_async` Windows 子进程清理 | 中 | `proc.kill()` 不杀子进程 |
+| 76.3 | `_validate_agent_id` null byte | 中 | 缺少 `\x00` 检查 |
+| 76.4 | `memory.py` OSError 处理 | 中 | `write()`/`append()`/`read()` 未处理磁盘错误 |
+| 76.5 | `DENY_PATTERNS` 绝对路径 | 中 | `/usr/bin/git push` 可绕过 |
+| 76.6 | close 帧状态码 | 中 | RFC 6455 不合规 |
+| 76.7 | `ensure_future` → `create_task` | 中 | Python 3.10+ 废弃 API |
+| 76.8 | API key 诊断泄露 | 中 | `_print_auth_diagnostics` 暴露前 8 + 后 4 字符 |
+| 76.9 | `auth_ok` 并发写入 | 中 | 使用 `atomic_write` 替代 `write_text` |
+| 76.10 | `_is_pid_active` PID 复用 | 中 | Windows 上 PID 复用可能误判 |
+| 76.11 | `_run_lock` force 模式 | 中 | `--force` 完全跳过锁 |
+| 76.12 | CLI git 操作统一 | 中 | 11 处直接调用 `subprocess.run` |
+| 76.13 | symlink 循环保护 | 中 | `_scan_dir_tree` 无限递归风险 |
+| 76.14 | `_cleanup_sandbox` 双重执行 | 中 | atexit 被 unregister 后无兜底 |
+| 76.15 | `_follow_file` 文件消失检测 | 中 | 删除后无限空读循环 |
+| 76.16 | `_cmd_clean --all --force` 确认 | 中 | 误操作永久删除所有记录 |
+
+### 未覆盖的审查范围
+
+| 范围 | 原因 |
+|------|------|
+| dispatcher.py + integrator.py | cagent task-004 stream 解析失败 |
+| test infrastructure | cagent task-006 stream 解析失败 |
+
+---
+
+## v11.0 Roadmap
+
+> 第五次全面评估（2026-05-24）。综合评分 8.17/10。
+> 新发现 15 项问题（6 安全, 5 Bug, 2 性能, 2 架构）。
+> 详见 [SPEC_v10.md](SPEC_v10.md) v11.0 评估章节。
+
+### Phase 77: 安全修复 (P0) 🔴
+
+| # | 任务 | 风险 | 说明 |
+|---|------|------|------|
+| 77.1 | `_validate_cmd_str` 换行符绕过修复 | **高** | `integrator.py:166-177` — `re.match` 只检查首行。改用 `re.fullmatch` + 拒绝 `\n`/`\r`/`\t` |
+| 77.2 | 换行绕过测试 | 低 | 多行命令字符串被拒绝的测试用例 (3+ tests) |
+
+### Phase 78: 安全+健壮性 (P1) 🟡
+
+| # | 任务 | 风险 | 说明 |
+|---|------|------|------|
+| 78.1 | WebSocket 最大连接数限制 | 中 | `server.py` — `self.connections` 无上限，添加 `_MAX_CONNECTIONS` (默认 50) |
+| 78.2 | `args.resume` 路径遍历防护 | 中 | `cli/run.py:486` — `resolve()` 后校验在 `.cagent/runs/` 下 |
+| 78.3 | `_broadcast` 并行发送 | 中 | `server.py:730-745` — 串行 `await conn.send()` 改为 `asyncio.gather()` |
+| 78.4 | DENY_PATTERNS 补充 | 低 | `safety.py` — 添加 `ruby -e`/`perl -e` 模式 |
+| 78.5 | S3 `env_continue` 冗余构建 | 低 | `integrator.py:564` — 移除内部 `_ensure_no_claude_dir` 中的冗余 env 构建 |
+| 78.6 | S6 `_broadcast` 错误连接未移除 | 低 | `server.py` — 发送失败的连接未从 `self.connections` 移除 |
+
+### Phase 79: 代码质量 (P2) 🟢
+
+| # | 任务 | 风险 | 说明 |
+|---|------|------|------|
+| 79.1 | `ref_content` 截断提示 | 低 | `cli/plan.py` — `ref_content[:4000]` 截断时打印 warning |
+| 79.2 | `_summary_phase` memory_dir 异常保护 | 低 | `cli/run.py` — `iterdir()` 加 `try/except PermissionError` |
+| 79.3 | Dashboard 加载 kind 值验证 | 低 | `progress.py` — 加载时过滤无效 `kind` 值 |
+| 79.4 | `_read_frame` 提取为方法 | 低 | `server.py:498-531` — 从循环内闭包提取为 `WebSocketConnection._read_frame()` |
+| 79.5 | integrator 策略代码去重 | 中 | `integrator.py:667-905` — 三策略共享代码提取公共模板 |
+| 79.6 | `__all__` 导出控制 | 低 | 核心模块添加 `__all__` 声明 |
+| 79.7 | B2 `_rebase_strategy` run_id 参数化 | 低 | 已知 BUG-1（Phase 72.7），换行传参修复 |
+| 79.8 | B5 `_watch_dashboard` 轮询间隔可配置 | 低 | `server.py:689` — 硬编码 1s 改为可配置 |
 
 ---
 

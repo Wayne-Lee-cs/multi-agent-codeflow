@@ -23,6 +23,8 @@ _VALID_KEYS: dict[str, tuple[type, int | None, int | None]] = {
     "keep_worktrees": (bool, None, None),
 }
 
+_VALID_STRATEGIES = {"cherry-pick", "merge", "rebase"}
+
 
 def load_config(repo_root: Path) -> dict[str, Any]:
     """Load cagent configuration from .cagentrc or pyproject.toml [tool.cagent].
@@ -76,6 +78,9 @@ def _parse_and_validate(
                     continue
                 if max_val is not None and value > max_val:
                     continue
+            # Strategy enum validation
+            if key == "strategy" and value not in _VALID_STRATEGIES:
+                continue
             result[key] = value
     return result
 

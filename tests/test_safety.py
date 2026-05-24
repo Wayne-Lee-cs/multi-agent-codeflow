@@ -97,6 +97,8 @@ class TestDenyPatterns:
         "cmd /C \"del /s /q C:\\temp\"",
         "deno eval \"Deno.run({cmd: ['git','push']})\"",
         "deno run script.ts",
+        "ruby -e \"system('rm -rf /')\"",
+        "perl -e \"exec('git push')\"",
     ])
     def test_command_chain_blocked(self, cmd):
         assert any(re.search(p, cmd, re.IGNORECASE) for p in DENY_PATTERNS)
