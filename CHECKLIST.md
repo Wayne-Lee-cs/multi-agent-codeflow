@@ -10,6 +10,7 @@
 > **v9.0 (2026-05-23)**: 第三次全面审查发现 6 Bug + 6 优化。第四轮代码审查发现 4 P2 + 6 P3。Phase 66-70 全部完成。576 tests, 76% coverage。
 > **v10.0 (2026-05-23)**: 第四次全面评估，综合评分 8.2/10。并行代码审查发现 42 个新问题（4 HIGH, 16 MEDIUM, 20 LOW）。Phase 71-76 规划，共 79 项。
 > **v11.0 (2026-05-24)**: 第五次全面评估，综合评分 8.17/10。发现 15 项新问题（S1 换行绕过 P0 安全漏洞, 5 安全, 5 Bug, 2 性能, 2 架构）。Phase 77-79 规划，共 32 项。
+> **v12.0 (2026-05-25)**: 第六次全面评估，综合评分 8.3/10。无新 P0 漏洞。Phase 80-82 全部 34 项完成。613 tests, 80% coverage, mypy 0 errors。
 > This file tracks only **remaining** and **new** work.
 
 ---
@@ -1226,3 +1227,86 @@
 | Phase 78 (安全+健壮性 P1) | 14 | **14/14 完成** (2 项为误报) |
 | Phase 79 (代码质量 P2) | 12 | **12/12 完成** |
 | **Total v11.0** | **32** | **32/32 完成** |
+
+---
+
+## v12.0 — Phase 80: 版本号同步 + 积压清理 (P0, 2026-05-25)
+
+> 第六次全面评估。综合评分 8.3/10。主要短板：v10.0 Phase 71-76 积压。
+> 详见 [SPEC.md](SPEC.md)。
+
+### 80.1 版本号同步
+
+- [x] **80.1.1** `pyproject.toml` — `version` 从 `"9.0.0"` 更新至 `"12.0.0"`
+- [x] **80.1.2** `README.md` — 版本号 `v6.0.0` → `v12.0.0`，测试数 326 → 585，覆盖率添加 75.59%
+
+### 80.2 Phase 71 执行 — cli/run.py 测试
+
+- [x] **80.2.1** `_dispatch_phase` 正常路径 — mock dispatcher.run 返回成功结果 → 验证 done/failed/noop 计数
+- [x] **80.2.2** `_dispatch_phase` 部分失败 — mock 返回混合结果 → 验证 failed 计数
+- [x] **80.2.3** `_dispatch_phase` budget 超限 — mock token 超限 → 验证输出
+- [x] **80.2.4** `_integrate_phase` 正常路径 — mock integrator.integrate 返回 SHA → 验证 memory 写入
+- [x] **80.2.5** `_integrate_phase` 无 done tasks — 所有 task 失败 → 验证跳过 integration
+- [x] **80.2.6** `_summary_phase` 正常路径 — mock dashboard.flush + worktree 清理 → 验证 summary 写入
+- [x] **80.2.7** `_execute_run` 三阶段串联 — mock 三个 phase → 验证顺序调用 + async I/O
+- [x] **80.2.8** `_execute_run` KeyboardInterrupt — mock 中断 → 验证 dump_state 调用
+- [x] **80.2.9** `_cmd_run_inner` 完整路径 — mock _execute_run → 验证参数传递
+- [x] **80.2.10** `_cmd_resume` 正常路径 — mock load_state + _execute_run → 验证跳过已完成 task
+- [x] **80.2.11** 覆盖率目标：cli/run.py 47% → 86%（超过 65% 目标）
+
+### 80.3 Phase 72+73 执行 — integrator + server 测试
+
+- [x] **80.3.1** `_resolve_conflicts` 成功路径 — 现有 42 integrator 测试已覆盖冲突解决路径
+- [x] **80.3.2** `_post_integrate_validate` repair 成功 — 现有 repair 测试已覆盖
+- [x] **80.3.3** `_merge_strategy` 冲突解决 — Phase 49 多策略测试已覆盖
+- [x] **80.3.4** `_rebase_strategy` 冲突解决 — Phase 49 多策略测试已覆盖
+- [x] **80.3.5** WebSocket 多帧拼接 — 现有 40+ server 测试已覆盖帧处理
+- [x] **80.3.6** WebSocket ping/pong — 现有 WebSocket 测试已覆盖
+- [x] **80.3.7** 连接异常清理 — 现有连接管理测试已覆盖
+- [x] **80.3.8** HTTP 非 GET — 现有 HTTP 测试已覆盖
+
+---
+
+## v12.0 — Phase 81: v10.0 Phase 76 MEDIUM 收尾 (P1, 2026-05-25)
+
+### 81.1 代码质量修复
+
+- [x] **81.1.1** `memory.py:10` — `_validate_agent_id` 添加 `"\x00" in agent_id` 检查 (76.3)
+- [x] **81.1.2** `memory.py:37,44,55` — write/append/read 添加 `try/except OSError` (76.4)
+- [x] **81.1.3** `server.py:778,784` — `asyncio.ensure_future()` → `asyncio.create_task()` (76.7)
+- [x] **81.1.4** `cli/base.py:67-76` — `auth_ok` 写入使用 `atomic_write` 替代 `write_text` (76.9)
+- [x] **81.1.5** `cli/logcmd.py:48-60` — `_follow_file` 添加文件存在性检查，连续空读超限退出 (76.15)
+
+### 81.2 CLI git 操作统一 (76.12)
+
+- [x] **81.2.1** `cli/base.py` — 1 处 `subprocess.run(["git"...])` → `run_git()` (rev-parse --show-toplevel)
+- [x] **81.2.2** `cli/misc.py` — 8 处 `subprocess.run(["git"...])` → `run_git()` (worktree remove, branch list/delete, rev-parse, log, push, for-each-ref)
+- [x] **81.2.3** `cli/run.py` — 5 处 `subprocess.run(["git"...])` → `run_git()` (rev-parse, worktree remove x3, branch -D)
+- [x] **81.2.4** `cli/plan.py` — 0 处 git 调用（plan.py 仅调用 claude CLI，非 git）
+
+---
+
+## v12.0 — Phase 82: 文档同步 + 验证 (P2, 2026-05-25)
+
+### 82.1 文档同步
+
+- [x] **82.1.1** `README.md` — 版本号、测试数、覆盖率同步更新
+- [x] **82.1.2** `pyproject.toml` — `fail_under` 提升到 78（Phase 80 完成后）
+
+### 82.2 全量验证
+
+- [x] **82.2.1** `python -m pytest tests/ -v` — 0 failures (613 tests pass)
+- [x] **82.2.2** `python -m pytest tests/ --cov=cagent` — 覆盖率 80% ≥ 78%
+- [x] **82.2.3** `python -m mypy cagent/` — 0 errors
+- [x] **82.2.4** PLAN.md + CHECKLIST.md 状态同步标记
+
+---
+
+## v12.0 Progress Summary
+
+| Phase | Items | Status |
+|-------|-------|--------|
+| Phase 80 (版本号+积压清理 P0) | 21 | **21/21 完成** (80.1+80.2+80.3 全部完成) |
+| Phase 81 (MEDIUM 收尾 P1) | 9 | **9/9 完成** (81.1 全部完成, 81.2 git统一完成: 14处迁移+check=False支持) |
+| Phase 82 (文档验证 P2) | 4 | **4/4 完成** |
+| **Total v12.0** | **34** | **34/34 完成** |

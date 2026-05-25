@@ -7,7 +7,6 @@ import asyncio
 import contextlib
 import json
 import os
-import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -28,6 +27,7 @@ from .base import (
     _preflight_check,
     _prompt_clean_memory,
 )
+from cagent.git_utils import run_git
 
 
 @contextlib.contextmanager
@@ -377,11 +377,12 @@ def _cmd_run(args: argparse.Namespace) -> None:
     from cagent.config import apply_config, load_config
     apply_config(args, load_config(repo_root))
 
-    _preflight_check(
-        check_auth=True,
-        repo_root=repo_root,
-        force_auth=getattr(args, "api_key", None) is not None,
-    )
+    if not args.dry_run:
+        _preflight_check(
+            check_auth=True,
+            repo_root=repo_root,
+            force_auth=getattr(args, "api_key", None) is not None,
+        )
 
     with _run_lock(repo_root, force=getattr(args, "force", False)):
         if args.resume:
@@ -397,12 +398,9 @@ def _cmd_run_inner(args: argparse.Namespace, repo_root: Path) -> None:
 
     if args.base:
         try:
-            result = subprocess.run(
-                ["git", "rev-parse", args.base],
-                cwd=repo_root, capture_output=True, text=True, encoding="utf-8", errors="replace", check=True,
-            )
+            result = run_git("rev-parse", args.base, cwd=repo_root)
             base_sha = result.stdout.strip()
-        except subprocess.CalledProcessError:
+        except RuntimeError:
             print(f"Error: invalid base '{args.base}' — not a valid branch or SHA.", file=sys.stderr)
             sys.exit(1)
     else:
@@ -489,7 +487,8 @@ def _cmd_resume(args: argparse.Namespace, repo_root: Path) -> None:
     runs_dir = _get_runs_dir(repo_root)
     run_dir = (runs_dir / args.resume).resolve()
     # Path traversal protection: resolved path must stay under runs_dir
-    if not str(run_dir).startswith(str(runs_dir.resolve())):
+    runs_dir_prefix = str(runs_dir.resolve()) + os.sep
+    if not str(run_dir).startswith(runs_dir_prefix):
         print(f"Error: invalid resume path (path traversal detected): {args.resume}", file=sys.stderr)
         sys.exit(1)
     if not run_dir.exists():
@@ -542,20 +541,8 @@ def _cmd_resume(args: argparse.Namespace, repo_root: Path) -> None:
         t.commit_sha = None
         wt_path = repo_root / ".cagent" / "worktrees" / run_id / f"task-{t.id}"
         if wt_path.exists():
-            try:
-                subprocess.run(
-                    ["git", "worktree", "remove", "--force", str(wt_path)],
-                    cwd=repo_root, capture_output=True, check=True,
-                )
-            except subprocess.CalledProcessError:
-                pass
-        try:
-            subprocess.run(
-                ["git", "branch", "-D", t.branch],
-                cwd=repo_root, capture_output=True,
-            )
-        except (subprocess.CalledProcessError, OSError):
-            pass
+            run_git("worktree", "remove", "--force", str(wt_path), cwd=repo_root, check=False)
+        run_git("branch", "-D", t.branch, cwd=repo_root, check=False)
     dump_state(run_dir, tasks)
 
     # Filter out tasks that are still running (skipped due to active PID)
@@ -664,27 +651,26 @@ def _clean_worktrees(repo_root: Path, run_dir: Path, tasks: list["Task"], result
     """Clean up worktrees based on success/failure status."""
     all_ok = all(r.status in ("done", "noop") for r in results)
     result_map = {r.task_id: r for r in results}
+    failed_removals: list[str] = []
 
     for task in tasks:
         result = result_map.get(task.id)
         wt_path = repo_root / ".cagent" / "worktrees" / run_dir.name / f"task-{task.id}"
         if wt_path.exists():
             if all_ok or (result and result.status != "failed"):
-                try:
-                    subprocess.run(
-                        ["git", "worktree", "remove", "--force", str(wt_path)],
-                        cwd=repo_root, capture_output=True, check=True,
-                    )
-                except subprocess.CalledProcessError:
-                    pass
+                r = run_git("worktree", "remove", "--force", str(wt_path), cwd=repo_root, check=False)
+                if r.returncode != 0 and wt_path.exists():
+                    failed_removals.append(str(wt_path))
 
     if all_ok:
         integration_wt = repo_root / ".cagent" / "worktrees" / run_dir.name / "_integration"
         if integration_wt.exists():
-            try:
-                subprocess.run(
-                    ["git", "worktree", "remove", "--force", str(integration_wt)],
-                    cwd=repo_root, capture_output=True, check=True,
-                )
-            except subprocess.CalledProcessError:
-                pass
+            r = run_git("worktree", "remove", "--force", str(integration_wt), cwd=repo_root, check=False)
+            if r.returncode != 0 and integration_wt.exists():
+                failed_removals.append(str(integration_wt))
+
+    if failed_removals:
+        print(f"Warning: failed to remove {len(failed_removals)} worktree(s):", file=sys.stderr)
+        for p in failed_removals:
+            print(f"  {p}", file=sys.stderr)
+        print("  To clean manually:  cagent clean", file=sys.stderr)

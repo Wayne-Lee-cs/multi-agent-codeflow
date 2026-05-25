@@ -41,25 +41,34 @@ class RunMemory:
         """Write memory for a specific agent (worker or integrator)."""
         _validate_agent_id(agent_id)
         path = self._dir / f"{agent_id}.md"
-        path.write_text(content, encoding="utf-8")
+        try:
+            path.write_text(content, encoding="utf-8")
+        except OSError:
+            return
         self._version += 1
 
     def append(self, agent_id: str, content: str) -> None:
         """Append memory for a specific agent (preserves previous entries)."""
         _validate_agent_id(agent_id)
         path = self._dir / f"{agent_id}.md"
-        with open(path, "a", encoding="utf-8") as f:
-            if f.seek(0, 2) > 0:
-                f.write("\n\n---\n\n")
-            f.write(content)
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                if f.seek(0, 2) > 0:
+                    f.write("\n\n---\n\n")
+                f.write(content)
+        except OSError:
+            return
         self._version += 1
 
     def read(self, agent_id: str) -> str:
         """Read memory for a specific agent. Returns empty string if not found."""
         _validate_agent_id(agent_id)
         path = self._dir / f"{agent_id}.md"
-        if path.exists():
-            return path.read_text(encoding="utf-8")
+        try:
+            if path.exists():
+                return path.read_text(encoding="utf-8")
+        except OSError:
+            pass
         return ""
 
     def read_all(self) -> dict[str, str]:
@@ -69,7 +78,10 @@ class RunMemory:
             if path.name == "shared_context.md":
                 continue
             agent_id = path.stem
-            result[agent_id] = path.read_text(encoding="utf-8")
+            try:
+                result[agent_id] = path.read_text(encoding="utf-8")
+            except OSError:
+                continue
         return result
 
     def build_shared_context(self, task_ids: list[str], max_chars: int = 4000) -> str:
@@ -102,11 +114,17 @@ class RunMemory:
     def write_shared(self, content: str) -> None:
         """Write the aggregated shared_context.md."""
         path = self._dir / "shared_context.md"
-        path.write_text(content, encoding="utf-8")
+        try:
+            path.write_text(content, encoding="utf-8")
+        except OSError:
+            return
 
     def load_shared(self) -> str:
         """Load the aggregated shared_context.md."""
         path = self._dir / "shared_context.md"
-        if path.exists():
-            return path.read_text(encoding="utf-8")
+        try:
+            if path.exists():
+                return path.read_text(encoding="utf-8")
+        except OSError:
+            pass
         return ""

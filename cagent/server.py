@@ -636,7 +636,7 @@ class DashboardServer:
     def _cors_headers(origin: str) -> str:
         """Return CORS headers string for a given Origin."""
         if _is_localhost_origin(origin):
-            return f"Access-Control-Allow-Origin: {origin or '*'}\r\n"
+            return f"Access-Control-Allow-Origin: {origin}\r\n"
         return ""
 
     async def _send_http_response(
@@ -653,8 +653,9 @@ class DashboardServer:
 
         status_text = {
             200: "OK", 204: "No Content", 403: "Forbidden",
-            404: "Not Found", 431: "Request Header Fields Too Large",
-            500: "Internal Server Error",
+            404: "Not Found", 405: "Method Not Allowed",
+            431: "Request Header Fields Too Large",
+            500: "Internal Server Error", 503: "Service Unavailable",
         }.get(status, "Unknown")
 
         response = (
@@ -703,6 +704,9 @@ class DashboardServer:
 
         while True:
             try:
+                if not self.connections:
+                    await asyncio.sleep(self._poll_interval)
+                    continue
                 if dashboard_path.exists():
                     try:
                         mtime = os.stat(dashboard_path).st_mtime
@@ -775,13 +779,13 @@ async def run_dashboard_server(run_dir: Path, port: int = 8080) -> None:
     if sys.platform == "win32":
         # Windows: signal.signal() is the only option (add_signal_handler not supported)
         def _signal_handler(sig: int, frame: object) -> None:
-            asyncio.ensure_future(_shutdown())
+            asyncio.create_task(_shutdown())
 
         signal.signal(signal.SIGINT, _signal_handler)
         signal.signal(signal.SIGTERM, _signal_handler)
     else:
         for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, lambda: asyncio.ensure_future(_shutdown()))
+            loop.add_signal_handler(sig, lambda: asyncio.create_task(_shutdown()))
 
     try:
         await server.start()

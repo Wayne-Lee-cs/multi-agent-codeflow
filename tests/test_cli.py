@@ -576,16 +576,15 @@ class TestGetRepoRoot:
         mock_result = MagicMock()
         mock_result.stdout = str(tmp_path) + "\n"
 
-        with patch("cagent.cli.base.subprocess.run", return_value=mock_result):
+        with patch("cagent.cli.base.run_git", return_value=mock_result):
             result = _get_repo_root()
         assert result == tmp_path
 
     def test_not_git_repo_exits(self):
         """Not in a git repo → sys.exit(1)."""
         from cagent.cli.base import _get_repo_root
-        import subprocess as sp
 
-        with patch("cagent.cli.base.subprocess.run", side_effect=sp.CalledProcessError(1, "git")):
+        with patch("cagent.cli.base.run_git", side_effect=RuntimeError("git failed")):
             with pytest.raises(SystemExit):
                 _get_repo_root()
 
@@ -648,7 +647,7 @@ class TestCmdBranches:
         mock_result.stdout = ""
 
         with patch("cagent.cli.misc._get_repo_root", return_value=tmp_path), \
-             patch("cagent.cli.misc.subprocess.run", return_value=mock_result):
+             patch("cagent.cli.misc.run_git", return_value=mock_result):
             _cmd_branches(args)
 
         out = capsys.readouterr().out
@@ -666,7 +665,7 @@ class TestCmdBranches:
         )
 
         with patch("cagent.cli.misc._get_repo_root", return_value=tmp_path), \
-             patch("cagent.cli.misc.subprocess.run", return_value=mock_result):
+             patch("cagent.cli.misc.run_git", return_value=mock_result):
             _cmd_branches(args)
 
         out = capsys.readouterr().out
@@ -688,7 +687,7 @@ class TestCmdBranches:
         )
 
         with patch("cagent.cli.misc._get_repo_root", return_value=tmp_path), \
-             patch("cagent.cli.misc.subprocess.run", return_value=mock_result):
+             patch("cagent.cli.misc.run_git", return_value=mock_result):
             _cmd_branches(args)
 
         out = capsys.readouterr().out
@@ -720,9 +719,8 @@ class TestDryRun:
 
         mock_rev_parse = MagicMock()
         mock_rev_parse.stdout = "abc123def456789012345678901234567890abcd\n"
-        mock_rev_parse.returncode = 0
 
-        with patch("cagent.cli.run.subprocess.run", return_value=mock_rev_parse), \
+        with patch("cagent.cli.run.run_git", return_value=mock_rev_parse), \
              patch("cagent.cli.run._execute_run") as mock_exec:
             _cmd_run_inner(args, tmp_path)
 
@@ -883,7 +881,7 @@ class TestCmdResume:
         args.api_key = None
 
         with patch("cagent.cli.run._execute_run") as mock_exec, \
-             patch("cagent.cli.run.subprocess.run"):
+             patch("cagent.cli.run.run_git"):
             _cmd_resume(args, tmp_path)
 
         mock_exec.assert_called_once()
@@ -912,7 +910,7 @@ class TestCmdResume:
         args.api_key = "sk-ant-test-key-12345"
 
         with patch("cagent.cli.run._execute_run") as mock_exec, \
-             patch("cagent.cli.run.subprocess.run"):
+             patch("cagent.cli.run.run_git"):
             _cmd_resume(args, tmp_path)
 
         mock_exec.assert_called_once()
@@ -945,7 +943,7 @@ class TestCmdResume:
             captured_merge = kwargs.get("merge_results")
 
         with patch("cagent.cli.run._execute_run", side_effect=capture_execute), \
-             patch("cagent.cli.run.subprocess.run"):
+             patch("cagent.cli.run.run_git"):
             _cmd_resume(args, tmp_path)
 
         assert captured_merge is not None
@@ -1014,13 +1012,13 @@ class TestCleanWorktrees:
         ]
 
         mock_run = MagicMock()
-        with patch("cagent.cli.run.subprocess.run", mock_run):
+        with patch("cagent.cli.run.run_git", mock_run):
             _clean_worktrees(repo_root, run_dir, tasks, results)
 
         # Should remove task-001, task-002, and _integration
-        # Extract the path argument (4th element in the cmd list: git worktree remove --force <path>)
+        # run_git is called as run_git("worktree", "remove", "--force", path, cwd=repo_root)
         calls = mock_run.call_args_list
-        removed_paths = [c[0][0][-1] for c in calls]  # last arg is the path
+        removed_paths = [c[0][3] for c in calls]  # 4th positional arg is the path
         assert any("task-001" in p for p in removed_paths)
         assert any("task-002" in p for p in removed_paths)
         assert any("_integration" in p for p in removed_paths)
@@ -1047,11 +1045,11 @@ class TestCleanWorktrees:
         ]
 
         mock_run = MagicMock()
-        with patch("cagent.cli.run.subprocess.run", mock_run):
+        with patch("cagent.cli.run.run_git", mock_run):
             _clean_worktrees(repo_root, run_dir, tasks, results)
 
         # Should only remove task-001 (done), NOT task-002 (failed)
-        removed_paths = [c[0][0][4] for c in mock_run.call_args_list]
+        removed_paths = [c[0][3] for c in mock_run.call_args_list]
         assert any("task-001" in p for p in removed_paths)
         assert not any("task-002" in p for p in removed_paths)
 
@@ -1072,14 +1070,14 @@ class TestCleanWorktrees:
 
         # No worktree directories exist — should not raise
         mock_run = MagicMock()
-        with patch("cagent.cli.run.subprocess.run", mock_run):
+        with patch("cagent.cli.run.run_git", mock_run):
             _clean_worktrees(repo_root, run_dir, tasks, results)
 
-        # subprocess.run should NOT be called since worktree doesn't exist
+        # run_git should NOT be called since worktree doesn't exist
         mock_run.assert_not_called()
 
     def test_git_error_silently_ignored(self, tmp_path):
-        """CalledProcessError from git worktree remove is silently ignored."""
+        """Non-zero exit from git worktree remove is silently ignored (check=False)."""
         from cagent.cli.run import _clean_worktrees
 
         repo_root = tmp_path
@@ -1096,8 +1094,9 @@ class TestCleanWorktrees:
             FakeResult(task_id="001", status="done"),
         ]
 
-        mock_run = MagicMock(side_effect=subprocess.CalledProcessError(1, "git"))
-        with patch("cagent.cli.run.subprocess.run", mock_run):
+        # With check=False, run_git returns a result with non-zero returncode
+        mock_run = MagicMock(return_value=MagicMock(returncode=1))
+        with patch("cagent.cli.run.run_git", mock_run):
             _clean_worktrees(repo_root, run_dir, tasks, results)  # should not raise
 
 
@@ -1111,19 +1110,15 @@ class TestCmdPush:
         args = MagicMock()
         args.branch = "nonexistent-branch"
 
-        def mock_run(cmd, **kwargs):
-            if "rev-parse" in cmd:
-                result = MagicMock()
-                result.returncode = 1
-                return result
-            if "--list" in cmd:
-                result = MagicMock()
-                result.stdout = "cagent/run-001/task-001\n"
-                return result
+        def mock_run_git(*args, **kwargs):
+            if "rev-parse" in args:
+                return MagicMock(returncode=1)
+            if "--list" in args:
+                return MagicMock(stdout="cagent/run-001/task-001\n")
             return MagicMock(returncode=0)
 
         with patch("cagent.cli.misc._get_repo_root", return_value=tmp_path), \
-             patch("cagent.cli.misc.subprocess.run", side_effect=mock_run), \
+             patch("cagent.cli.misc.run_git", side_effect=mock_run_git), \
              pytest.raises(SystemExit, match="1"):
             _cmd_push(args)
 
@@ -1138,19 +1133,15 @@ class TestCmdPush:
         args = MagicMock()
         args.branch = "nonexistent-branch"
 
-        def mock_run(cmd, **kwargs):
-            if "rev-parse" in cmd:
-                result = MagicMock()
-                result.returncode = 1
-                return result
-            if "--list" in cmd:
-                result = MagicMock()
-                result.stdout = ""
-                return result
+        def mock_run_git(*args, **kwargs):
+            if "rev-parse" in args:
+                return MagicMock(returncode=1)
+            if "--list" in args:
+                return MagicMock(stdout="")
             return MagicMock(returncode=0)
 
         with patch("cagent.cli.misc._get_repo_root", return_value=tmp_path), \
-             patch("cagent.cli.misc.subprocess.run", side_effect=mock_run), \
+             patch("cagent.cli.misc.run_git", side_effect=mock_run_git), \
              pytest.raises(SystemExit, match="1"):
             _cmd_push(args)
 
@@ -1164,15 +1155,15 @@ class TestCmdPush:
         args = MagicMock()
         args.branch = "my-branch"
 
-        def mock_run(cmd, **kwargs):
-            if "rev-parse" in cmd:
+        def mock_run_git(*args, **kwargs):
+            if "rev-parse" in args:
                 return MagicMock(returncode=0)
-            if "log" in cmd and "HEAD.." in cmd:
+            if "log" in args:
                 return MagicMock(stdout="abc1234 feat: something\n")
             return MagicMock(returncode=0)
 
         with patch("cagent.cli.misc._get_repo_root", return_value=tmp_path), \
-             patch("cagent.cli.misc.subprocess.run", side_effect=mock_run), \
+             patch("cagent.cli.misc.run_git", side_effect=mock_run_git), \
              patch("builtins.input", return_value="n"):
             _cmd_push(args)
 
@@ -1186,15 +1177,15 @@ class TestCmdPush:
         args = MagicMock()
         args.branch = "my-branch"
 
-        def mock_run(cmd, **kwargs):
-            if "rev-parse" in cmd:
+        def mock_run_git(*args, **kwargs):
+            if "rev-parse" in args:
                 return MagicMock(returncode=0)
-            if "log" in cmd:
+            if "log" in args:
                 return MagicMock(stdout="abc1234 feat: something\n")
             return MagicMock(returncode=0)
 
         with patch("cagent.cli.misc._get_repo_root", return_value=tmp_path), \
-             patch("cagent.cli.misc.subprocess.run", side_effect=mock_run), \
+             patch("cagent.cli.misc.run_git", side_effect=mock_run_git), \
              patch("builtins.input", side_effect=EOFError):
             _cmd_push(args)
 
@@ -1208,17 +1199,17 @@ class TestCmdPush:
         args = MagicMock()
         args.branch = "my-branch"
 
-        def mock_run(cmd, **kwargs):
-            if "rev-parse" in cmd:
+        def mock_run_git(*args, **kwargs):
+            if "rev-parse" in args:
                 return MagicMock(returncode=0)
-            if "log" in cmd and "HEAD.." in cmd:
+            if "log" in args:
                 return MagicMock(stdout="abc1234 feat: something\n")
-            if "push" in cmd:
+            if "push" in args:
                 return MagicMock(returncode=0)
             return MagicMock(returncode=0)
 
         with patch("cagent.cli.misc._get_repo_root", return_value=tmp_path), \
-             patch("cagent.cli.misc.subprocess.run", side_effect=mock_run), \
+             patch("cagent.cli.misc.run_git", side_effect=mock_run_git), \
              patch("builtins.input", return_value="y"):
             _cmd_push(args)
 
@@ -1232,18 +1223,17 @@ class TestCmdPush:
         args = MagicMock()
         args.branch = "my-branch"
 
-        def mock_run(cmd, **kwargs):
-            if "rev-parse" in cmd:
+        def mock_run_git(*args, **kwargs):
+            if "rev-parse" in args:
                 return MagicMock(returncode=0, stdout="")
-            # Check if any element in cmd list starts with "HEAD.."
-            if any(c.startswith("HEAD..") for c in cmd):
-                return MagicMock(returncode=0, stdout="")  # nothing to push
-            if "-5" in cmd:
+            if any(isinstance(a, str) and a.startswith("HEAD..") for a in args):
+                return MagicMock(returncode=0, stdout="")
+            if "-5" in args:
                 return MagicMock(returncode=0, stdout="abc1234 old commit\n")
             return MagicMock(returncode=0, stdout="")
 
         with patch("cagent.cli.misc._get_repo_root", return_value=tmp_path), \
-             patch("cagent.cli.misc.subprocess.run", side_effect=mock_run), \
+             patch("cagent.cli.misc.run_git", side_effect=mock_run_git), \
              patch("builtins.input", return_value="n"):
             _cmd_push(args)
 
@@ -1257,17 +1247,17 @@ class TestCmdPush:
         args = MagicMock()
         args.branch = "my-branch"
 
-        def mock_run(cmd, **kwargs):
-            if "rev-parse" in cmd:
+        def mock_run_git(*args, **kwargs):
+            if "rev-parse" in args:
                 return MagicMock(returncode=0)
-            if "HEAD.." in cmd:
+            if "log" in args:
                 return MagicMock(stdout="abc1234 feat\n")
-            if "push" in cmd:
+            if "push" in args:
                 return MagicMock(returncode=1, stderr="Permission denied (publickey)", stdout="")
             return MagicMock(returncode=0)
 
         with patch("cagent.cli.misc._get_repo_root", return_value=tmp_path), \
-             patch("cagent.cli.misc.subprocess.run", side_effect=mock_run), \
+             patch("cagent.cli.misc.run_git", side_effect=mock_run_git), \
              patch("builtins.input", return_value="y"), \
              pytest.raises(SystemExit, match="1"):
             _cmd_push(args)
@@ -1283,17 +1273,17 @@ class TestCmdPush:
         args = MagicMock()
         args.branch = "my-branch"
 
-        def mock_run(cmd, **kwargs):
-            if "rev-parse" in cmd:
+        def mock_run_git(*args, **kwargs):
+            if "rev-parse" in args:
                 return MagicMock(returncode=0)
-            if "HEAD.." in cmd:
+            if "log" in args:
                 return MagicMock(stdout="abc1234 feat\n")
-            if "push" in cmd:
+            if "push" in args:
                 return MagicMock(returncode=1, stderr="", stdout="")
             return MagicMock(returncode=0)
 
         with patch("cagent.cli.misc._get_repo_root", return_value=tmp_path), \
-             patch("cagent.cli.misc.subprocess.run", side_effect=mock_run), \
+             patch("cagent.cli.misc.run_git", side_effect=mock_run_git), \
              patch("builtins.input", return_value="y"), \
              pytest.raises(SystemExit, match="1"):
             _cmd_push(args)

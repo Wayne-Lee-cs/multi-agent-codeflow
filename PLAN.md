@@ -10,6 +10,7 @@
 **v9.0 完成** — Phase 66-70 全部完成。576 tests, 76% coverage, mypy 0 errors。Bug修复+安全加固+性能优化+测试覆盖提升+代码审查修复。
 **v10.0 进行中** — 第四次全面评估。综合评分 8.2/10。重点：测试覆盖缺口修复（cli/run.py 49%, integrator.py 66%, server.py 64%）+ 文档同步。
 **v11.0 评估完成** — 第五次全面评估（2026-05-24）。综合评分 8.17/10。发现 S1 `_validate_cmd_str` 换行绕过（P0 安全漏洞）等 15 项新问题。Phase 77-79 规划。
+**v12.0 评估完成** — 第六次全面评估（2026-05-25）。综合评分 8.3/10。无新 P0 漏洞。主要短板：v10.0 积压 64/79 未完成（cli/run.py 47% 覆盖率为首要目标）。Phase 80-82 规划。
 
 ### v5.1 已完成项
 
@@ -372,6 +373,79 @@
 | 79.6 | `__all__` 导出控制 | 低 | 核心模块添加 `__all__` 声明 |
 | 79.7 | B2 `_rebase_strategy` run_id 参数化 | 低 | 已知 BUG-1（Phase 72.7），换行传参修复 |
 | 79.8 | B5 `_watch_dashboard` 轮询间隔可配置 | 低 | `server.py:689` — 硬编码 1s 改为可配置 |
+
+---
+
+## v12.0 Roadmap
+
+> 第六次全面评估（2026-05-25）。综合评分 8.3/10。
+> 585 tests, 75.59% coverage, mypy 0 errors, 22 source files。
+> pyproject.toml 版本 9.0.0。
+> 结论：项目质量稳定，无新 P0 安全漏洞。主要短板为 v10.0 Phase 71-76 积压（64/79 未完成）。
+> 详见 [SPEC.md](SPEC.md)。
+
+### 评估总结
+
+| 维度 | 评分 | 说明 |
+|------|------|------|
+| 安全性 | 9.0 | v11.0 P0 换行绕过已修复，DENY_PATTERNS 完善，沙箱覆盖全面 |
+| 正确性 | 8.5 | 主路径全覆盖，边缘情况（squash 回滚、path traversal）已加固 |
+| 测试充分性 | 7.0 | 75.59% 覆盖率达标，但 cli/run.py 47%、server.py 63% 为短板 |
+| 性能 | 8.5 | 增量序列化、版本号缓存、流式截断已实现 |
+| 代码质量 | 8.5 | mypy 0 errors, __all__ 导出, 策略去重完成 |
+| 架构 | 8.0 | 模块边界清晰，但 16 处 subprocess.run + 2 处 ensure_future 待统一 |
+
+### 覆盖率分布
+
+| 模块 | 覆盖率 | 缺失行 | 优先级 |
+|------|--------|--------|--------|
+| cli/run.py | 47% | 217/407 | **P0** — Phase 71 |
+| server.py | 63% | 134/367 | P1 — Phase 73 |
+| cli/base.py | 65% | 53/152 | P1 |
+| integrator.py | 68% | 116/366 | P1 — Phase 72 |
+| compat.py | 68% | 13/41 | P2 |
+| cli/watch.py | 68% | 51/160 | P2 |
+| log.py | 71% | 23/80 | P2 |
+
+### Phase 80: 版本号同步 + 积压清理 (P0) 🔴
+
+| # | 任务 | 风险 | 说明 |
+|---|------|------|------|
+| 80.1 | pyproject.toml 版本号同步 | 低 | `9.0.0` → `12.0.0`，与 PLAN.md 对齐 |
+| 80.2 | Phase 71 执行 — cli/run.py 测试 | 中 | 47% → 65%+，18 个测试用例，覆盖 _dispatch/_integrate/_summary/_execute_run |
+| 80.3 | Phase 72 执行 — integrator.py 测试 | 中 | 68% → 80%+，冲突解决/repair/squash 回滚路径 |
+| 80.4 | Phase 73 执行 — server.py 测试 | 中 | 63% → 75%+，WS 帧拼接/ping-pong/连接清理 |
+
+### Phase 81: v10.0 Phase 76 MEDIUM 收尾 (P1) 🟡
+
+| # | 任务 | 风险 | 说明 |
+|---|------|------|------|
+| 81.1 | 76.3 `_validate_agent_id` null byte | 中 | memory.py — 添加 `\x00` 检查 |
+| 81.2 | 76.4 memory.py OSError 处理 | 中 | write/append/read 添加 try/except OSError |
+| 81.3 | 76.7 ensure_future → create_task | 低 | server.py:778,784 — Python 3.10+ 废弃 API |
+| 81.4 | 76.9 auth_ok 并发写入 | 低 | cli/base.py — 使用 atomic_write |
+| 81.5 | 76.12 CLI git 操作统一 | 中 | 18 处 subprocess.run → git_utils 封装 |
+| 81.6 | 76.15 _follow_file 文件消失检测 | 低 | cli/logcmd.py — 连续空读超限后退出 |
+
+### Phase 82: 文档同步 + 验证 (P2) 🟢
+
+| # | 任务 | 风险 | 说明 |
+|---|------|------|------|
+| 82.1 | README.md 版本号同步 | 低 | v6.0.0 → v12.0.0，更新测试数+覆盖率 |
+| 82.2 | pyproject.toml fail_under 提升 | 低 | 75 → 78，Phase 80 完成后调整 |
+| 82.3 | 全量验证 | 低 | mypy 0 + 600+ tests + coverage ≥ 78% |
+| 82.4 | PLAN/CHECKLIST 状态同步 | 低 | 标记所有已完成项 |
+
+### v10.0 积压状态
+
+| Phase | 已完成 | 总计 | 状态 |
+|-------|--------|------|------|
+| 71 (cli/run.py 测试) | 0 | 18 | TODO |
+| 72 (integrator.py 测试) | 0 | 13 | TODO |
+| 73 (server.py 测试) | 0 | 10 | TODO |
+| 74 (收尾文档) | 0 | 6 | TODO |
+| 75 (HIGH 修复) | 9 | 10 | 1 待做 |
+| 76 (MEDIUM 修复) | 6 | 22 | 16 待做 |
 
 ---
 

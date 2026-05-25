@@ -72,7 +72,6 @@ async def integrate(
             tasks=done_tasks,
             worktree_path=worktree_path,
             run_dir=run_dir,
-            repo_root=repo_root,
             integration_branch=integration_branch,
             run_id=run_id,
             integrator_model_override=integrator_model_override,
@@ -86,7 +85,6 @@ async def integrate(
             tasks=done_tasks,
             worktree_path=worktree_path,
             run_dir=run_dir,
-            repo_root=repo_root,
             integration_branch=integration_branch,
             integrator_model_override=integrator_model_override,
             timeout=timeout,
@@ -101,7 +99,6 @@ async def integrate(
             tasks=done_tasks,
             worktree_path=worktree_path,
             run_dir=run_dir,
-            repo_root=repo_root,
             integrator_model_override=integrator_model_override,
             timeout=timeout,
             dashboard=dashboard,
@@ -632,10 +629,9 @@ async def _resolve_conflicts(
             f"Preserved intent of both sides."
         ))
 
-    # Update task state
+    # Update task state (operation already completed — no abort needed on failure)
     result = await _run_git("rev-parse", "HEAD", cwd=worktree_path, check=False)
     if result.returncode != 0:
-        await _abort_operation(completion_mode, worktree_path)
         return False
     task.commit_sha = result.stdout.strip()
     task.status = "done"
@@ -687,7 +683,6 @@ async def _cherry_pick_strategy(
     tasks: list[Task],
     worktree_path: Path,
     run_dir: Path,
-    repo_root: Path,
     integrator_model_override: str | None,
     timeout: int,
     dashboard: Dashboard | None,
@@ -725,7 +720,6 @@ async def _merge_strategy(
     tasks: list[Task],
     worktree_path: Path,
     run_dir: Path,
-    repo_root: Path,
     integration_branch: str,
     run_id: str,
     integrator_model_override: str | None,
@@ -797,7 +791,6 @@ async def _rebase_strategy(
     tasks: list[Task],
     worktree_path: Path,
     run_dir: Path,
-    repo_root: Path,
     integration_branch: str,
     integrator_model_override: str | None,
     timeout: int,
@@ -820,9 +813,8 @@ async def _rebase_strategy(
     if not task_commits:
         return [], list(tasks)
 
-    # Create a temporary branch (unique per run)
     if not run_id:
-        run_id = integration_branch.split("/")[1]
+        raise ValueError("run_id is required for _rebase_strategy")
     temp_branch = f"cagent/{run_id}/temp-rebase"
     try:
         # Create temp branch from current HEAD
@@ -871,7 +863,7 @@ async def _rebase_strategy(
         _report(dashboard, "error", f"rebase strategy exception: {e}")
         failed = [t for t in tasks if t not in integrated]
     finally:
-        # Clean up temp branch
+        await _run_git("checkout", integration_branch, cwd=worktree_path, check=False)
         await _run_git("branch", "-D", temp_branch, cwd=worktree_path, check=False)
 
     return integrated, failed

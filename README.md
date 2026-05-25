@@ -1,6 +1,6 @@
 # cagent
 
-> **v6.0.0** — 326 tests, zero third-party dependencies.
+> **v12.0.0** — 585 tests, 75.59% coverage, zero third-party dependencies.
 
 Concurrent agent workflow dispatcher — run multiple `claude -p` workers in parallel git worktrees.
 

@@ -10,6 +10,8 @@ import sys
 import time
 from pathlib import Path
 
+from cagent.git_utils import run_git
+
 _AUTH_CACHE_TTL = 300  # 5 minutes
 
 
@@ -101,9 +103,10 @@ def _auth_preflight_check(
         # Cache auth success
         if repo_root is not None:
             try:
+                from cagent.compat import atomic_write
                 cache_dir = repo_root / ".cagent"
                 cache_dir.mkdir(parents=True, exist_ok=True)
-                (cache_dir / "auth_ok").write_text(str(time.time()), encoding="utf-8")
+                atomic_write(cache_dir / "auth_ok", str(time.time()))
             except OSError:
                 pass  # Best effort
         return
@@ -154,11 +157,8 @@ def _print_auth_diagnostics() -> None:
 def _get_repo_root() -> Path:
     """Find the git repo root."""
     try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", check=True,
-        )
-    except subprocess.CalledProcessError:
+        result = run_git("rev-parse", "--show-toplevel")
+    except RuntimeError:
         print("Error: not inside a git repository.", file=sys.stderr)
         sys.exit(1)
     return Path(result.stdout.strip())

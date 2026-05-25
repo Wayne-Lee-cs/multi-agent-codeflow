@@ -28,12 +28,13 @@ def run_git(
     *args: str,
     cwd: str | Path | None = None,
     timeout: int = 60,
+    check: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     """Run a git command synchronously.
 
     Raises:
         GitTimeoutError: when the command exceeds *timeout* seconds.
-        RuntimeError: when git is not found or returns a non-zero exit code.
+        RuntimeError: when git is not found or returns a non-zero exit code (if check=True).
     """
     try:
         return subprocess.run(
@@ -43,7 +44,7 @@ def run_git(
             text=True,
             encoding="utf-8",
             errors="replace",
-            check=True,
+            check=check,
             timeout=timeout,
         )
     except FileNotFoundError:

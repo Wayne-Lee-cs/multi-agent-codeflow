@@ -47,14 +47,29 @@ def _print_events_formatted(path: Path, kind_filter: str | None) -> None:
 
 def _follow_events_formatted(path: Path, kind_filter: str | None) -> None:
     """Follow events file with human-readable output."""
+    _MAX_EMPTY_READS = 60  # 30 seconds at 0.5s intervals
+    _MAX_RESETS = 5
     print("(Press Ctrl+C to stop following)\n")
     with open(path, "r", encoding="utf-8") as f:
+        empty_count = 0
+        reset_count = 0
         try:
             while True:
                 line = f.readline()
                 if line:
+                    empty_count = 0
+                    reset_count = 0
                     _print_event_line(line, kind_filter)
                 else:
+                    empty_count += 1
+                    if empty_count >= _MAX_EMPTY_READS:
+                        if not path.exists():
+                            print(f"\nFile removed: {path}")
+                            break
+                        reset_count += 1
+                        if reset_count >= _MAX_RESETS:
+                            break
+                        empty_count = 0
                     time.sleep(0.5)
         except KeyboardInterrupt:
             pass
@@ -93,14 +108,29 @@ def _print_event_line(line: str, kind_filter: str | None) -> None:
 
 def _follow_file(path: Path) -> None:
     """Tail-follow a file (like tail -f)."""
+    _MAX_EMPTY_READS = 60  # 30 seconds at 0.5s intervals
+    _MAX_RESETS = 5
     print("(Press Ctrl+C to stop following)\n")
     with open(path, "r", encoding="utf-8") as f:
+        empty_count = 0
+        reset_count = 0
         try:
             while True:
                 line = f.readline()
                 if line:
+                    empty_count = 0
+                    reset_count = 0
                     print(line, end="")
                 else:
+                    empty_count += 1
+                    if empty_count >= _MAX_EMPTY_READS:
+                        if not path.exists():
+                            print(f"\nFile removed: {path}")
+                            break
+                        reset_count += 1
+                        if reset_count >= _MAX_RESETS:
+                            break
+                        empty_count = 0
                     time.sleep(0.5)
         except KeyboardInterrupt:
             pass
