@@ -69,9 +69,13 @@ def _run_lock(repo_root: Path, force: bool = False):
         lock_fd = open(lock_path, "w", encoding="utf-8")
         if sys.platform == "win32":
             import msvcrt
+            # Write PID first so the file has content before locking.
+            # msvcrt.locking requires the locked byte range to exist.
+            lock_fd.write(str(os.getpid()))
+            lock_fd.flush()
             try:
                 lock_fd.seek(0)
-                msvcrt.locking(lock_fd.fileno(), msvcrt.LK_NBLCK, 4096)
+                msvcrt.locking(lock_fd.fileno(), msvcrt.LK_NBLCK, 1)
             except OSError:
                 lock_fd.close()
                 print(
@@ -92,8 +96,8 @@ def _run_lock(repo_root: Path, force: bool = False):
                     file=sys.stderr,
                 )
                 sys.exit(1)
-        lock_fd.write(str(os.getpid()))
-        lock_fd.flush()
+            lock_fd.write(str(os.getpid()))
+            lock_fd.flush()
         yield
     finally:
         if lock_fd is not None:

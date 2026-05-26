@@ -192,21 +192,8 @@ def _find_run_dir(repo_root: Path, run_id: str | None) -> Path:
 
 def _is_pid_active(pid: int) -> bool:
     """Check if a process is still running."""
-    try:
-        if sys.platform == "win32":
-            import ctypes
-            kernel32 = ctypes.windll.kernel32
-            # PROCESS_QUERY_LIMITED_INFORMATION works even for elevated processes
-            handle = kernel32.OpenProcess(0x1000, False, pid)
-            if handle:
-                kernel32.CloseHandle(handle)
-                return True
-            return False
-        else:
-            os.kill(pid, 0)
-            return True
-    except (OSError, PermissionError):
-        return False
+    from cagent.compat import is_pid_active
+    return is_pid_active(pid)
 
 
 def _terminate_pid(pid: int) -> None:

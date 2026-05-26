@@ -409,6 +409,41 @@ class TestDashboard:
         assert dash2.tasks["001"].tokens_in == 1000
         assert dash2.tasks["001"].tokens_out == 400
 
+    def test_resume_rejects_invalid_status(self, tmp_path):
+        """dashboard.json with invalid status should be ignored (defaults to pending)."""
+        data = {
+            "001": {
+                "task_id": "001",
+                "status": "INVALID_STATUS",
+            }
+        }
+        (tmp_path / "dashboard.json").write_text(json.dumps(data), encoding="utf-8")
+        dash = Dashboard(tmp_path)
+        assert "001" in dash.tasks
+        tp = dash.tasks["001"]
+        assert tp.status == "pending"
+
+    def test_resume_rejects_path_traversal_task_id(self, tmp_path):
+        """dashboard.json with path traversal task_id should be skipped."""
+        data = {
+            "../../evil": {"task_id": "../../evil", "status": "done"},
+            "001": {"task_id": "001", "status": "done"},
+        }
+        (tmp_path / "dashboard.json").write_text(json.dumps(data), encoding="utf-8")
+        dash = Dashboard(tmp_path)
+        assert "../../evil" not in dash.tasks
+        assert "001" in dash.tasks
+
+    def test_resume_ignores_task_id_field_override(self, tmp_path):
+        """dashboard.json task_id field in dict should not override the key-based id."""
+        data = {
+            "001": {"task_id": "TAMPERED", "status": "done"},
+        }
+        (tmp_path / "dashboard.json").write_text(json.dumps(data), encoding="utf-8")
+        dash = Dashboard(tmp_path)
+        assert "001" in dash.tasks
+        assert dash.tasks["001"].task_id == "001"
+
     def test_path_traversal_rejected_in_update(self, tmp_path):
         """task_id with path traversal components should be rejected."""
         dash = Dashboard(tmp_path)
@@ -427,6 +462,29 @@ class TestDashboard:
             dash.set_task_status("../../etc/passwd", "done")
         with pytest.raises(ValueError, match="Invalid task_id"):
             dash.set_task_status("", "done")
+
+    def test_resume_rejects_wrong_types(self, tmp_path):
+        """dashboard.json with wrong field types should skip those fields."""
+        data = {
+            "001": {
+                "task_id": "001",
+                "status": "running",
+                "tokens_in": "not_a_number",
+                "tokens_out": [1, 2, 3],
+                "tool_count": "five",
+                "started_at": "yesterday",
+                "last_activity": 12345,
+            },
+        }
+        (tmp_path / "dashboard.json").write_text(json.dumps(data), encoding="utf-8")
+        dash = Dashboard(tmp_path)
+        tp = dash.tasks["001"]
+        assert tp.status == "running"
+        assert tp.tokens_in == 0  # default, not "not_a_number"
+        assert tp.tokens_out == 0  # default, not [1,2,3]
+        assert tp.tool_count == 0  # default, not "five"
+        assert tp.started_at is None  # default, not "yesterday"
+        assert tp.last_activity == ""  # default, not 12345
 
 
 class TestAsyncIO:

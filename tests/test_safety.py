@@ -76,6 +76,8 @@ class TestDenyPatterns:
         "del /s /q C:\\temp",
         "rd /s /q C:\\temp",
         "del /S C:\\temp",
+        "ri -Recurse -Force C:\\temp",
+        "ri -Force -Recurse C:\\temp",
     ])
     def test_windows_commands_blocked(self, cmd):
         assert any(re.search(p, cmd, re.IGNORECASE) for p in DENY_PATTERNS)
@@ -408,3 +410,74 @@ class TestPrepareSandbox:
         data = json.loads(settings_path.read_text(encoding="utf-8"))
         matchers = [h["matcher"] for h in data["hooks"]["PreToolUse"]]
         assert "Edit" in matchers
+
+    def test_settings_includes_powershell_matcher(self, tmp_path):
+        """settings.local.json should include PowerShell matcher."""
+        prepare_sandbox(tmp_path)
+        settings_path = tmp_path / ".claude" / "settings.local.json"
+        data = json.loads(settings_path.read_text(encoding="utf-8"))
+        matchers = [h["matcher"] for h in data["hooks"]["PreToolUse"]]
+        assert "PowerShell" in matchers
+
+    def test_hook_script_blocks_powershell_dangerous_commands(self, tmp_path):
+        """PowerShell tool with dangerous command is blocked."""
+        prepare_sandbox(tmp_path)
+        hook_script = tmp_path / ".claude" / "hooks" / "cagent-guard.py"
+
+        import subprocess
+        import sys
+
+        inp = json.dumps({"tool_name": "PowerShell", "tool_input": {"command": "git push origin main"}})
+        result = subprocess.run(
+            [sys.executable, str(hook_script)],
+            input=inp, capture_output=True, text=True,
+        )
+        assert result.returncode == 0
+        output = json.loads(result.stdout)
+        assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_hook_script_blocks_powershell_remove_item(self, tmp_path):
+        """PowerShell Remove-Item -Recurse -Force is blocked."""
+        prepare_sandbox(tmp_path)
+        hook_script = tmp_path / ".claude" / "hooks" / "cagent-guard.py"
+
+        import subprocess
+        import sys
+
+        inp = json.dumps({"tool_name": "PowerShell", "tool_input": {"command": "Remove-Item -Recurse -Force C:\\temp"}})
+        result = subprocess.run(
+            [sys.executable, str(hook_script)],
+            input=inp, capture_output=True, text=True,
+        )
+        assert result.returncode == 0
+        output = json.loads(result.stdout)
+        assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_hook_script_allows_powershell_safe_commands(self, tmp_path):
+        """PowerShell tool with safe command is allowed."""
+        prepare_sandbox(tmp_path)
+        hook_script = tmp_path / ".claude" / "hooks" / "cagent-guard.py"
+
+        import subprocess
+        import sys
+
+        inp = json.dumps({"tool_name": "PowerShell", "tool_input": {"command": "git status"}})
+        result = subprocess.run(
+            [sys.executable, str(hook_script)],
+            input=inp, capture_output=True, text=True,
+        )
+        assert result.returncode == 0
+        assert result.stdout.strip() == ""
+
+
+class TestCheckTokensWindowsQuotes:
+    """Test that _check_tokens handles Windows non-posix shlex correctly."""
+
+    def test_quoted_git_push_blocked(self):
+        """Quoted 'git' 'push' should still be caught after quote stripping."""
+        reason = _check_tokens('"git" "push"')
+        assert reason is not None
+
+    def test_quoted_rm_recursive_blocked(self):
+        reason = _check_tokens('"rm" "-rf" "/tmp"')
+        assert reason is not None

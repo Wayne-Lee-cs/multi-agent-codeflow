@@ -51,6 +51,37 @@ def enable_ansi() -> None:
         kernel32.SetConsoleMode(handle, mode.value | 0x0004)
 
 
+def is_pid_active(pid: int) -> bool:
+    """Check if a process is still running (cross-platform).
+
+    On Windows, uses GetExitCodeProcess to distinguish running processes
+    from exited-but-not-yet-reaped ones (OpenProcess alone is insufficient).
+    """
+    if pid <= 0:
+        return False
+    try:
+        if _IS_WINDOWS:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            _STILL_ACTIVE = 259
+            handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not handle:
+                return False
+            try:
+                exit_code = ctypes.c_ulong()
+                if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                    return exit_code.value == _STILL_ACTIVE
+                return False
+            finally:
+                kernel32.CloseHandle(handle)
+        else:
+            os.kill(pid, 0)
+            return True
+    except (OSError, PermissionError):
+        return False
+
+
 def atomic_write(path: Path, content: str) -> None:
     """Write content to path atomically via tmp + rename.
 

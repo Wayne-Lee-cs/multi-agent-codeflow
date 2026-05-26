@@ -1,4 +1,4 @@
-"""Unit tests for cagent/compat.py — atomic_write, is_tty, enable_ansi."""
+"""Unit tests for cagent/compat.py — atomic_write, is_tty, enable_ansi, is_pid_active."""
 
 import os
 import sys
@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from cagent.compat import atomic_write, enable_ansi, is_tty
+from cagent.compat import atomic_write, enable_ansi, is_pid_active, is_tty
 
 
 class TestAtomicWrite:
@@ -66,6 +66,24 @@ class TestAtomicWrite:
         # No temp files left behind
         tmp_files = [f for f in tmp_path.iterdir() if f.suffix == ".tmp"]
         assert tmp_files == []
+
+
+class TestIsPidActive:
+    def test_current_process_is_active(self):
+        assert is_pid_active(os.getpid()) is True
+
+    def test_nonexistent_pid_is_inactive(self):
+        assert is_pid_active(999999999) is False
+
+    def test_returns_bool(self):
+        result = is_pid_active(os.getpid())
+        assert isinstance(result, bool)
+
+    def test_zero_pid_returns_false(self):
+        assert is_pid_active(0) is False
+
+    def test_negative_pid_returns_false(self):
+        assert is_pid_active(-1) is False
 
 
 class TestIsTty:

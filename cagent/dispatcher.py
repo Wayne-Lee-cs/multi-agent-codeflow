@@ -137,14 +137,15 @@ async def run(
                             completed_ids = [t.id for t in tasks if t.status in ("done", "noop")]
                         shared_ctx = memory.build_shared_context(completed_ids)
 
-                    # Check token budget before starting
-                    if budget_exceeded:
-                        result = AgentResult(
-                            task_id=task.id,
-                            status="failed",
-                            fail_reason="token budget exceeded",
-                        )
-                        break
+                    # Check token budget before starting (under lock for consistency)
+                    async with lock:
+                        if budget_exceeded:
+                            result = AgentResult(
+                                task_id=task.id,
+                                status="failed",
+                                fail_reason="token budget exceeded",
+                            )
+                            break
 
                     # Run agent
                     result = await run_agent(
@@ -182,19 +183,18 @@ async def run(
                     except Exception as e:
                         logging.warning("worktree reset failed for task %s: %s", task.id, e)
 
-                # Update task with final result
+                # Update task with final result and check token budget (atomically)
                 async with lock:
                     task.status = result.status
                     task.commit_sha = result.commit_sha
                     results[task.id] = result
                     _throttled_dump()
 
-                # Check token budget after completion
-                if max_tokens is not None and dashboard and not budget_exceeded:
-                    total = sum(tp.tokens_in + tp.tokens_out for tp in dashboard.tasks.values())
-                    if total >= max_tokens:
-                        budget_exceeded = True
-                        logging.info("Token budget reached: %d / %d", total, max_tokens)
+                    if max_tokens is not None and dashboard and not budget_exceeded:
+                        total = sum(tp.tokens_in + tp.tokens_out for tp in dashboard.tasks.values())
+                        if total >= max_tokens:
+                            budget_exceeded = True
+                            logging.info("Token budget reached: %d / %d", total, max_tokens)
 
             except Exception as e:
                 result = AgentResult(

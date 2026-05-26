@@ -89,24 +89,40 @@ class RunMemory:
 
         Used to inject into worker prompts so later tasks can see what
         earlier tasks accomplished. Capped at max_chars to avoid exceeding
-        the model's context window.
+        the model's context window. Truncates individual entries to fit
+        all tasks rather than dropping later tasks entirely.
         """
         sorted_ids = sorted(task_ids)
         ids_tuple = tuple(sorted_ids)
         cache_key = (ids_tuple, self._version)
         if cache_key == self._cache_key:
             return self._cached_context
-        parts = []
-        total = 0
+        raw_entries: list[tuple[str, str]] = []
         for tid in sorted_ids:
             content = self.read(tid)
             if content:
-                entry = f"[Task {tid}]\n{content}"
-                if total + len(entry) > max_chars:
-                    break
-                parts.append(entry)
-                total += len(entry)
+                raw_entries.append((tid, content))
+        if not raw_entries:
+            self._cache_key = cache_key
+            self._cached_context = ""
+            return ""
+        n = len(raw_entries)
+        headers = [f"[Task {tid}]\n" for tid, _ in raw_entries]
+        join_overhead = 2 * (n - 1)  # "\n\n" only between entries
+        total_header = sum(len(h) for h in headers)
+        total_raw = total_header + join_overhead + sum(len(c) for _, c in raw_entries)
+        parts = []
+        if total_raw <= max_chars:
+            for (tid, content), hdr in zip(raw_entries, headers):
+                parts.append(f"{hdr}{content}")
+        else:
+            available = max_chars - total_header - join_overhead
+            per_entry = max(50, available // n)
+            for (tid, content), hdr in zip(raw_entries, headers):
+                parts.append(f"{hdr}{content[:per_entry]}")
         result = "\n\n".join(parts)
+        if len(result) > max_chars:
+            result = result[:max_chars]
         self._cache_key = cache_key
         self._cached_context = result
         return result

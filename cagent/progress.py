@@ -271,10 +271,15 @@ class Dashboard:
             try:
                 data = json.loads(dashboard_path.read_text(encoding="utf-8"))
                 for tid, tp_dict in data.items():
+                    try:
+                        _validate_task_id(tid)
+                    except ValueError:
+                        continue
                     tp = TaskProgress(task_id=tid)
                     for k, v in tp_dict.items():
+                        if k == "task_id":
+                            continue
                         if k == "last_event" and v is not None:
-                            # Defensive rebuild: handle missing fields gracefully
                             event_kind = v.get("kind", "text")
                             if event_kind not in _VALID_EVENT_KINDS:
                                 event_kind = "text"
@@ -284,7 +289,17 @@ class Dashboard:
                                 summary=v.get("summary", ""),
                                 raw=v.get("raw", {}),
                             )
+                        elif k == "status":
+                            if v in self._VALID_STATUSES:
+                                tp.status = v
                         elif k in TaskProgress.__dataclass_fields__:
+                            field_type = TaskProgress.__dataclass_fields__[k].type
+                            if field_type in ("int", int) and not isinstance(v, int):
+                                continue
+                            if field_type in ("float | None", "float") and v is not None and not isinstance(v, (int, float)):
+                                continue
+                            if field_type in ("str", str) and not isinstance(v, str):
+                                continue
                             setattr(tp, k, v)
                     self.tasks[tid] = tp
             except (json.JSONDecodeError, KeyError, TypeError):

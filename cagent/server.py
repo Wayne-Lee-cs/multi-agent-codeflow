@@ -31,6 +31,8 @@ def _is_localhost_origin(origin: str) -> bool:
     """
     if not origin:
         return False
+    if "\r" in origin or "\n" in origin:
+        return False
     try:
         parsed = urlparse(origin)
     except Exception:
@@ -111,8 +113,11 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
                 try {
                     const data = JSON.parse(event.data);
                     if (data.type === 'diff') {
-                        // Incremental update: merge into local state
-                        Object.assign(allTasks, data.tasks);
+                        // Incremental update: merge into local state, remove deleted
+                        for (const [tid, tp] of Object.entries(data.tasks)) {
+                            if (tp._deleted) { delete allTasks[tid]; }
+                            else { allTasks[tid] = tp; }
+                        }
                         renderDashboard(data.run_id, allTasks, data.max_tokens);
                     } else {
                         // Full snapshot (on initial connect)
@@ -293,12 +298,18 @@ class WebSocketConnection:
         except (ConnectionError, OSError):
             pass
 
+    _READ_TIMEOUT = 10.0  # per-read timeout to prevent slowloris
+
     async def read_frame(self) -> tuple[int, bytes] | None:
         """Read one complete WebSocket frame (header + payload).
 
         Returns (opcode, payload) or None on error/disconnect.
+        Each internal read has a timeout to prevent slowloris-style DoS.
         """
-        hdr = await self.reader.read(2)
+        try:
+            hdr = await asyncio.wait_for(self.reader.read(2), timeout=self._READ_TIMEOUT)
+        except (asyncio.TimeoutError, OSError):
+            return None
         if not hdr or len(hdr) < 2:
             return None
         first_byte = hdr[0]
@@ -309,21 +320,33 @@ class WebSocketConnection:
         if not masked:
             return None
         if payload_len == 126:
-            ext = await self.reader.read(2)
+            try:
+                ext = await asyncio.wait_for(self.reader.read(2), timeout=self._READ_TIMEOUT)
+            except (asyncio.TimeoutError, OSError):
+                return None
             if len(ext) < 2:
                 return None
             payload_len = struct.unpack(">H", ext)[0]
         elif payload_len == 127:
-            ext = await self.reader.read(8)
+            try:
+                ext = await asyncio.wait_for(self.reader.read(8), timeout=self._READ_TIMEOUT)
+            except (asyncio.TimeoutError, OSError):
+                return None
             if len(ext) < 8:
                 return None
             payload_len = struct.unpack(">Q", ext)[0]
         if payload_len > _MAX_WS_FRAME_SIZE:
             return None
-        mask_key = await self.reader.read(4)
+        try:
+            mask_key = await asyncio.wait_for(self.reader.read(4), timeout=self._READ_TIMEOUT)
+        except (asyncio.TimeoutError, OSError):
+            return None
         if len(mask_key) < 4:
             return None
-        payload = await self.reader.read(payload_len)
+        try:
+            payload = await asyncio.wait_for(self.reader.read(payload_len), timeout=self._READ_TIMEOUT)
+        except (asyncio.TimeoutError, OSError):
+            return None
         if len(payload) < payload_len:
             return None
         payload = bytes(
@@ -595,8 +618,9 @@ class DashboardServer:
         if not origin:
             await self._send_http_response(writer, 204, b"")
             return
+        sanitized = origin.replace("\r", "").replace("\n", "")
         extra_headers = (
-            f"Access-Control-Allow-Origin: {origin}\r\n"
+            f"Access-Control-Allow-Origin: {sanitized}\r\n"
             f"Access-Control-Allow-Methods: GET, OPTIONS\r\n"
             f"Access-Control-Allow-Headers: Content-Type\r\n"
             f"Access-Control-Max-Age: 600\r\n"
@@ -636,7 +660,8 @@ class DashboardServer:
     def _cors_headers(origin: str) -> str:
         """Return CORS headers string for a given Origin."""
         if _is_localhost_origin(origin):
-            return f"Access-Control-Allow-Origin: {origin}\r\n"
+            sanitized = origin.replace("\r", "").replace("\n", "")
+            return f"Access-Control-Allow-Origin: {sanitized}\r\n"
         return ""
 
     async def _send_http_response(
@@ -725,11 +750,10 @@ class DashboardServer:
                             for tid, tp in current_tasks.items():
                                 if tid not in self._last_tasks or tp != self._last_tasks[tid]:
                                     diff_tasks[tid] = tp
-                            # Remove deleted tasks from tracking
+                            # Mark deleted tasks so clients can remove them
                             deleted_tids = set(self._last_tasks) - set(current_tasks)
                             for tid in deleted_tids:
-                                del self._last_tasks[tid]
-                            self._last_tasks.update(diff_tasks)
+                                diff_tasks[tid] = {"_deleted": True}
 
                             if diff_tasks:
                                 msg = {
@@ -739,6 +763,11 @@ class DashboardServer:
                                     "max_tokens": data.get("max_tokens"),
                                 }
                                 await self._broadcast(json.dumps(msg))
+
+                            # Update local state after broadcast succeeds
+                            for tid in deleted_tids:
+                                self._last_tasks.pop(tid, None)
+                            self._last_tasks.update({k: v for k, v in diff_tasks.items() if not v.get("_deleted")})
 
                 await asyncio.sleep(self._poll_interval)
             except asyncio.CancelledError:

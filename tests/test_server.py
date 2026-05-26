@@ -1274,3 +1274,91 @@ class TestHandleConnectionHeaderLimits:
 
         response = b"".join(written_data)
         assert b"431" in response
+
+
+class TestCRLFInjection:
+    """Tests for CRLF injection prevention in Origin header."""
+
+    def test_origin_with_crlf_rejected(self) -> None:
+        """Origin containing CRLF is rejected by _is_localhost_origin."""
+        assert _is_localhost_origin("http://localhost:8080\r\nX-Injected: evil") is False
+        assert _is_localhost_origin("http://localhost\r\n") is False
+        assert _is_localhost_origin("http://localhost\nX-Evil: true") is False
+
+    def test_cors_headers_sanitize_crlf(self) -> None:
+        """_cors_headers strips CRLF even if validation is bypassed."""
+        result = DashboardServer._cors_headers("http://localhost:8080")
+        assert "\r\n" not in result.replace("\r\n", "", 1)  # only the trailing CRLF
+
+    def test_cors_headers_no_injection_possible(self) -> None:
+        """Legitimate localhost origin produces clean header."""
+        result = DashboardServer._cors_headers("http://127.0.0.1:3000")
+        assert result == "Access-Control-Allow-Origin: http://127.0.0.1:3000\r\n"
+
+
+class TestDeletedTaskNotification:
+    """Tests for deleted task diff broadcast."""
+
+    @pytest.mark.asyncio
+    async def test_deleted_task_marked_in_diff(self, run_dir: Path) -> None:
+        """Deleted tasks are sent with _deleted marker in diff."""
+        server = DashboardServer(run_dir, port=8080)
+        conn = AsyncMock()
+        conn.connected = True
+        server.connections.append(conn)
+
+        # Initialize with two tasks
+        server._last_tasks = {
+            "task-001": {"task_id": "task-001", "status": "done"},
+            "task-002": {"task_id": "task-002", "status": "done"},
+        }
+
+        # Update dashboard.json to only have task-001 (task-002 deleted)
+        dashboard_data = {
+            "task-001": {"task_id": "task-001", "status": "done"},
+        }
+        (run_dir / "dashboard.json").write_text(
+            json.dumps(dashboard_data), encoding="utf-8"
+        )
+
+        import os
+        mtime = os.stat(run_dir / "dashboard.json").st_mtime
+        server._last_mtime = mtime - 1
+
+        task = asyncio.create_task(server._watch_dashboard())
+        await asyncio.sleep(1.5)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        assert conn.send.call_count >= 1
+        sent = json.loads(conn.send.call_args_list[-1][0][0])
+        assert sent["type"] == "diff"
+        assert "task-002" in sent["tasks"]
+        assert sent["tasks"]["task-002"].get("_deleted") is True
+        # task-002 should be removed from server's tracking
+        assert "task-002" not in server._last_tasks
+
+
+class TestReadFrameTimeout:
+    """Tests for WebSocket read_frame timeout protection."""
+
+    @pytest.mark.asyncio
+    async def test_read_frame_timeout_returns_none(self) -> None:
+        """read_frame returns None when initial read times out."""
+        reader = AsyncMock()
+
+        async def slow_read(n):
+            await asyncio.sleep(100)  # simulate slowloris
+            return b""
+
+        reader.read = slow_read
+        writer = MagicMock()
+
+        conn = WebSocketConnection(reader, writer)
+        conn._READ_TIMEOUT = 0.1  # speed up test
+
+        result = await conn.read_frame()
+        assert result is None

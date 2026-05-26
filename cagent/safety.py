@@ -40,9 +40,9 @@ DENY_PATTERNS = [
     r"\brm\s+-(?:[a-z]*[rRfF]){2}[a-z]*|\brm\s+-(?:[a-z]*[rR])\b|\brm\s+--recursive\b",
     r"\bgit\s+update-ref\b",
     r"\bgit\s+remote\s+(set-url|add)\b",
-    # Windows dangerous commands (PowerShell)
-    r"Remove-Item\s.*-Recurse.*-Force",
-    r"Remove-Item\s.*-Force.*-Recurse",
+    # Windows dangerous commands (PowerShell) — also match alias 'ri'
+    r"(?:Remove-Item|ri)\s.*-Recurse.*-Force",
+    r"(?:Remove-Item|ri)\s.*-Force.*-Recurse",
     r"\bdel\s+/[sS]",
     r"\brd\s+/[sS]",
     # Command chain / indirect execution patterns.
@@ -109,6 +109,11 @@ def _check_tokens(cmd: str) -> str | None:
         tokens = shlex.split(cmd, posix=(sys.platform != "win32"))
     except ValueError:
         return "malformed command (unbalanced quotes)"
+
+    # On Windows posix=False, shlex preserves quotes around tokens.
+    # Strip them so token-based checks match correctly.
+    if sys.platform == "win32":
+        tokens = [t.strip('"').strip("'") for t in tokens]
 
     # Walk through semicolons and && / || chains — check each sub-command
     i = 0
@@ -203,9 +208,34 @@ _HOOK_SCRIPT = '''\
 import json, re, shlex, sys
 
 DENY_PATTERNS = $patterns_json
+_COMPILED_PATTERNS = [re.compile(p, re.IGNORECASE) for p in DENY_PATTERNS]
 
 
 $check_tokens_source
+
+
+def _deny(reason):
+    result = {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": "cagent sandbox: " + reason
+        }
+    }
+    json.dump(result, sys.stdout)
+    sys.exit(0)
+
+
+def _check_command(cmd):
+    """Check a command string against deny patterns and token checks."""
+    if not cmd:
+        return
+    for cp, raw in zip(_COMPILED_PATTERNS, DENY_PATTERNS):
+        if cp.search(cmd):
+            _deny("blocked dangerous command matching " + raw)
+    token_reason = _check_tokens(cmd)
+    if token_reason:
+        _deny(token_reason)
 
 
 try:
@@ -216,32 +246,9 @@ except Exception:
 tool_name = inp.get("tool_name", "")
 tool_input = inp.get("tool_input", {})
 
-# Check Bash tool commands
-if tool_name == "Bash":
-    cmd = tool_input.get("command", "")
-    if cmd:
-        for pattern in DENY_PATTERNS:
-            if re.search(pattern, cmd, re.IGNORECASE):
-                result = {
-                    "hookSpecificOutput": {
-                        "hookEventName": "PreToolUse",
-                        "permissionDecision": "deny",
-                        "permissionDecisionReason": "cagent sandbox: blocked dangerous command matching " + pattern
-                    }
-                }
-                json.dump(result, sys.stdout)
-                sys.exit(0)
-        token_reason = _check_tokens(cmd)
-        if token_reason:
-            result = {
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "deny",
-                    "permissionDecisionReason": "cagent sandbox: " + token_reason
-                }
-            }
-            json.dump(result, sys.stdout)
-            sys.exit(0)
+# Check Bash and PowerShell tool commands
+if tool_name in ("Bash", "PowerShell"):
+    _check_command(tool_input.get("command", ""))
 
 # Check Write/Edit tool content — block file content that contains dangerous patterns
 # (defense-in-depth: prevents writing malicious scripts that could be executed later)
@@ -253,17 +260,9 @@ else:
     content = ""
 
 if content:
-    for pattern in DENY_PATTERNS:
-        if re.search(pattern, content, re.IGNORECASE):
-            result = {
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "deny",
-                    "permissionDecisionReason": "cagent sandbox: blocked file content matching " + pattern
-                }
-            }
-            json.dump(result, sys.stdout)
-            sys.exit(0)
+    for cp, raw in zip(_COMPILED_PATTERNS, DENY_PATTERNS):
+        if cp.search(content):
+            _deny("blocked file content matching " + raw)
 
 sys.exit(0)
 '''
@@ -292,7 +291,7 @@ def prepare_sandbox(worktree_path: str | Path) -> None:
     python_exe = sys.executable
     script_posix = hook_script_path.as_posix()
 
-    # Build settings.local.json with hooks for Bash, Write, and Edit tools
+    # Build settings.local.json with hooks for Bash, PowerShell, Write, and Edit tools
     hook_entry = {
         "type": "command",
         "command": f"\"{python_exe}\" \"{script_posix}\"",
@@ -303,6 +302,7 @@ def prepare_sandbox(worktree_path: str | Path) -> None:
         "hooks": {
             "PreToolUse": [
                 {"matcher": "Bash", "hooks": [hook_entry]},
+                {"matcher": "PowerShell", "hooks": [hook_entry]},
                 {"matcher": "Write", "hooks": [hook_entry]},
                 {"matcher": "Edit", "hooks": [hook_entry]},
             ]

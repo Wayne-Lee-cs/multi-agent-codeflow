@@ -1747,3 +1747,29 @@ class TestIntegrate:
             )
         hard_resets = [a for a in call_log if a[0] == "reset" and "--hard" in a]
         assert len(hard_resets) == 1
+
+    @pytest.mark.asyncio
+    async def test_squash_commit_fails_raises(self, tmp_path):
+        """Squash commit failure should raise RuntimeError instead of silently continuing."""
+        task = _done_task("1", "abc123")
+        call_log = []
+
+        async def fake_git(*args, cwd, env=None, check=True, timeout=60):
+            call_log.append(args)
+            if args[0] == "commit":
+                return _git_result(1, "", "nothing to commit")
+            if args[0] == "rev-parse":
+                return _git_result(0, "sha\n")
+            return _git_result(0, "")
+
+        with patch("cagent.worktree.create_worktree"), \
+             patch("cagent.integrator.cherry_pick_strategy", new_callable=AsyncMock, return_value=([task], [])), \
+             patch("cagent.integrator._run_git", side_effect=fake_git), \
+             pytest.raises(RuntimeError, match="Squash commit failed"):
+            await integrate(
+                tasks=[task], run_dir=tmp_path / "run1",
+                base_sha="basesha", repo_root=tmp_path,
+                squash=True,
+            )
+        hard_resets = [a for a in call_log if a[0] == "reset" and "--hard" in a]
+        assert len(hard_resets) == 1

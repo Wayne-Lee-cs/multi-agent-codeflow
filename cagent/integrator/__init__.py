@@ -157,7 +157,12 @@ async def integrate(
         commit_msg = "integrate:\n" + "\n".join(f"- {s}" for s in summary_parts)
         result = await _run_git("commit", "-m", commit_msg, cwd=worktree_path, check=False)
         if result.returncode != 0:
-            await _run_git("reset", "--hard", base_sha, cwd=worktree_path, check=False)
+            reset_result = await _run_git("reset", "--hard", base_sha, cwd=worktree_path, check=False)
+            reset_note = "Worktree reset to base." if reset_result.returncode == 0 else "WARNING: reset also failed — worktree state unknown."
+            raise RuntimeError(
+                f"Squash commit failed (exit {result.returncode}): {result.stderr.strip()[:200]}. "
+                f"{reset_note} Preserved at {worktree_path} for inspection."
+            )
 
     result = await _run_git("rev-parse", "HEAD", cwd=worktree_path)
     return result.stdout.strip()

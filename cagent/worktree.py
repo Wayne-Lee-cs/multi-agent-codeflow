@@ -6,6 +6,7 @@ import logging
 import sys
 from pathlib import Path
 
+from cagent.compat import is_pid_active as _is_pid_active
 from cagent.git_utils import run_git as _git
 
 _log = logging.getLogger(__name__)
@@ -43,25 +44,6 @@ def remove_worktree(repo_root: str | Path, worktree_path: str | Path) -> None:
 def delete_branch(repo_root: str | Path, branch: str) -> None:
     """Delete a local branch (force)."""
     _git("branch", "-D", branch, cwd=repo_root)
-
-
-def _is_pid_active(pid: int) -> bool:
-    """Check if a process is still running (cross-platform)."""
-    try:
-        if sys.platform == "win32":
-            import ctypes
-            kernel32 = ctypes.windll.kernel32
-            handle = kernel32.OpenProcess(0x1000, False, pid)
-            if handle:
-                kernel32.CloseHandle(handle)
-                return True
-            return False
-        else:
-            import os
-            os.kill(pid, 0)
-            return True
-    except (OSError, PermissionError):
-        return False
 
 
 def detect_orphan_worktrees(repo_root: str | Path) -> list[tuple[Path, str]]:

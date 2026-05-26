@@ -76,9 +76,28 @@ class TestBuildSharedContext:
         mem.write("001", "x" * 3000)
         mem.write("002", "y" * 3000)
         ctx = mem.build_shared_context(["001", "002"], max_chars=4000)
-        # Should include first but not second (exceeds cap)
+        # Both tasks included but truncated to fit within cap
         assert "Task 001" in ctx
-        assert "Task 002" not in ctx
+        assert "Task 002" in ctx
+        assert len(ctx) <= 4000
+
+    def test_max_chars_preserves_all_tasks(self, tmp_path):
+        """All tasks appear even when total exceeds max_chars (truncated, not dropped)."""
+        mem = RunMemory(tmp_path)
+        mem.write("001", "a" * 2000)
+        mem.write("002", "b" * 2000)
+        mem.write("003", "c" * 2000)
+        ctx = mem.build_shared_context(["001", "002", "003"], max_chars=3000)
+        assert "Task 001" in ctx
+        assert "Task 002" in ctx
+        assert "Task 003" in ctx
+        assert len(ctx) <= 3000
+
+    def test_empty_tasks_returns_empty(self, tmp_path):
+        """No task memories returns empty string."""
+        mem = RunMemory(tmp_path)
+        ctx = mem.build_shared_context(["001", "002"], max_chars=4000)
+        assert ctx == ""
 
     def test_cache_returns_same_result(self, tmp_path):
         mem = RunMemory(tmp_path)
