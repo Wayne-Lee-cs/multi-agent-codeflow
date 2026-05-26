@@ -17,6 +17,9 @@ from cagent.integrator import (
     _validate_cmd_str,
     integrate,
 )
+from cagent.integrator.base import _resolve_conflicts, _abort_operation, _report
+from cagent.integrator.merge import merge_strategy
+from cagent.integrator.rebase import rebase_strategy
 from cagent.tasks import Task
 
 from tests.conftest import AsyncLineIterator, _make_process
@@ -59,7 +62,7 @@ class TestHasConflictMarkers:
 async def test_run_git_success(tmp_path: Path) -> None:
     proc = _make_process(returncode=0, stdout=b"output\n")
 
-    with patch("cagent.integrator.asyncio.create_subprocess_exec", return_value=proc):
+    with patch("cagent.integrator.base.asyncio.create_subprocess_exec", return_value=proc):
         result = await _run_git("status", cwd=tmp_path)
 
     assert result.returncode == 0
@@ -70,7 +73,7 @@ async def test_run_git_success(tmp_path: Path) -> None:
 async def test_run_git_failure_raises(tmp_path: Path) -> None:
     proc = _make_process(returncode=1, stderr=b"error\n")
 
-    with patch("cagent.integrator.asyncio.create_subprocess_exec", return_value=proc):
+    with patch("cagent.integrator.base.asyncio.create_subprocess_exec", return_value=proc):
         with pytest.raises(RuntimeError, match="failed"):
             await _run_git("cherry-pick", "abc", cwd=tmp_path)
 
@@ -79,7 +82,7 @@ async def test_run_git_failure_raises(tmp_path: Path) -> None:
 async def test_run_git_check_false(tmp_path: Path) -> None:
     proc = _make_process(returncode=1, stderr=b"error\n")
 
-    with patch("cagent.integrator.asyncio.create_subprocess_exec", return_value=proc):
+    with patch("cagent.integrator.base.asyncio.create_subprocess_exec", return_value=proc):
         result = await _run_git("cherry-pick", "abc", cwd=tmp_path, check=False)
 
     assert result.returncode == 1
@@ -129,7 +132,7 @@ async def test_integrate_cherry_pick_success(tmp_path: Path) -> None:
         return _make_process(returncode=0)
 
     with patch("cagent.worktree.create_worktree"), \
-         patch("cagent.integrator.asyncio.create_subprocess_exec", side_effect=mock_exec):
+         patch("cagent.integrator.base.asyncio.create_subprocess_exec", side_effect=mock_exec):
         result = await integrate(
             tasks=tasks, run_dir=run_dir,
             base_sha="base123", repo_root=tmp_path,
@@ -163,7 +166,7 @@ async def test_integrate_partial_failure(tmp_path: Path) -> None:
         return _make_process(returncode=0)
 
     with patch("cagent.worktree.create_worktree"), \
-         patch("cagent.integrator.asyncio.create_subprocess_exec", side_effect=mock_exec):
+         patch("cagent.integrator.base.asyncio.create_subprocess_exec", side_effect=mock_exec):
         result = await integrate(
             tasks=tasks, run_dir=run_dir,
             base_sha="base123", repo_root=tmp_path,
@@ -186,7 +189,7 @@ async def test_integrate_all_fail_raises(tmp_path: Path) -> None:
         return _make_process(returncode=0)
 
     with patch("cagent.worktree.create_worktree"), \
-         patch("cagent.integrator.asyncio.create_subprocess_exec", side_effect=mock_exec):
+         patch("cagent.integrator.base.asyncio.create_subprocess_exec", side_effect=mock_exec):
         with pytest.raises(RuntimeError, match="All.*integration attempts failed"):
             await integrate(
                 tasks=tasks, run_dir=run_dir,
@@ -211,7 +214,7 @@ async def test_integrate_squash(tmp_path: Path) -> None:
         return _make_process(returncode=0)
 
     with patch("cagent.worktree.create_worktree"), \
-         patch("cagent.integrator.asyncio.create_subprocess_exec", side_effect=mock_exec):
+         patch("cagent.integrator.base.asyncio.create_subprocess_exec", side_effect=mock_exec):
         result = await integrate(
             tasks=tasks, run_dir=run_dir,
             base_sha="base123", repo_root=tmp_path, squash=True,
@@ -231,7 +234,7 @@ async def test_integrate_squash(tmp_path: Path) -> None:
 async def test_run_shell_cmd_success(tmp_path: Path) -> None:
     """Successful command returns 0 and output."""
     proc = _make_process(returncode=0, stdout=b"ok\n")
-    with patch("cagent.integrator.asyncio.create_subprocess_exec", return_value=proc):
+    with patch("cagent.integrator.base.asyncio.create_subprocess_exec", return_value=proc):
         code, output = await _run_shell_cmd("echo ok", tmp_path)
     assert code == 0
     assert "ok" in output
@@ -241,7 +244,7 @@ async def test_run_shell_cmd_success(tmp_path: Path) -> None:
 async def test_run_shell_cmd_failure(tmp_path: Path) -> None:
     """Failed command returns nonzero code."""
     proc = _make_process(returncode=1, stdout=b"error details\n")
-    with patch("cagent.integrator.asyncio.create_subprocess_exec", return_value=proc):
+    with patch("cagent.integrator.base.asyncio.create_subprocess_exec", return_value=proc):
         code, output = await _run_shell_cmd("false", tmp_path)
     assert code == 1
     assert "error details" in output
@@ -255,7 +258,7 @@ async def test_run_shell_cmd_timeout(tmp_path: Path) -> None:
     proc.kill = MagicMock()
     proc.wait = AsyncMock()
 
-    with patch("cagent.integrator.asyncio.create_subprocess_exec", return_value=proc):
+    with patch("cagent.integrator.base.asyncio.create_subprocess_exec", return_value=proc):
         code, output = await _run_shell_cmd("sleep 999", tmp_path, timeout=1)
     assert code == 1
     assert "timed out" in output.lower()
@@ -270,7 +273,7 @@ async def test_post_validate_passes_first_round(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
-    with patch("cagent.integrator._run_shell_cmd", return_value=(0, "all tests pass")):
+    with patch("cagent.integrator.base._run_shell_cmd", return_value=(0, "all tests pass")):
         result = await _post_integrate_validate(
             cmd_str="pytest",
             worktree_path=tmp_path,
@@ -306,10 +309,10 @@ async def test_post_validate_fails_then_repair_passes(tmp_path: Path) -> None:
             return repair_proc
         return git_proc
 
-    with patch("cagent.integrator._run_shell_cmd", side_effect=mock_shell_cmd), \
-         patch("cagent.integrator.prepare_sandbox"), \
-         patch("cagent.integrator._resolve_claude", return_value="claude"), \
-         patch("cagent.integrator.asyncio.create_subprocess_exec", side_effect=mock_exec):
+    with patch("cagent.integrator.base._run_shell_cmd", side_effect=mock_shell_cmd), \
+         patch("cagent.integrator.base.prepare_sandbox"), \
+         patch("cagent.integrator.base._resolve_claude", return_value="claude"), \
+         patch("cagent.integrator.base.asyncio.create_subprocess_exec", side_effect=mock_exec):
         result = await _post_integrate_validate(
             cmd_str="pytest",
             worktree_path=tmp_path,
@@ -337,10 +340,10 @@ async def test_post_validate_fails_both_rounds(tmp_path: Path) -> None:
             return repair_proc
         return git_proc
 
-    with patch("cagent.integrator._run_shell_cmd", return_value=(1, "FAIL")), \
-         patch("cagent.integrator.prepare_sandbox"), \
-         patch("cagent.integrator._resolve_claude", return_value="claude"), \
-         patch("cagent.integrator.asyncio.create_subprocess_exec", side_effect=mock_exec):
+    with patch("cagent.integrator.base._run_shell_cmd", return_value=(1, "FAIL")), \
+         patch("cagent.integrator.base.prepare_sandbox"), \
+         patch("cagent.integrator.base._resolve_claude", return_value="claude"), \
+         patch("cagent.integrator.base.asyncio.create_subprocess_exec", side_effect=mock_exec):
         result = await _post_integrate_validate(
             cmd_str="pytest",
             worktree_path=tmp_path,
@@ -360,10 +363,10 @@ async def test_post_validate_repair_agent_fails(tmp_path: Path) -> None:
 
     repair_proc = _make_process(returncode=1, stdout=b"")
 
-    with patch("cagent.integrator._run_shell_cmd", return_value=(1, "FAIL")), \
-         patch("cagent.integrator.prepare_sandbox"), \
-         patch("cagent.integrator._resolve_claude", return_value="claude"), \
-         patch("cagent.integrator.asyncio.create_subprocess_exec", return_value=repair_proc):
+    with patch("cagent.integrator.base._run_shell_cmd", return_value=(1, "FAIL")), \
+         patch("cagent.integrator.base.prepare_sandbox"), \
+         patch("cagent.integrator.base._resolve_claude", return_value="claude"), \
+         patch("cagent.integrator.base.asyncio.create_subprocess_exec", return_value=repair_proc):
         result = await _post_integrate_validate(
             cmd_str="pytest",
             worktree_path=tmp_path,
@@ -409,9 +412,9 @@ async def test_integrate_first_task_conflict_with_base(tmp_path: Path) -> None:
         return _make_process(returncode=0)
 
     with patch("cagent.worktree.create_worktree"), \
-         patch("cagent.integrator.prepare_sandbox"), \
-         patch("cagent.integrator._resolve_claude", return_value="claude"), \
-         patch("cagent.integrator.asyncio.create_subprocess_exec", side_effect=mock_exec):
+         patch("cagent.integrator.base.prepare_sandbox"), \
+         patch("cagent.integrator.base._resolve_claude", return_value="claude"), \
+         patch("cagent.integrator.base.asyncio.create_subprocess_exec", side_effect=mock_exec):
         result = await integrate(
             tasks=tasks, run_dir=run_dir,
             base_sha="base123", repo_root=tmp_path,
@@ -443,7 +446,7 @@ async def test_integrate_merge_strategy_success(tmp_path: Path) -> None:
         return _make_process(returncode=0)
 
     with patch("cagent.worktree.create_worktree"), \
-         patch("cagent.integrator.asyncio.create_subprocess_exec", side_effect=mock_exec):
+         patch("cagent.integrator.base.asyncio.create_subprocess_exec", side_effect=mock_exec):
         result = await integrate(
             tasks=tasks, run_dir=run_dir,
             base_sha="base123", repo_root=tmp_path,
@@ -473,7 +476,7 @@ async def test_integrate_rebase_strategy_success(tmp_path: Path) -> None:
         return _make_process(returncode=0)
 
     with patch("cagent.worktree.create_worktree"), \
-         patch("cagent.integrator.asyncio.create_subprocess_exec", side_effect=mock_exec):
+         patch("cagent.integrator.base.asyncio.create_subprocess_exec", side_effect=mock_exec):
         result = await integrate(
             tasks=tasks, run_dir=run_dir,
             base_sha="base123", repo_root=tmp_path,
@@ -515,9 +518,9 @@ async def test_integrate_merge_strategy_conflict_resolution(tmp_path: Path) -> N
         return _make_process(returncode=0)
 
     with patch("cagent.worktree.create_worktree"), \
-         patch("cagent.integrator.prepare_sandbox"), \
-         patch("cagent.integrator._resolve_claude", return_value="claude"), \
-         patch("cagent.integrator.asyncio.create_subprocess_exec", side_effect=mock_exec):
+         patch("cagent.integrator.base.prepare_sandbox"), \
+         patch("cagent.integrator.base._resolve_claude", return_value="claude"), \
+         patch("cagent.integrator.base.asyncio.create_subprocess_exec", side_effect=mock_exec):
         result = await integrate(
             tasks=tasks, run_dir=run_dir,
             base_sha="base123", repo_root=tmp_path,
@@ -560,9 +563,9 @@ async def test_integrate_rebase_strategy_conflict_resolution(tmp_path: Path) -> 
         return _make_process(returncode=0)
 
     with patch("cagent.worktree.create_worktree"), \
-         patch("cagent.integrator.prepare_sandbox"), \
-         patch("cagent.integrator._resolve_claude", return_value="claude"), \
-         patch("cagent.integrator.asyncio.create_subprocess_exec", side_effect=mock_exec):
+         patch("cagent.integrator.base.prepare_sandbox"), \
+         patch("cagent.integrator.base._resolve_claude", return_value="claude"), \
+         patch("cagent.integrator.base.asyncio.create_subprocess_exec", side_effect=mock_exec):
         result = await integrate(
             tasks=tasks, run_dir=run_dir,
             base_sha="base123", repo_root=tmp_path,
@@ -593,7 +596,7 @@ async def test_integrate_strategy_default_cherry_pick(tmp_path: Path) -> None:
         return _make_process(returncode=0)
 
     with patch("cagent.worktree.create_worktree"), \
-         patch("cagent.integrator.asyncio.create_subprocess_exec", side_effect=mock_exec):
+         patch("cagent.integrator.base.asyncio.create_subprocess_exec", side_effect=mock_exec):
         result = await integrate(
             tasks=tasks, run_dir=run_dir,
             base_sha="base123", repo_root=tmp_path,
@@ -699,8 +702,8 @@ class TestRunClaudeAgentStdinTimeout:
         proc.stdin.drain = AsyncMock(return_value=None)
         proc.stdin.wait_closed = AsyncMock(side_effect=TimeoutError)
 
-        with patch("cagent.integrator._resolve_claude", return_value="claude"), \
-             patch("cagent.integrator.asyncio.create_subprocess_exec", return_value=proc):
+        with patch("cagent.integrator.base._resolve_claude", return_value="claude"), \
+             patch("cagent.integrator.base.asyncio.create_subprocess_exec", return_value=proc):
             result = await _run_claude_agent(
                 prompt="test",
                 worktree_path=tmp_path,
@@ -721,8 +724,8 @@ class TestRunClaudeAgentStdinTimeout:
         proc.stdin.drain = AsyncMock(return_value=None)
         proc.stdin.wait_closed = AsyncMock(side_effect=OSError("broken pipe"))
 
-        with patch("cagent.integrator._resolve_claude", return_value="claude"), \
-             patch("cagent.integrator.asyncio.create_subprocess_exec", return_value=proc):
+        with patch("cagent.integrator.base._resolve_claude", return_value="claude"), \
+             patch("cagent.integrator.base.asyncio.create_subprocess_exec", return_value=proc):
             result = await _run_claude_agent(
                 prompt="test",
                 worktree_path=tmp_path,
@@ -742,8 +745,8 @@ class TestRunClaudeAgentFileNotFound:
     async def test_file_not_found_returns_none(self, tmp_path):
         from cagent.integrator import _run_claude_agent
 
-        with patch("cagent.integrator._resolve_claude", return_value="claude"), \
-             patch("cagent.integrator.asyncio.create_subprocess_exec",
+        with patch("cagent.integrator.base._resolve_claude", return_value="claude"), \
+             patch("cagent.integrator.base.asyncio.create_subprocess_exec",
                    side_effect=FileNotFoundError("claude")):
             result = await _run_claude_agent(
                 prompt="test",
@@ -759,8 +762,8 @@ class TestRunClaudeAgentFileNotFound:
     async def test_os_error_returns_none(self, tmp_path):
         from cagent.integrator import _run_claude_agent
 
-        with patch("cagent.integrator._resolve_claude", return_value="claude"), \
-             patch("cagent.integrator.asyncio.create_subprocess_exec",
+        with patch("cagent.integrator.base._resolve_claude", return_value="claude"), \
+             patch("cagent.integrator.base.asyncio.create_subprocess_exec",
                    side_effect=OSError("permission denied")):
             result = await _run_claude_agent(
                 prompt="test",
@@ -771,3 +774,976 @@ class TestRunClaudeAgentFileNotFound:
                 dashboard=None,
             )
         assert result is None
+
+
+# --- _report tests ---
+
+
+class TestReport:
+    def test_report_with_dashboard(self):
+        dashboard = MagicMock()
+        _report(dashboard, "text", "hello")
+        dashboard.update.assert_called_once()
+        args = dashboard.update.call_args
+        assert args[0][0] == "_integrator"
+        assert args[0][1].summary == "hello"
+        assert args[0][1].kind == "text"
+
+    def test_report_without_dashboard(self):
+        _report(None, "error", "no dashboard")
+
+
+# --- _abort_operation tests ---
+
+
+class TestAbortOperation:
+    @pytest.mark.asyncio
+    async def test_abort_cherry_pick(self, tmp_path):
+        with patch("cagent.integrator.base._run_git", new_callable=AsyncMock) as mock_git:
+            mock_git.return_value = _git_result(0, "")
+            await _abort_operation("cherry-pick", tmp_path)
+            mock_git.assert_called_once()
+            assert mock_git.call_args[0][:2] == ("cherry-pick", "--abort")
+
+    @pytest.mark.asyncio
+    async def test_abort_merge(self, tmp_path):
+        with patch("cagent.integrator.base._run_git", new_callable=AsyncMock) as mock_git:
+            mock_git.return_value = _git_result(0, "")
+            await _abort_operation("merge", tmp_path)
+            mock_git.assert_called_once()
+            assert mock_git.call_args[0][:2] == ("merge", "--abort")
+
+    @pytest.mark.asyncio
+    async def test_abort_rebase(self, tmp_path):
+        with patch("cagent.integrator.base._run_git", new_callable=AsyncMock) as mock_git:
+            mock_git.return_value = _git_result(0, "")
+            await _abort_operation("rebase", tmp_path)
+            mock_git.assert_called_once()
+            assert mock_git.call_args[0][:2] == ("rebase", "--abort")
+
+    @pytest.mark.asyncio
+    async def test_abort_unknown_mode_does_nothing(self, tmp_path):
+        with patch("cagent.integrator.base._run_git", new_callable=AsyncMock) as mock_git:
+            await _abort_operation("unknown", tmp_path)
+            mock_git.assert_not_called()
+
+
+# --- _run_shell_cmd tests ---
+
+
+class TestRunShellCmd:
+    @pytest.mark.asyncio
+    async def test_invalid_cmd_rejected(self, tmp_path):
+        rc, output = await _run_shell_cmd("echo\nhello", tmp_path)
+        assert rc == 1
+        assert "rejected" in output.lower()
+
+    @pytest.mark.asyncio
+    async def test_backtick_cmd_rejected(self, tmp_path):
+        rc, output = await _run_shell_cmd("echo `whoami`", tmp_path)
+        assert rc == 1
+        assert "rejected" in output.lower()
+
+    @pytest.mark.asyncio
+    async def test_timeout(self, tmp_path):
+        mock_proc = AsyncMock()
+        mock_proc.communicate = AsyncMock(side_effect=asyncio.TimeoutError)
+        mock_proc.kill = MagicMock()
+        mock_proc.wait = AsyncMock()
+        mock_proc.returncode = -1
+
+        with patch("cagent.integrator.base.asyncio.create_subprocess_exec", return_value=mock_proc):
+            rc, output = await _run_shell_cmd("echo hello", tmp_path, timeout=1)
+        assert rc == 1
+        assert "timed out" in output.lower()
+
+    @pytest.mark.asyncio
+    async def test_successful_cmd(self, tmp_path):
+        mock_proc = AsyncMock()
+        mock_proc.communicate = AsyncMock(return_value=(b"hello world\n", None))
+        mock_proc.returncode = 0
+
+        with patch("cagent.integrator.base.asyncio.create_subprocess_exec", return_value=mock_proc):
+            rc, output = await _run_shell_cmd("echo hello", tmp_path)
+        assert rc == 0
+        assert "hello world" in output
+
+    @pytest.mark.asyncio
+    async def test_timeout_process_lookup_error(self, tmp_path):
+        mock_proc = AsyncMock()
+        mock_proc.communicate = AsyncMock(side_effect=asyncio.TimeoutError)
+        mock_proc.kill = MagicMock(side_effect=ProcessLookupError)
+        mock_proc.wait = AsyncMock()
+        mock_proc.returncode = None
+
+        with patch("cagent.integrator.base.asyncio.create_subprocess_exec", return_value=mock_proc):
+            rc, output = await _run_shell_cmd("echo hello", tmp_path, timeout=1)
+        assert rc == 1
+        assert "timed out" in output.lower()
+
+
+# --- _resolve_conflicts tests ---
+
+
+def _git_result(rc=0, stdout="", stderr=""):
+    from cagent.git_utils import GitResult
+    return GitResult(returncode=rc, stdout=stdout, stderr=stderr)
+
+
+class TestResolveConflicts:
+    @pytest.mark.asyncio
+    async def test_no_conflict_files_returns_false(self, tmp_path):
+        """No conflict markers in status -> returns False."""
+        with patch("cagent.integrator.base._run_git", new_callable=AsyncMock) as mock_git:
+            mock_git.return_value = _git_result(0, "M  file.py\n")
+            task = _done_task("1", "abc123")
+            result = await _resolve_conflicts(
+                task=task, integrated_tasks=[], worktree_path=tmp_path,
+                run_dir=tmp_path, integrator_model_override=None,
+                timeout=60, dashboard=None,
+            )
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_agent_fails_aborts(self, tmp_path):
+        """Agent returns non-zero -> abort and return False."""
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+
+        async def fake_git(*args, cwd, env=None, check=True, timeout=60):
+            if args[0] == "status":
+                return _git_result(0, "UU conflict.py\n")
+            if args[0] == "grep":
+                return _git_result(1, "")
+            return _git_result(0, "")
+
+        task = _done_task("1", "abc123")
+        with patch("cagent.integrator.base._run_git", side_effect=fake_git), \
+             patch("cagent.integrator.base.prepare_sandbox"), \
+             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=1):
+            result = await _resolve_conflicts(
+                task=task, integrated_tasks=[], worktree_path=tmp_path,
+                run_dir=run_dir, integrator_model_override=None,
+                timeout=60, dashboard=MagicMock(),
+            )
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_agent_returns_none_aborts(self, tmp_path):
+        """Agent returns None (timeout/crash) -> abort and return False."""
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+
+        async def fake_git(*args, cwd, env=None, check=True, timeout=60):
+            if args[0] == "status":
+                return _git_result(0, "UU conflict.py\n")
+            return _git_result(0, "")
+
+        task = _done_task("1", "abc123")
+        with patch("cagent.integrator.base._run_git", side_effect=fake_git), \
+             patch("cagent.integrator.base.prepare_sandbox"), \
+             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=None):
+            result = await _resolve_conflicts(
+                task=task, integrated_tasks=[], worktree_path=tmp_path,
+                run_dir=run_dir, integrator_model_override=None,
+                timeout=60, dashboard=None,
+            )
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_conflict_markers_remain_aborts(self, tmp_path):
+        """Agent succeeds but conflict markers remain -> abort."""
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+
+        async def fake_git(*args, cwd, env=None, check=True, timeout=60):
+            if args[0] == "status":
+                return _git_result(0, "UU conflict.py\n")
+            if args[0] == "grep":
+                return _git_result(0, "conflict.py")
+            return _git_result(0, "")
+
+        task = _done_task("1", "abc123")
+        with patch("cagent.integrator.base._run_git", side_effect=fake_git), \
+             patch("cagent.integrator.base.prepare_sandbox"), \
+             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0):
+            result = await _resolve_conflicts(
+                task=task, integrated_tasks=[], worktree_path=tmp_path,
+                run_dir=run_dir, integrator_model_override=None,
+                timeout=60, dashboard=MagicMock(),
+            )
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_git_add_fails_aborts(self, tmp_path):
+        """git add -A fails -> abort."""
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+
+        async def fake_git(*args, cwd, env=None, check=True, timeout=60):
+            if args[0] == "status":
+                return _git_result(0, "UU conflict.py\n")
+            if args[0] == "grep":
+                return _git_result(1, "")
+            if args[0] == "add":
+                raise RuntimeError("git add failed")
+            return _git_result(0, "")
+
+        task = _done_task("1", "abc123")
+        with patch("cagent.integrator.base._run_git", side_effect=fake_git), \
+             patch("cagent.integrator.base.prepare_sandbox"), \
+             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0), \
+             patch("cagent.integrator.base.shutil.rmtree"):
+            result = await _resolve_conflicts(
+                task=task, integrated_tasks=[], worktree_path=tmp_path,
+                run_dir=run_dir, integrator_model_override=None,
+                timeout=60, dashboard=None,
+            )
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_cherry_pick_continue_success(self, tmp_path):
+        """Full success path for cherry-pick mode."""
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+
+        async def fake_git(*args, cwd, env=None, check=True, timeout=60):
+            if args[0] == "status":
+                return _git_result(0, "UU conflict.py\n")
+            if args[0] == "grep":
+                return _git_result(1, "")
+            if args[0] == "rev-parse":
+                return _git_result(0, "newsha123\n")
+            return _git_result(0, "")
+
+        task = _done_task("1", "abc123")
+        dashboard = MagicMock()
+        memory = MagicMock()
+        memory.read = MagicMock(return_value="")
+
+        with patch("cagent.integrator.base._run_git", side_effect=fake_git), \
+             patch("cagent.integrator.base.prepare_sandbox"), \
+             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0), \
+             patch("cagent.integrator.base.shutil.rmtree"):
+            result = await _resolve_conflicts(
+                task=task, integrated_tasks=[], worktree_path=tmp_path,
+                run_dir=run_dir, integrator_model_override=None,
+                timeout=60, dashboard=dashboard, memory=memory,
+            )
+        assert result is True
+        assert task.commit_sha == "newsha123"
+        memory.append.assert_called_once()
+        dashboard.set_task_status.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_cherry_pick_continue_fails_aborts(self, tmp_path):
+        """cherry-pick --continue raises -> abort and return False."""
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+
+        async def fake_git(*args, cwd, env=None, check=True, timeout=60):
+            if args[0] == "status":
+                return _git_result(0, "UU conflict.py\n")
+            if args[0] == "grep":
+                return _git_result(1, "")
+            if args[0] == "cherry-pick" and "--continue" in args:
+                raise RuntimeError("cherry-pick --continue failed")
+            if args[0] == "cherry-pick" and "--abort" in args:
+                return _git_result(0, "")
+            return _git_result(0, "")
+
+        task = _done_task("1", "abc123")
+        with patch("cagent.integrator.base._run_git", side_effect=fake_git), \
+             patch("cagent.integrator.base.prepare_sandbox"), \
+             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0), \
+             patch("cagent.integrator.base.shutil.rmtree"):
+            result = await _resolve_conflicts(
+                task=task, integrated_tasks=[], worktree_path=tmp_path,
+                run_dir=run_dir, integrator_model_override=None,
+                timeout=60, dashboard=None,
+            )
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_merge_commit_success(self, tmp_path):
+        """Merge mode: commit --no-edit succeeds."""
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+
+        async def fake_git(*args, cwd, env=None, check=True, timeout=60):
+            if args[0] == "status":
+                return _git_result(0, "UU conflict.py\n")
+            if args[0] == "grep":
+                return _git_result(1, "")
+            if args[0] == "rev-parse":
+                return _git_result(0, "mergesha\n")
+            return _git_result(0, "")
+
+        task = _done_task("1", "abc123")
+        with patch("cagent.integrator.base._run_git", side_effect=fake_git), \
+             patch("cagent.integrator.base.prepare_sandbox"), \
+             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0), \
+             patch("cagent.integrator.base.shutil.rmtree"):
+            result = await _resolve_conflicts(
+                task=task, integrated_tasks=[], worktree_path=tmp_path,
+                run_dir=run_dir, integrator_model_override=None,
+                timeout=60, dashboard=None, completion_mode="merge",
+            )
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_merge_commit_fails(self, tmp_path):
+        """Merge mode: commit --no-edit fails -> return False."""
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+
+        async def fake_git(*args, cwd, env=None, check=True, timeout=60):
+            if args[0] == "status":
+                return _git_result(0, "UU conflict.py\n")
+            if args[0] == "grep":
+                return _git_result(1, "")
+            if args[0] == "commit":
+                raise RuntimeError("commit failed")
+            return _git_result(0, "")
+
+        task = _done_task("1", "abc123")
+        with patch("cagent.integrator.base._run_git", side_effect=fake_git), \
+             patch("cagent.integrator.base.prepare_sandbox"), \
+             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0), \
+             patch("cagent.integrator.base.shutil.rmtree"):
+            result = await _resolve_conflicts(
+                task=task, integrated_tasks=[], worktree_path=tmp_path,
+                run_dir=run_dir, integrator_model_override=None,
+                timeout=60, dashboard=None, completion_mode="merge",
+            )
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_rebase_continue_success(self, tmp_path):
+        """Rebase mode: rebase --continue succeeds."""
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+
+        async def fake_git(*args, cwd, env=None, check=True, timeout=60):
+            if args[0] == "status":
+                return _git_result(0, "UU conflict.py\n")
+            if args[0] == "grep":
+                return _git_result(1, "")
+            if args[0] == "rev-parse":
+                return _git_result(0, "rebasesha\n")
+            return _git_result(0, "")
+
+        task = _done_task("1", "abc123")
+        with patch("cagent.integrator.base._run_git", side_effect=fake_git), \
+             patch("cagent.integrator.base.prepare_sandbox"), \
+             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0), \
+             patch("cagent.integrator.base.shutil.rmtree"):
+            result = await _resolve_conflicts(
+                task=task, integrated_tasks=[], worktree_path=tmp_path,
+                run_dir=run_dir, integrator_model_override=None,
+                timeout=60, dashboard=None, completion_mode="rebase",
+            )
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_rebase_continue_fails_aborts(self, tmp_path):
+        """Rebase mode: rebase --continue fails -> abort."""
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+
+        async def fake_git(*args, cwd, env=None, check=True, timeout=60):
+            if args[0] == "status":
+                return _git_result(0, "UU conflict.py\n")
+            if args[0] == "grep":
+                return _git_result(1, "")
+            if args[0] == "rebase" and "--continue" in args:
+                raise RuntimeError("rebase --continue failed")
+            return _git_result(0, "")
+
+        task = _done_task("1", "abc123")
+        with patch("cagent.integrator.base._run_git", side_effect=fake_git), \
+             patch("cagent.integrator.base.prepare_sandbox"), \
+             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0), \
+             patch("cagent.integrator.base.shutil.rmtree"):
+            result = await _resolve_conflicts(
+                task=task, integrated_tasks=[], worktree_path=tmp_path,
+                run_dir=run_dir, integrator_model_override=None,
+                timeout=60, dashboard=None, completion_mode="rebase",
+            )
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_with_integrated_tasks_and_memory(self, tmp_path):
+        """Resolve conflicts with existing integrated tasks and memory context."""
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+
+        async def fake_git(*args, cwd, env=None, check=True, timeout=60):
+            if args[0] == "status":
+                return _git_result(0, "UU conflict.py\n")
+            if args[0] == "grep":
+                return _git_result(1, "")
+            if args[0] == "rev-parse":
+                return _git_result(0, "newsha\n")
+            return _git_result(0, "")
+
+        task = _done_task("2", "def456")
+        prior = _done_task("1", "abc123")
+        memory = MagicMock()
+        memory.read = MagicMock(return_value="Prior task did X")
+
+        with patch("cagent.integrator.base._run_git", side_effect=fake_git), \
+             patch("cagent.integrator.base.prepare_sandbox"), \
+             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0), \
+             patch("cagent.integrator.base.shutil.rmtree"):
+            result = await _resolve_conflicts(
+                task=task, integrated_tasks=[prior], worktree_path=tmp_path,
+                run_dir=run_dir, integrator_model_override=None,
+                timeout=60, dashboard=None, memory=memory,
+            )
+        assert result is True
+        memory.read.assert_called_with("1")
+
+    @pytest.mark.asyncio
+    async def test_rev_parse_fails_returns_false(self, tmp_path):
+        """rev-parse HEAD fails -> return False."""
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+
+        async def fake_git(*args, cwd, env=None, check=True, timeout=60):
+            if args[0] == "status":
+                return _git_result(0, "UU conflict.py\n")
+            if args[0] == "grep":
+                return _git_result(1, "")
+            if args[0] == "rev-parse":
+                return _git_result(1, "")
+            return _git_result(0, "")
+
+        task = _done_task("1", "abc123")
+        with patch("cagent.integrator.base._run_git", side_effect=fake_git), \
+             patch("cagent.integrator.base.prepare_sandbox"), \
+             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0), \
+             patch("cagent.integrator.base.shutil.rmtree"):
+            result = await _resolve_conflicts(
+                task=task, integrated_tasks=[], worktree_path=tmp_path,
+                run_dir=run_dir, integrator_model_override=None,
+                timeout=60, dashboard=None, memory=MagicMock(read=MagicMock(return_value="")),
+            )
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_claude_dir_cleanup(self, tmp_path):
+        """Existing .claude dir gets cleaned up after agent resolution."""
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        (claude_dir / "settings.json").write_text("{}", encoding="utf-8")
+
+        async def fake_git(*args, cwd, env=None, check=True, timeout=60):
+            if args[0] == "status":
+                return _git_result(0, "UU conflict.py\n")
+            if args[0] == "grep":
+                return _git_result(1, "")
+            if args[0] == "rev-parse":
+                return _git_result(0, "sha123\n")
+            return _git_result(0, "")
+
+        task = _done_task("1", "abc123")
+        with patch("cagent.integrator.base._run_git", side_effect=fake_git), \
+             patch("cagent.integrator.base.prepare_sandbox"), \
+             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0):
+            result = await _resolve_conflicts(
+                task=task, integrated_tasks=[], worktree_path=tmp_path,
+                run_dir=run_dir, integrator_model_override=None,
+                timeout=60, dashboard=None,
+            )
+        assert result is True
+        assert not claude_dir.exists()
+
+    @pytest.mark.asyncio
+    async def test_rename_in_conflict_files(self, tmp_path):
+        """Status with ' -> ' rename syntax is parsed correctly."""
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+
+        async def fake_git(*args, cwd, env=None, check=True, timeout=60):
+            if args[0] == "status":
+                return _git_result(0, "UU old.py -> new.py\n")
+            if args[0] == "grep":
+                return _git_result(1, "")
+            if args[0] == "rev-parse":
+                return _git_result(0, "sha\n")
+            return _git_result(0, "")
+
+        task = _done_task("1", "abc123")
+        with patch("cagent.integrator.base._run_git", side_effect=fake_git), \
+             patch("cagent.integrator.base.prepare_sandbox"), \
+             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0) as mock_agent, \
+             patch("cagent.integrator.base.shutil.rmtree"):
+            await _resolve_conflicts(
+                task=task, integrated_tasks=[], worktree_path=tmp_path,
+                run_dir=run_dir, integrator_model_override=None,
+                timeout=60, dashboard=None,
+            )
+        prompt_used = mock_agent.call_args[1]["prompt"]
+        assert "new.py" in prompt_used
+
+
+# --- _post_integrate_validate tests ---
+
+
+class TestPostIntegrateValidate:
+    @pytest.mark.asyncio
+    async def test_cmd_passes_first_round(self, tmp_path):
+        """Command passes on first try -> return True."""
+        with patch("cagent.integrator.base._run_shell_cmd", new_callable=AsyncMock, return_value=(0, "ok")):
+            result = await _post_integrate_validate(
+                cmd_str="pytest", worktree_path=tmp_path, run_dir=tmp_path,
+                integrator_model_override=None, timeout=60, dashboard=MagicMock(),
+            )
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_cmd_fails_agent_repairs(self, tmp_path):
+        """Command fails, agent repairs, command passes on retry."""
+        call_count = {"shell": 0}
+
+        async def fake_shell(cmd, cwd, timeout=300):
+            call_count["shell"] += 1
+            if call_count["shell"] == 1:
+                return (1, "FAILED: test_foo")
+            return (0, "all passed")
+
+        async def fake_git(*args, cwd, env=None, check=True, timeout=60):
+            if args[0] == "status":
+                return _git_result(0, "M  fix.py\n")
+            return _git_result(0, "")
+
+        with patch("cagent.integrator.base._run_shell_cmd", side_effect=fake_shell), \
+             patch("cagent.integrator.base._run_git", side_effect=fake_git), \
+             patch("cagent.integrator.base.prepare_sandbox"), \
+             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0):
+            result = await _post_integrate_validate(
+                cmd_str="pytest", worktree_path=tmp_path, run_dir=tmp_path,
+                integrator_model_override=None, timeout=60, dashboard=MagicMock(),
+            )
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_cmd_fails_all_rounds(self, tmp_path):
+        """Command fails both rounds -> return False."""
+        with patch("cagent.integrator.base._run_shell_cmd", new_callable=AsyncMock, return_value=(1, "FAIL")), \
+             patch("cagent.integrator.base._run_git", new_callable=AsyncMock, return_value=_git_result(0, "")), \
+             patch("cagent.integrator.base.prepare_sandbox"), \
+             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0):
+            result = await _post_integrate_validate(
+                cmd_str="pytest", worktree_path=tmp_path, run_dir=tmp_path,
+                integrator_model_override=None, timeout=60, dashboard=MagicMock(),
+            )
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_repair_agent_fails(self, tmp_path):
+        """Repair agent returns non-zero -> stop and return False."""
+        with patch("cagent.integrator.base._run_shell_cmd", new_callable=AsyncMock, return_value=(1, "FAIL")), \
+             patch("cagent.integrator.base.prepare_sandbox"), \
+             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=1):
+            result = await _post_integrate_validate(
+                cmd_str="pytest", worktree_path=tmp_path, run_dir=tmp_path,
+                integrator_model_override=None, timeout=60, dashboard=MagicMock(),
+            )
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_repair_agent_returns_none(self, tmp_path):
+        """Repair agent returns None (timeout) -> stop and return False."""
+        with patch("cagent.integrator.base._run_shell_cmd", new_callable=AsyncMock, return_value=(1, "FAIL")), \
+             patch("cagent.integrator.base.prepare_sandbox"), \
+             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=None):
+            result = await _post_integrate_validate(
+                cmd_str="pytest", worktree_path=tmp_path, run_dir=tmp_path,
+                integrator_model_override=None, timeout=60, dashboard=None,
+            )
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_repair_no_changes_skips_commit(self, tmp_path):
+        """Agent makes no changes -> skip commit, log message."""
+        call_count = {"shell": 0}
+
+        async def fake_shell(cmd, cwd, timeout=300):
+            call_count["shell"] += 1
+            if call_count["shell"] == 1:
+                return (1, "FAIL")
+            return (1, "STILL FAIL")
+
+        async def fake_git(*args, cwd, env=None, check=True, timeout=60):
+            if args[0] == "status":
+                return _git_result(0, "")
+            return _git_result(0, "")
+
+        dashboard = MagicMock()
+        with patch("cagent.integrator.base._run_shell_cmd", side_effect=fake_shell), \
+             patch("cagent.integrator.base._run_git", side_effect=fake_git), \
+             patch("cagent.integrator.base.prepare_sandbox"), \
+             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0):
+            result = await _post_integrate_validate(
+                cmd_str="pytest", worktree_path=tmp_path, run_dir=tmp_path,
+                integrator_model_override=None, timeout=60, dashboard=dashboard,
+            )
+        assert result is False
+        summaries = [c[0][1].summary for c in dashboard.update.call_args_list]
+        assert any("no changes" in s for s in summaries)
+
+    @pytest.mark.asyncio
+    async def test_git_add_runtime_error_breaks(self, tmp_path):
+        """git add -A raises RuntimeError -> break and return False."""
+        async def fake_git(*args, cwd, env=None, check=True, timeout=60):
+            if args[0] == "add":
+                raise RuntimeError("git add error")
+            return _git_result(0, "")
+
+        with patch("cagent.integrator.base._run_shell_cmd", new_callable=AsyncMock, return_value=(1, "FAIL")), \
+             patch("cagent.integrator.base._run_git", side_effect=fake_git), \
+             patch("cagent.integrator.base.prepare_sandbox"), \
+             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0):
+            result = await _post_integrate_validate(
+                cmd_str="pytest", worktree_path=tmp_path, run_dir=tmp_path,
+                integrator_model_override=None, timeout=60, dashboard=None,
+            )
+        assert result is False
+
+
+# --- merge_strategy tests ---
+
+
+class TestMergeStrategy:
+    @pytest.mark.asyncio
+    async def test_task_without_commit_sha_fails(self, tmp_path):
+        """Task with no commit_sha goes to failed."""
+        task = Task(id="1", prompt="test", branch="b")
+        task.status = "done"
+        task.commit_sha = None
+
+        async def fake_git(*args, cwd, env=None, check=True, timeout=60):
+            return _git_result(0, "")
+
+        with patch("cagent.integrator.merge._run_git", side_effect=fake_git):
+            integrated, failed = await merge_strategy(
+                tasks=[task], worktree_path=tmp_path, run_dir=tmp_path,
+                integration_branch="int", run_id="r1",
+                integrator_model_override=None, timeout=60,
+                dashboard=None, memory=None,
+            )
+        assert integrated == []
+        assert failed == [task]
+
+    @pytest.mark.asyncio
+    async def test_merge_exception_caught(self, tmp_path):
+        """Exception in merge loop -> task goes to failed."""
+        task = _done_task("1", "abc123")
+
+        async def fake_git(*args, cwd, env=None, check=True, timeout=60):
+            if args[0] == "branch" and "-f" in args:
+                raise RuntimeError("unexpected error")
+            return _git_result(0, "")
+
+        with patch("cagent.integrator.merge._run_git", side_effect=fake_git):
+            integrated, failed = await merge_strategy(
+                tasks=[task], worktree_path=tmp_path, run_dir=tmp_path,
+                integration_branch="int", run_id="r1",
+                integrator_model_override=None, timeout=60,
+                dashboard=MagicMock(), memory=None,
+            )
+        assert integrated == []
+        assert failed == [task]
+
+    @pytest.mark.asyncio
+    async def test_merge_no_conflict_failure_aborts(self, tmp_path):
+        """Merge fails without conflict markers -> abort merge, task fails."""
+        task = _done_task("1", "abc123")
+
+        async def fake_git(*args, cwd, env=None, check=True, timeout=60):
+            if args[0] == "merge":
+                if "--abort" in args:
+                    return _git_result(0, "")
+                return _git_result(1, "")
+            if args[0] == "status":
+                return _git_result(0, "M  file.py\n")
+            return _git_result(0, "")
+
+        with patch("cagent.integrator.merge._run_git", side_effect=fake_git):
+            integrated, failed = await merge_strategy(
+                tasks=[task], worktree_path=tmp_path, run_dir=tmp_path,
+                integration_branch="int", run_id="r1",
+                integrator_model_override=None, timeout=60,
+                dashboard=None, memory=None,
+            )
+        assert integrated == []
+        assert failed == [task]
+
+
+# --- rebase_strategy tests ---
+
+
+class TestRebaseStrategy:
+    @pytest.mark.asyncio
+    async def test_missing_run_id_raises(self, tmp_path):
+        """run_id is required."""
+        task = _done_task("1", "abc123")
+        with pytest.raises(ValueError, match="run_id is required"):
+            await rebase_strategy(
+                tasks=[task], worktree_path=tmp_path, run_dir=tmp_path,
+                integration_branch="int",
+                integrator_model_override=None, timeout=60,
+                dashboard=None, memory=None, run_id="",
+            )
+
+    @pytest.mark.asyncio
+    async def test_no_tasks_with_commits(self, tmp_path):
+        """Tasks without commit_sha -> return empty integrated, all failed."""
+        task = Task(id="1", prompt="test", branch="b")
+        task.status = "done"
+        task.commit_sha = None
+
+        integrated, failed = await rebase_strategy(
+            tasks=[task], worktree_path=tmp_path, run_dir=tmp_path,
+            integration_branch="int",
+            integrator_model_override=None, timeout=60,
+            dashboard=None, memory=None, run_id="r1",
+        )
+        assert integrated == []
+        assert failed == [task]
+
+    @pytest.mark.asyncio
+    async def test_rebase_exception_in_loop(self, tmp_path):
+        """Exception during rebase loop -> remaining tasks fail."""
+        task = _done_task("1", "abc123")
+
+        async def fake_git(*args, cwd, env=None, check=True, timeout=60):
+            if args[0] == "checkout" and "-b" in args:
+                raise RuntimeError("checkout failed")
+            return _git_result(0, "")
+
+        with patch("cagent.integrator.rebase._run_git", side_effect=fake_git):
+            integrated, failed = await rebase_strategy(
+                tasks=[task], worktree_path=tmp_path, run_dir=tmp_path,
+                integration_branch="int",
+                integrator_model_override=None, timeout=60,
+                dashboard=MagicMock(), memory=None, run_id="r1",
+            )
+        assert integrated == []
+        assert failed == [task]
+
+    @pytest.mark.asyncio
+    async def test_rebase_conflict_no_markers_skips(self, tmp_path):
+        """Cherry-pick fails but no conflict markers -> skip task."""
+        task = _done_task("1", "abc123")
+
+        async def fake_git(*args, cwd, env=None, check=True, timeout=60):
+            if args[0] == "cherry-pick":
+                if "--abort" in args:
+                    return _git_result(0, "")
+                return _git_result(1, "")
+            if args[0] == "status":
+                return _git_result(0, "M  file.py\n")
+            if args[0] == "rev-parse":
+                return _git_result(0, "sha\n")
+            return _git_result(0, "")
+
+        with patch("cagent.integrator.rebase._run_git", side_effect=fake_git):
+            integrated, failed = await rebase_strategy(
+                tasks=[task], worktree_path=tmp_path, run_dir=tmp_path,
+                integration_branch="int",
+                integrator_model_override=None, timeout=60,
+                dashboard=MagicMock(), memory=None, run_id="r1",
+            )
+        assert integrated == []
+        assert failed == [task]
+
+
+# --- integrate() top-level function tests ---
+
+
+class TestIntegrate:
+    @pytest.mark.asyncio
+    async def test_no_done_tasks_returns_base_sha(self, tmp_path):
+        """No done tasks -> return base_sha."""
+        task = Task(id="1", prompt="test", branch="b")
+        task.status = "pending"
+        with patch("cagent.worktree.create_worktree"):
+            result = await integrate(
+                tasks=[task], run_dir=tmp_path / "run1",
+                base_sha="basesha", repo_root=tmp_path,
+            )
+        assert result == "basesha"
+
+    @pytest.mark.asyncio
+    async def test_invalid_strategy_raises(self, tmp_path):
+        """Invalid strategy -> ValueError."""
+        task = _done_task("1", "abc123")
+        with patch("cagent.worktree.create_worktree"), \
+             pytest.raises(ValueError, match="Unknown strategy"):
+            await integrate(
+                tasks=[task], run_dir=tmp_path / "run1",
+                base_sha="basesha", repo_root=tmp_path,
+                strategy="invalid",
+            )
+
+    @pytest.mark.asyncio
+    async def test_all_fail_raises_runtime_error(self, tmp_path):
+        """All integrations fail -> RuntimeError."""
+        task = _done_task("1", "abc123")
+
+        with patch("cagent.worktree.create_worktree"), \
+             patch("cagent.integrator.cherry_pick_strategy", new_callable=AsyncMock, return_value=([], [task])), \
+             pytest.raises(RuntimeError, match="All 1.*failed"):
+            await integrate(
+                tasks=[task], run_dir=tmp_path / "run1",
+                base_sha="basesha", repo_root=tmp_path,
+            )
+
+    @pytest.mark.asyncio
+    async def test_partial_failure_reports(self, tmp_path):
+        """Some tasks fail -> dashboard event, but continues."""
+        ok_task = _done_task("1", "abc123")
+        fail_task = _done_task("2", "def456")
+        dashboard = MagicMock()
+
+        async def fake_git(*args, cwd, env=None, check=True, timeout=60):
+            return _git_result(0, "tipsha\n")
+
+        with patch("cagent.worktree.create_worktree"), \
+             patch("cagent.integrator.cherry_pick_strategy", new_callable=AsyncMock, return_value=([ok_task], [fail_task])), \
+             patch("cagent.integrator._run_git", side_effect=fake_git):
+            result = await integrate(
+                tasks=[ok_task, fail_task], run_dir=tmp_path / "run1",
+                base_sha="basesha", repo_root=tmp_path,
+                dashboard=dashboard,
+            )
+        assert result == "tipsha"
+        dashboard.update.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_squash_path(self, tmp_path):
+        """Squash mode resets, removes .claude, and commits."""
+        task = _done_task("1", "abc123")
+
+        async def fake_git(*args, cwd, env=None, check=True, timeout=60):
+            if args[0] == "rev-parse":
+                return _git_result(0, "squashsha\n")
+            return _git_result(0, "")
+
+        with patch("cagent.worktree.create_worktree"), \
+             patch("cagent.integrator.cherry_pick_strategy", new_callable=AsyncMock, return_value=([task], [])), \
+             patch("cagent.integrator._run_git", side_effect=fake_git):
+            result = await integrate(
+                tasks=[task], run_dir=tmp_path / "run1",
+                base_sha="basesha", repo_root=tmp_path,
+                squash=True,
+            )
+        assert result == "squashsha"
+
+    @pytest.mark.asyncio
+    async def test_post_integrate_cmd_runs(self, tmp_path):
+        """post_integrate_cmd is executed after integration."""
+        task = _done_task("1", "abc123")
+
+        async def fake_git(*args, cwd, env=None, check=True, timeout=60):
+            return _git_result(0, "sha\n")
+
+        with patch("cagent.worktree.create_worktree"), \
+             patch("cagent.integrator.cherry_pick_strategy", new_callable=AsyncMock, return_value=([task], [])), \
+             patch("cagent.integrator._run_git", side_effect=fake_git), \
+             patch("cagent.integrator._post_integrate_validate", new_callable=AsyncMock, return_value=True) as mock_validate:
+            await integrate(
+                tasks=[task], run_dir=tmp_path / "run1",
+                base_sha="basesha", repo_root=tmp_path,
+                post_integrate_cmd="pytest",
+            )
+        mock_validate.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_post_integrate_cmd_fails_reports(self, tmp_path):
+        """post_integrate_cmd failure -> dashboard error event."""
+        task = _done_task("1", "abc123")
+        dashboard = MagicMock()
+
+        async def fake_git(*args, cwd, env=None, check=True, timeout=60):
+            return _git_result(0, "sha\n")
+
+        with patch("cagent.worktree.create_worktree"), \
+             patch("cagent.integrator.cherry_pick_strategy", new_callable=AsyncMock, return_value=([task], [])), \
+             patch("cagent.integrator._run_git", side_effect=fake_git), \
+             patch("cagent.integrator._post_integrate_validate", new_callable=AsyncMock, return_value=False):
+            await integrate(
+                tasks=[task], run_dir=tmp_path / "run1",
+                base_sha="basesha", repo_root=tmp_path,
+                post_integrate_cmd="pytest",
+                dashboard=dashboard,
+            )
+        summaries = [c[0][1].summary for c in dashboard.update.call_args_list]
+        assert any("failed" in s for s in summaries)
+
+    @pytest.mark.asyncio
+    async def test_merge_strategy_dispatch(self, tmp_path):
+        """strategy='merge' dispatches to merge_strategy."""
+        task = _done_task("1", "abc123")
+
+        async def fake_git(*args, cwd, env=None, check=True, timeout=60):
+            return _git_result(0, "sha\n")
+
+        with patch("cagent.worktree.create_worktree"), \
+             patch("cagent.integrator.merge_strategy", new_callable=AsyncMock, return_value=([task], [])) as mock_merge, \
+             patch("cagent.integrator._run_git", side_effect=fake_git):
+            await integrate(
+                tasks=[task], run_dir=tmp_path / "run1",
+                base_sha="basesha", repo_root=tmp_path,
+                strategy="merge",
+            )
+        mock_merge.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_rebase_strategy_dispatch(self, tmp_path):
+        """strategy='rebase' dispatches to rebase_strategy."""
+        task = _done_task("1", "abc123")
+
+        async def fake_git(*args, cwd, env=None, check=True, timeout=60):
+            return _git_result(0, "sha\n")
+
+        with patch("cagent.worktree.create_worktree"), \
+             patch("cagent.integrator.rebase_strategy", new_callable=AsyncMock, return_value=([task], [])) as mock_rebase, \
+             patch("cagent.integrator._run_git", side_effect=fake_git):
+            await integrate(
+                tasks=[task], run_dir=tmp_path / "run1",
+                base_sha="basesha", repo_root=tmp_path,
+                strategy="rebase",
+            )
+        mock_rebase.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_squash_reset_fails_raises(self, tmp_path):
+        """Squash reset --soft fails -> reset --hard + raise."""
+        task = _done_task("1", "abc123")
+        call_log = []
+
+        async def fake_git(*args, cwd, env=None, check=True, timeout=60):
+            call_log.append(args)
+            if args[0] == "reset" and "--soft" in args:
+                raise RuntimeError("reset --soft failed")
+            if args[0] == "rev-parse":
+                return _git_result(0, "sha\n")
+            return _git_result(0, "")
+
+        with patch("cagent.worktree.create_worktree"), \
+             patch("cagent.integrator.cherry_pick_strategy", new_callable=AsyncMock, return_value=([task], [])), \
+             patch("cagent.integrator._run_git", side_effect=fake_git), \
+             pytest.raises(RuntimeError, match="reset --soft failed"):
+            await integrate(
+                tasks=[task], run_dir=tmp_path / "run1",
+                base_sha="basesha", repo_root=tmp_path,
+                squash=True,
+            )
+        hard_resets = [a for a in call_log if a[0] == "reset" and "--hard" in a]
+        assert len(hard_resets) == 1

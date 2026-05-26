@@ -879,6 +879,7 @@ class TestCmdResume:
         args = MagicMock()
         args.resume = "test-run"
         args.api_key = None
+        args.api_key_file = None
 
         with patch("cagent.cli.run._execute_run") as mock_exec, \
              patch("cagent.cli.run.run_git"):
@@ -907,11 +908,10 @@ class TestCmdResume:
 
         args = MagicMock()
         args.resume = "test-run"
-        args.api_key = "sk-ant-test-key-12345"
 
         with patch("cagent.cli.run._execute_run") as mock_exec, \
              patch("cagent.cli.run.run_git"):
-            _cmd_resume(args, tmp_path)
+            _cmd_resume(args, tmp_path, api_key="sk-ant-test-key-12345")
 
         mock_exec.assert_called_once()
         call_kwargs = mock_exec.call_args[1]
@@ -935,6 +935,7 @@ class TestCmdResume:
         args = MagicMock()
         args.resume = "test-run"
         args.api_key = None
+        args.api_key_file = None
 
         captured_merge = None
 

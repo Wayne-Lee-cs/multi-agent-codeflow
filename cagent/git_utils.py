@@ -29,7 +29,7 @@ def run_git(
     cwd: str | Path | None = None,
     timeout: int = 60,
     check: bool = True,
-) -> subprocess.CompletedProcess[str]:
+) -> GitResult:
     """Run a git command synchronously.
 
     Raises:
@@ -37,24 +37,29 @@ def run_git(
         RuntimeError: when git is not found or returns a non-zero exit code (if check=True).
     """
     try:
-        return subprocess.run(
+        proc = subprocess.run(
             ["git", *args],
             cwd=cwd,
             capture_output=True,
             text=True,
             encoding="utf-8",
             errors="replace",
-            check=check,
             timeout=timeout,
         )
     except FileNotFoundError:
         raise RuntimeError("'git' not found in PATH. Please install Git.")
     except subprocess.TimeoutExpired:
         raise GitTimeoutError(f"git {' '.join(args)} timed out after {timeout}s")
-    except subprocess.CalledProcessError as e:
+    result = GitResult(
+        returncode=proc.returncode,
+        stdout=proc.stdout,
+        stderr=proc.stderr,
+    )
+    if check and result.returncode != 0:
         raise RuntimeError(
-            f"git {' '.join(args)} failed (exit {e.returncode}): {e.stderr.strip()}"
-        ) from e
+            f"git {' '.join(args)} failed (exit {result.returncode}): {result.stderr.strip()}"
+        )
+    return result
 
 
 async def run_git_async(

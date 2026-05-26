@@ -370,6 +370,30 @@ def _execute_run(
     )
 
 
+def _resolve_api_key(args: argparse.Namespace) -> str | None:
+    """Resolve API key from --api-key-file, --api-key, or environment.
+
+    --api-key-file takes precedence over --api-key.
+    Returns None if no explicit key is provided (subprocess inherits env).
+    """
+    key_file = getattr(args, "api_key_file", None)
+    if key_file:
+        path = Path(key_file)
+        if not path.is_file():
+            print(f"Error: API key file not found: {key_file}", file=sys.stderr)
+            sys.exit(1)
+        try:
+            key = path.read_text(encoding="utf-8").strip()
+        except OSError as e:
+            print(f"Error: cannot read API key file: {e}", file=sys.stderr)
+            sys.exit(1)
+        if not key:
+            print(f"Error: API key file is empty: {key_file}", file=sys.stderr)
+            sys.exit(1)
+        return key
+    return getattr(args, "api_key", None)
+
+
 def _cmd_run(args: argparse.Namespace) -> None:
     """Execute the full run workflow: dispatch -> integrate -> summary."""
     repo_root = _get_repo_root()
@@ -377,24 +401,34 @@ def _cmd_run(args: argparse.Namespace) -> None:
     from cagent.config import apply_config, load_config
     apply_config(args, load_config(repo_root))
 
+    api_key = _resolve_api_key(args)
+
     if not args.dry_run:
         _preflight_check(
             check_auth=True,
             repo_root=repo_root,
-            force_auth=getattr(args, "api_key", None) is not None,
+            force_auth=api_key is not None,
         )
 
     with _run_lock(repo_root, force=getattr(args, "force", False)):
         if args.resume:
-            _cmd_resume(args, repo_root)
+            _cmd_resume(args, repo_root, api_key=api_key)
             return
-        _cmd_run_inner(args, repo_root)
+        _cmd_run_inner(args, repo_root, api_key=api_key)
 
 
-def _cmd_run_inner(args: argparse.Namespace, repo_root: Path) -> None:
+def _cmd_run_inner(args: argparse.Namespace, repo_root: Path, api_key: str | None = None) -> None:
     """Inner run logic, called while holding the run lock."""
     from cagent.tasks import dump_state, parse_tasks_file
-    from cagent.worktree import current_head
+    from cagent.worktree import cleanup_orphan_worktrees, current_head, detect_orphan_worktrees
+
+    # Auto-detect and clean orphaned worktrees from crashed runs
+    orphans = detect_orphan_worktrees(repo_root)
+    if orphans:
+        print(f"  Cleaning {len(orphans)} orphaned worktree(s) from previous runs...")
+        cleaned = cleanup_orphan_worktrees(repo_root, orphans)
+        if cleaned:
+            print(f"  Cleaned {cleaned} orphaned worktree(s).")
 
     if args.base:
         try:
@@ -474,11 +508,11 @@ def _cmd_run_inner(args: argparse.Namespace, repo_root: Path) -> None:
         args=args,
         retry_hint=f"To retry: python -m cagent run {args.tasks_file}",
         conventions=conventions,
-        api_key=getattr(args, "api_key", None),
+        api_key=api_key,
     )
 
 
-def _cmd_resume(args: argparse.Namespace, repo_root: Path) -> None:
+def _cmd_resume(args: argparse.Namespace, repo_root: Path, api_key: str | None = None) -> None:
     """Resume a previous run, skipping already-completed tasks."""
     from cagent.agent import AgentResult
     from cagent.tasks import dump_state, load_state
@@ -487,8 +521,7 @@ def _cmd_resume(args: argparse.Namespace, repo_root: Path) -> None:
     runs_dir = _get_runs_dir(repo_root)
     run_dir = (runs_dir / args.resume).resolve()
     # Path traversal protection: resolved path must stay under runs_dir
-    runs_dir_prefix = str(runs_dir.resolve()) + os.sep
-    if not str(run_dir).startswith(runs_dir_prefix):
+    if not run_dir.is_relative_to(runs_dir.resolve()):
         print(f"Error: invalid resume path (path traversal detected): {args.resume}", file=sys.stderr)
         sys.exit(1)
     if not run_dir.exists():
@@ -578,7 +611,7 @@ def _cmd_resume(args: argparse.Namespace, repo_root: Path) -> None:
         args=args,
         merge_results=_merge_resume_results,
         conventions=conventions,
-        api_key=getattr(args, "api_key", None),
+        api_key=api_key,
     )
 
 

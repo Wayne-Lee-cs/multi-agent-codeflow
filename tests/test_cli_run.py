@@ -562,6 +562,7 @@ class TestCmdRunInner:
         args.max_turns = None
         args.max_tokens = None
         args.api_key = None
+        args.api_key_file = None
 
         with patch("cagent.worktree.current_head", return_value="a" * 40), \
              patch("cagent.tasks.parse_tasks_md", return_value=(
@@ -595,6 +596,7 @@ class TestCmdRunInner:
         args.max_turns = None
         args.max_tokens = None
         args.api_key = None
+        args.api_key_file = None
 
         mock_result = MagicMock()
         mock_result.stdout = "abc123\n"
@@ -661,6 +663,7 @@ class TestCmdRunInner:
         args.max_turns = None
         args.max_tokens = 50000
         args.api_key = None
+        args.api_key_file = None
 
         with patch("cagent.worktree.current_head", return_value="a" * 40), \
              patch("cagent.tasks.parse_tasks_file", return_value=[
@@ -686,6 +689,7 @@ class TestCmdRun:
         args.resume = "some-run"
         args.force = False
         args.api_key = None
+        args.api_key_file = None
 
         with patch("cagent.cli.run._get_repo_root", return_value=tmp_path), \
              patch("cagent.config.apply_config"), \
@@ -704,6 +708,7 @@ class TestCmdRun:
         args.resume = None
         args.force = False
         args.api_key = None
+        args.api_key_file = None
 
         with patch("cagent.cli.run._get_repo_root", return_value=tmp_path), \
              patch("cagent.config.apply_config"), \
@@ -735,6 +740,7 @@ class TestResumeEdgeCases:
         args = MagicMock()
         args.resume = "test-run"
         args.api_key = None
+        args.api_key_file = None
 
         with patch("cagent.cli.run._execute_run") as mock_exec, \
              patch("cagent.cli.run.run_git"):
@@ -758,6 +764,7 @@ class TestResumeEdgeCases:
         args = MagicMock()
         args.resume = "test-run"
         args.api_key = None
+        args.api_key_file = None
 
         with patch("cagent.cli.run._execute_run") as mock_exec, \
              patch("cagent.cli.run.run_git"), \
@@ -788,6 +795,7 @@ class TestResumeEdgeCases:
         args = MagicMock()
         args.resume = "test-run"
         args.api_key = None
+        args.api_key_file = None
 
         with patch("cagent.cli.run._execute_run") as mock_exec, \
              patch("cagent.cli.run.run_git"), \
@@ -797,3 +805,58 @@ class TestResumeEdgeCases:
         # Task should be filtered out (still running), so dispatch_tasks is empty
         call_kwargs = mock_exec.call_args[1]
         assert len(call_kwargs["dispatch_tasks"]) == 0
+
+
+class TestResolveApiKey:
+    """Tests for _resolve_api_key — API key file support."""
+
+    def test_no_key_returns_none(self):
+        from cagent.cli.run import _resolve_api_key
+        args = MagicMock()
+        args.api_key_file = None
+        args.api_key = None
+        args.api_key_file = None
+        assert _resolve_api_key(args) is None
+
+    def test_api_key_direct(self):
+        from cagent.cli.run import _resolve_api_key
+        args = MagicMock()
+        args.api_key_file = None
+        args.api_key = "sk-ant-direct"
+        assert _resolve_api_key(args) == "sk-ant-direct"
+
+    def test_api_key_file(self, tmp_path):
+        from cagent.cli.run import _resolve_api_key
+        key_file = tmp_path / "key.txt"
+        key_file.write_text("sk-ant-from-file\n", encoding="utf-8")
+        args = MagicMock()
+        args.api_key_file = str(key_file)
+        args.api_key = "sk-ant-ignored"
+        assert _resolve_api_key(args) == "sk-ant-from-file"
+
+    def test_api_key_file_not_found(self, tmp_path):
+        from cagent.cli.run import _resolve_api_key
+        args = MagicMock()
+        args.api_key_file = str(tmp_path / "nonexistent.txt")
+        args.api_key = None
+        with pytest.raises(SystemExit):
+            _resolve_api_key(args)
+
+    def test_api_key_file_empty(self, tmp_path):
+        from cagent.cli.run import _resolve_api_key
+        key_file = tmp_path / "empty.txt"
+        key_file.write_text("  \n", encoding="utf-8")
+        args = MagicMock()
+        args.api_key_file = str(key_file)
+        args.api_key = None
+        with pytest.raises(SystemExit):
+            _resolve_api_key(args)
+
+    def test_api_key_file_takes_precedence(self, tmp_path):
+        from cagent.cli.run import _resolve_api_key
+        key_file = tmp_path / "key.txt"
+        key_file.write_text("sk-from-file", encoding="utf-8")
+        args = MagicMock()
+        args.api_key_file = str(key_file)
+        args.api_key = "sk-from-arg"
+        assert _resolve_api_key(args) == "sk-from-file"

@@ -355,11 +355,10 @@ async def _commit_result(
     if hooks_dir.exists() and not any(hooks_dir.iterdir()):
         hooks_dir.rmdir()
 
-    # Restore tracked .claude/ and .gitignore from base (best-effort, may not exist)
+    # Restore tracked .claude/ and .gitignore from base (best-effort).
+    # These may not exist in HEAD — ignore failures silently.
     for path in (".claude/", ".gitignore"):
-        r = await _git_op("checkout", "HEAD", "--", path, cwd=worktree_path, task=task, dashboard=dashboard)
-        if isinstance(r, AgentResult):
-            return r
+        await _run_git_async("checkout", "HEAD", "--", path, cwd=worktree_path, timeout=30)
 
     # Verify sandbox files are cleared before staging
     for f in sandbox_files:
