@@ -150,16 +150,19 @@ def parse_tasks_md(path: str | Path, run_id: str) -> tuple[list[Task], str]:
 
 
 def _extract_section(markdown: str, heading: str) -> str:
-    """Extract content under a ## heading."""
+    """Extract content under a ## heading (exact match, not prefix)."""
     lines = markdown.splitlines()
+    target = f"## {heading.lower()}"
     in_section = False
     result = []
     for line in lines:
-        if line.strip().lower().startswith(f"## {heading.lower()}"):
-            in_section = True
-            continue
-        if in_section:
-            if line.strip().lower().startswith("## "):
+        stripped_lower = line.strip().lower()
+        if not in_section:
+            if stripped_lower == target:
+                in_section = True
+                continue
+        else:
+            if stripped_lower.startswith("## "):
                 break
             result.append(line)
     return "\n".join(result).strip()

@@ -50,10 +50,8 @@ def _validate_cmd_str(cmd_str: str) -> bool:
     """Validate that a command string does not contain control characters.
 
     This function validates trusted input from CLI arguments (--post-integrate-cmd).
-    The allowed character set includes shell metacharacters (|, &, ;, $, etc.) by
-    design, since the caller intentionally passes shell commands. This only rejects
-    control characters and null bytes that could cause unexpected behavior in
-    subprocess invocation.
+    Rejects control characters, null bytes, backticks, and $(...) command
+    substitution to prevent injection via task prompts.
     """
     if not cmd_str:
         return False
@@ -62,6 +60,8 @@ def _validate_cmd_str(cmd_str: str) -> bool:
     if any(ord(c) < 0x20 or ord(c) == 0x7F for c in cmd_str):
         return False
     if '`' in cmd_str:
+        return False
+    if '$(' in cmd_str:
         return False
     return True
 

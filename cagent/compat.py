@@ -33,22 +33,28 @@ def is_tty() -> bool:
     return sys.stdin.isatty()
 
 
-def enable_ansi() -> None:
+def enable_ansi() -> bool:
     """Enable VT100 ANSI escape processing on Windows terminals.
 
-    On Unix this is a no-op. On Windows, this enables color/escape codes
-    in cmd.exe (Windows Terminal and PowerShell 7 already support them natively).
+    On Unix this is a no-op and always returns True. On Windows, this enables
+    color/escape codes in cmd.exe (Windows Terminal and PowerShell 7 already
+    support them natively). Returns True if ANSI processing is available.
     """
     if _IS_WINDOWS:
-        import ctypes
-        kernel32 = ctypes.windll.kernel32
-        # STD_OUTPUT_HANDLE = -11
-        handle = kernel32.GetStdHandle(-11)
-        # Get current console mode
-        mode = ctypes.c_ulong()
-        kernel32.GetConsoleMode(handle, ctypes.byref(mode))
-        # ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
-        kernel32.SetConsoleMode(handle, mode.value | 0x0004)
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            # STD_OUTPUT_HANDLE = -11
+            handle = kernel32.GetStdHandle(-11)
+            # Get current console mode
+            mode = ctypes.c_ulong()
+            kernel32.GetConsoleMode(handle, ctypes.byref(mode))
+            # ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+            result = kernel32.SetConsoleMode(handle, mode.value | 0x0004)
+            return bool(result)
+        except (OSError, AttributeError):
+            return False
+    return True
 
 
 def is_pid_active(pid: int) -> bool:

@@ -6,14 +6,18 @@ import asyncio
 import base64
 import hashlib
 import json
+import logging
 import os
+import secrets
 import signal
 import struct
 import sys
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
+
+_log = logging.getLogger(__name__)
 
 # Limits for security
 _MAX_WS_FRAME_SIZE = 1 * 1024 * 1024  # 1MB max WebSocket frame
@@ -44,7 +48,8 @@ def _is_localhost_origin(origin: str) -> bool:
 
 
 # Simple HTML dashboard frontend
-_DASHBOARD_HTML = """<!DOCTYPE html>
+_DASHBOARD_HTML = """\
+<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
@@ -98,7 +103,8 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 
         function connect() {
             const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            ws = new WebSocket(`${protocol}//${location.host}/ws`);
+            const token = new URLSearchParams(location.search).get('token') || '';
+            ws = new WebSocket(`${protocol}//${location.host}/ws?token=${encodeURIComponent(token)}`);
 
             ws.onopen = () => {
                 document.getElementById('connection').className = 'connected';
@@ -250,6 +256,9 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 </html>"""
 
 
+_DASHBOARD_HTML_BYTES = _DASHBOARD_HTML.encode("utf-8")
+
+
 def _encode_ws_frame(payload: bytes, opcode: int = 0x01) -> bytearray:
     """Encode a WebSocket frame (server-to-client, no masking)."""
     header = bytearray()
@@ -305,12 +314,12 @@ class WebSocketConnection:
 
         Returns (opcode, payload) or None on error/disconnect.
         Each internal read has a timeout to prevent slowloris-style DoS.
+        Uses readexactly() to guarantee complete reads — read() can return
+        fewer bytes than requested on TCP segment boundaries.
         """
         try:
-            hdr = await asyncio.wait_for(self.reader.read(2), timeout=self._READ_TIMEOUT)
-        except (asyncio.TimeoutError, OSError):
-            return None
-        if not hdr or len(hdr) < 2:
+            hdr = await asyncio.wait_for(self.reader.readexactly(2), timeout=self._READ_TIMEOUT)
+        except (asyncio.TimeoutError, asyncio.IncompleteReadError, OSError):
             return None
         first_byte = hdr[0]
         second_byte = hdr[1]
@@ -321,37 +330,32 @@ class WebSocketConnection:
             return None
         if payload_len == 126:
             try:
-                ext = await asyncio.wait_for(self.reader.read(2), timeout=self._READ_TIMEOUT)
-            except (asyncio.TimeoutError, OSError):
-                return None
-            if len(ext) < 2:
+                ext = await asyncio.wait_for(self.reader.readexactly(2), timeout=self._READ_TIMEOUT)
+            except (asyncio.TimeoutError, asyncio.IncompleteReadError, OSError):
                 return None
             payload_len = struct.unpack(">H", ext)[0]
         elif payload_len == 127:
             try:
-                ext = await asyncio.wait_for(self.reader.read(8), timeout=self._READ_TIMEOUT)
-            except (asyncio.TimeoutError, OSError):
-                return None
-            if len(ext) < 8:
+                ext = await asyncio.wait_for(self.reader.readexactly(8), timeout=self._READ_TIMEOUT)
+            except (asyncio.TimeoutError, asyncio.IncompleteReadError, OSError):
                 return None
             payload_len = struct.unpack(">Q", ext)[0]
         if payload_len > _MAX_WS_FRAME_SIZE:
             return None
         try:
-            mask_key = await asyncio.wait_for(self.reader.read(4), timeout=self._READ_TIMEOUT)
-        except (asyncio.TimeoutError, OSError):
-            return None
-        if len(mask_key) < 4:
+            mask_key = await asyncio.wait_for(self.reader.readexactly(4), timeout=self._READ_TIMEOUT)
+        except (asyncio.TimeoutError, asyncio.IncompleteReadError, OSError):
             return None
         try:
-            payload = await asyncio.wait_for(self.reader.read(payload_len), timeout=self._READ_TIMEOUT)
-        except (asyncio.TimeoutError, OSError):
+            payload = await asyncio.wait_for(self.reader.readexactly(payload_len), timeout=self._READ_TIMEOUT)
+        except (asyncio.TimeoutError, asyncio.IncompleteReadError, OSError):
             return None
-        if len(payload) < payload_len:
-            return None
-        payload = bytes(
-            b ^ mask_key[i % 4] for i, b in enumerate(payload)
-        )
+        n = len(payload)
+        if n > 0:
+            mask_full = mask_key * ((n >> 2) + 1)
+            payload = (int.from_bytes(payload, 'big') ^ int.from_bytes(mask_full[:n], 'big')).to_bytes(n, 'big')
+        else:
+            payload = b""
         return opcode, payload
 
 
@@ -360,10 +364,11 @@ class DashboardServer:
 
     _MAX_CONNECTIONS = 50
 
-    def __init__(self, run_dir: Path, port: int = 8080, host: str = "127.0.0.1", poll_interval: float = 1.0):
+    def __init__(self, run_dir: Path, port: int = 8080, host: str = "127.0.0.1", poll_interval: float = 1.0, token: str | None = None):
         self.run_dir = run_dir
         self.port = port
         self.host = host
+        self.token = token or secrets.token_urlsafe(16)
         self.connections: list[WebSocketConnection] = []
         self._last_mtime: float = 0.0
         self._last_data: dict[str, Any] | None = None
@@ -372,12 +377,22 @@ class DashboardServer:
         self._watch_task: asyncio.Task[None] | None = None
         self._poll_interval = poll_interval
 
+    def _check_token(self, path: str) -> bool:
+        """Validate token from request path query parameters."""
+        try:
+            parsed = urlparse(path)
+            qs = parse_qs(parsed.query)
+            tokens = qs.get("token", [])
+            return len(tokens) == 1 and secrets.compare_digest(tokens[0], self.token)
+        except Exception:
+            return False
+
     async def start(self) -> None:
         """Start the HTTP/WebSocket server."""
         self._server = await asyncio.start_server(
             self._handle_connection, self.host, self.port
         )
-        print(f"Dashboard server started on http://{self.host}:{self.port}")
+        print(f"Dashboard server started on http://{self.host}:{self.port}/?token={self.token}")
         print(f"Open in browser to see live updates. Press Ctrl+C to stop.")
 
         # Start background task to watch for dashboard changes
@@ -451,12 +466,16 @@ class DashboardServer:
             method, path = parts[0], parts[1]
 
             # Check for WebSocket upgrade
+            ws_path = path.split("?")[0] if "?" in path else path
             if (
-                path == "/ws"
+                ws_path == "/ws"
                 and headers.get("upgrade", "").lower() == "websocket"
                 and "connection" in headers
                 and "upgrade" in headers["connection"].lower()
             ):
+                if not self._check_token(path):
+                    await self._send_http_response(writer, 403, b"Forbidden: invalid token")
+                    return
                 # _handle_websocket takes ownership of the writer
                 await self._handle_websocket(reader, writer, headers)
                 writer_closed = True
@@ -471,12 +490,17 @@ class DashboardServer:
                     await self._send_cors_preflight(writer, origin)
                 return
 
+            # Token check for all HTTP requests
+            if not self._check_token(path):
+                await self._send_http_response(writer, 403, b"Forbidden: invalid token")
+                return
+
             # Handle HTTP requests
             if method not in ("GET", "OPTIONS"):
                 await self._send_http_response(writer, 405, b"Method Not Allowed")
-            elif method == "GET" and path in ("/", "/index.html"):
+            elif method == "GET" and ws_path in ("/", "/index.html"):
                 await self._serve_dashboard(writer, headers)
-            elif method == "GET" and path == "/api/data":
+            elif method == "GET" and ws_path == "/api/data":
                 await self._serve_api_data(writer, headers)
             else:
                 await self._send_http_response(writer, 404, b"Not Found")
@@ -601,9 +625,9 @@ class DashboardServer:
             conn.connected = False
             if conn in self.connections:
                 self.connections.remove(conn)
-            # Send close frame before closing writer (RFC 6455 §5.5.1)
+            # Send close frame with status code 1000 (normal closure) per RFC 6455 §5.5.1
             try:
-                close_frame = _encode_ws_frame(b"", 0x08)
+                close_frame = _encode_ws_frame(b"\x03\xe8", 0x08)
                 writer.write(close_frame)
                 await writer.drain()
             except (ConnectionError, OSError):
@@ -631,7 +655,7 @@ class DashboardServer:
         self, writer: asyncio.StreamWriter, headers: dict[str, str] | None = None,
     ) -> None:
         """Serve the HTML dashboard."""
-        content = _DASHBOARD_HTML.encode("utf-8")
+        content = _DASHBOARD_HTML_BYTES
         origin = (headers or {}).get("origin", "")
         extra_headers = self._cors_headers(origin)
         await self._send_http_response(
@@ -704,7 +728,11 @@ class DashboardServer:
 
         try:
             data = json.loads(dashboard_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+        except json.JSONDecodeError:
+            _log.warning("Corrupt dashboard JSON: %s", dashboard_path)
+            return None
+        except OSError as e:
+            _log.warning("Failed to read dashboard %s: %s", dashboard_path, e)
             return None
 
         # Load budget
@@ -714,8 +742,8 @@ class DashboardServer:
             try:
                 budget_data = json.loads(budget_path.read_text(encoding="utf-8"))
                 max_tokens = budget_data.get("max_tokens")
-            except (json.JSONDecodeError, OSError):
-                pass
+            except (json.JSONDecodeError, OSError) as e:
+                _log.warning("Failed to read budget %s: %s", budget_path, e)
 
         return {
             "run_id": self.run_dir.name,
@@ -773,6 +801,7 @@ class DashboardServer:
             except asyncio.CancelledError:
                 break
             except Exception:
+                _log.exception("Error in file watcher polling loop")
                 await asyncio.sleep(self._poll_interval)
 
     async def _broadcast(self, message: str) -> None:

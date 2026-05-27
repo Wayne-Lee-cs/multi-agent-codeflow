@@ -187,19 +187,100 @@ def _check_tokens(cmd: str) -> str | None:
     return None
 
 
-def _get_check_tokens_source() -> str:
-    """Extract _check_tokens source code for embedding in hook script."""
-    import inspect
-    src = inspect.getsource(_check_tokens)
-    # Remove the decorator line if present; keep only the function body
-    lines = src.split("\n")
-    # Find 'def _check_tokens' line
-    start = 0
-    for i, line in enumerate(lines):
-        if line.strip().startswith("def _check_tokens"):
-            start = i
+# Static copy of _check_tokens for embedding in hook script.
+# This avoids inspect.getsource which can fail in frozen/optimized environments.
+_CHECK_TOKENS_STATIC = '''\
+from pathlib import Path
+
+def _check_tokens(cmd):
+    """Token-based check for split-flag patterns that regex misses."""
+    cmd_normalized = cmd.lower().replace('"', '').replace("'", "")
+    for marker in ("git push", "git.exe push", "git update-ref", "git.exe update-ref",
+                   "git reset --hard", "git.exe reset --hard",
+                   "git remote set-url", "git.exe remote set-url",
+                   "git remote add", "git.exe remote add"):
+        idx = cmd_normalized.find(marker)
+        if idx >= 0:
+            if idx == 0 or cmd_normalized[idx - 1] in ("/", "\\\\"):
+                return f"{marker.split(' ', 1)[1]} (abs path check)"
+    for marker in ("git clean", "git.exe clean"):
+        idx = cmd_normalized.find(marker)
+        if idx >= 0 and (idx == 0 or cmd_normalized[idx - 1] in ("/", "\\\\")):
+            rest = cmd[idx + len(marker):]
+            for part in rest.split():
+                if part.startswith("-") and ("f" in part.lower()):
+                    return "git clean with force (abs path check)"
+    try:
+        tokens = shlex.split(cmd, posix=(sys.platform != "win32"))
+    except ValueError:
+        return "malformed command (unbalanced quotes)"
+    if sys.platform == "win32":
+        tokens = [t.strip('"').strip("'") for t in tokens]
+    i = 0
+    while i < len(tokens):
+        cmd_start = i
+        while cmd_start < len(tokens) and "=" in tokens[cmd_start] and not tokens[cmd_start].startswith("-"):
+            cmd_start += 1
+        if cmd_start >= len(tokens):
             break
-    return "\n".join(lines[start:])
+        base = tokens[cmd_start].rstrip(";")
+        base_name = Path(base).name if "/" in base or "\\\\" in base else base
+        if base_name == "git" and cmd_start + 1 < len(tokens):
+            subcmd = tokens[cmd_start + 1]
+            if subcmd == "push":
+                return "git push (token check)"
+            if subcmd == "reset" and "--hard" in tokens[cmd_start + 2:]:
+                return "git reset --hard (token check)"
+            if subcmd == "clean" and any(
+                t.startswith("-") and ("f" in t or "F" in t)
+                for t in tokens[cmd_start + 2:]
+                if t.startswith("-") and t not in ("&&", "||", ";", "|")
+            ):
+                return "git clean with force (token check)"
+            if subcmd == "update-ref":
+                return "git update-ref (token check)"
+            if subcmd == "remote" and cmd_start + 2 < len(tokens):
+                if tokens[cmd_start + 2] in ("set-url", "add"):
+                    return f"git remote {tokens[cmd_start + 2]} (token check)"
+        if base_name == "rm":
+            flags = set()
+            has_recursive_long = False
+            has_force_long = False
+            past_end_of_options = False
+            for t in tokens[cmd_start + 1:]:
+                if t in ("&&", "||", ";", "|"):
+                    break
+                if t == "--":
+                    past_end_of_options = True
+                    continue
+                if past_end_of_options:
+                    continue
+                if t.startswith("--"):
+                    if t == "--recursive":
+                        has_recursive_long = True
+                    elif t == "--force":
+                        has_force_long = True
+                elif t.startswith("-") and not t.startswith("--"):
+                    for ch in t[1:]:
+                        flags.add(ch)
+            has_r = "r" in flags or "R" in flags or has_recursive_long
+            has_f = "f" in flags or has_force_long
+            if has_r and has_f:
+                return "rm with recursive+force flags (split)"
+            if has_r:
+                return "rm with recursive flag (split)"
+        i = cmd_start + 1
+        while i < len(tokens) and tokens[i] not in ("&&", "||", ";", "|"):
+            i += 1
+        if i < len(tokens):
+            i += 1
+    return None
+'''
+
+
+def _get_check_tokens_source() -> str:
+    """Return _check_tokens source code for embedding in hook script."""
+    return _CHECK_TOKENS_STATIC
 
 
 # Generate the hook script content — a Python script that reads stdin JSON,
@@ -268,6 +349,9 @@ sys.exit(0)
 '''
 
 
+_HOOK_TEMPLATE = string.Template(_HOOK_SCRIPT)
+
+
 def prepare_sandbox(worktree_path: str | Path) -> None:
     """Write .claude/settings.local.json with PreToolUse Bash deny hooks."""
     worktree_path = Path(worktree_path)
@@ -281,7 +365,7 @@ def prepare_sandbox(worktree_path: str | Path) -> None:
 
     patterns_json = json.dumps(DENY_PATTERNS, ensure_ascii=False)
     check_tokens_src = _get_check_tokens_source()
-    script_content = string.Template(_HOOK_SCRIPT).substitute(
+    script_content = _HOOK_TEMPLATE.substitute(
         patterns_json=patterns_json,
         check_tokens_source=check_tokens_src,
     )

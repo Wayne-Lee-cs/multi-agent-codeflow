@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
+from cagent.compat import atomic_write
+
 __all__ = ["RunMemory"]
+
+_log = logging.getLogger(__name__)
 
 
 def _validate_agent_id(agent_id: str) -> str:
@@ -42,8 +47,9 @@ class RunMemory:
         _validate_agent_id(agent_id)
         path = self._dir / f"{agent_id}.md"
         try:
-            path.write_text(content, encoding="utf-8")
-        except OSError:
+            atomic_write(path, content)
+        except OSError as e:
+            _log.warning("Failed to write memory for %s: %s", agent_id, e)
             return
         self._version += 1
 
@@ -56,7 +62,8 @@ class RunMemory:
                 if f.seek(0, 2) > 0:
                     f.write("\n\n---\n\n")
                 f.write(content)
-        except OSError:
+        except OSError as e:
+            _log.warning("Failed to append memory for %s: %s", agent_id, e)
             return
         self._version += 1
 
@@ -67,8 +74,8 @@ class RunMemory:
         try:
             if path.exists():
                 return path.read_text(encoding="utf-8")
-        except OSError:
-            pass
+        except OSError as e:
+            _log.warning("Failed to read memory for %s: %s", agent_id, e)
         return ""
 
     def read_all(self) -> dict[str, str]:
@@ -80,7 +87,8 @@ class RunMemory:
             agent_id = path.stem
             try:
                 result[agent_id] = path.read_text(encoding="utf-8")
-            except OSError:
+            except OSError as e:
+                _log.warning("Failed to read memory %s: %s", path.name, e)
                 continue
         return result
 
@@ -132,7 +140,8 @@ class RunMemory:
         path = self._dir / "shared_context.md"
         try:
             path.write_text(content, encoding="utf-8")
-        except OSError:
+        except OSError as e:
+            _log.warning("Failed to write shared context: %s", e)
             return
 
     def load_shared(self) -> str:
@@ -141,6 +150,6 @@ class RunMemory:
         try:
             if path.exists():
                 return path.read_text(encoding="utf-8")
-        except OSError:
-            pass
+        except OSError as e:
+            _log.warning("Failed to load shared context: %s", e)
         return ""

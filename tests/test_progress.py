@@ -236,10 +236,10 @@ class TestEventParser:
         events = self.parser.feed(line)
         assert events[0].raw_line_len == len(line)
 
-    def test_raw_dict_preserved(self):
+    def test_raw_dict_empty_for_memory_efficiency(self):
         obj = {"type": "result", "subtype": "success", "extra": "data"}
         events = self.parser.feed(json.dumps(obj))
-        assert events[0].raw["extra"] == "data"
+        assert events[0].raw == {}
 
 
 class TestDashboard:

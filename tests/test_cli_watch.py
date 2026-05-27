@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -360,3 +361,249 @@ class TestCmdWatchNonTTY:
 
         out = capsys.readouterr().out
         assert "not a terminal" in out
+
+
+class TestCmdWatchTTY:
+    """Tests for _cmd_watch TTY loop paths."""
+
+    def test_watch_exits_on_q_key(self, tmp_path: Path) -> None:
+        """Watch loop exits when 'q' key is pressed."""
+        from cagent.cli.watch import _cmd_watch
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        (run_dir / "dashboard.json").write_text(
+            json.dumps({"001": {"status": "done", "tool_count": 1}}),
+            encoding="utf-8",
+        )
+
+        args = MagicMock()
+        args.run_id = "test-run"
+        args.web = None
+
+        call_count = 0
+
+        def mock_stdin_has_key():
+            nonlocal call_count
+            call_count += 1
+            return call_count >= 2  # First call: no key, second call: key available
+
+        with patch("cagent.cli.watch.is_tty", return_value=True), \
+             patch("cagent.cli.watch._get_repo_root", return_value=tmp_path), \
+             patch("cagent.cli.watch._find_run_dir", return_value=run_dir), \
+             patch("cagent.cli.watch.enable_ansi"), \
+             patch("cagent.cli.watch.stdin_has_key", side_effect=mock_stdin_has_key), \
+             patch("cagent.cli.watch.read_key", return_value="q"), \
+             patch("cagent.cli.watch.time.sleep"):
+            _cmd_watch(args)
+
+    def test_watch_exits_on_uppercase_q(self, tmp_path: Path) -> None:
+        """Watch loop exits when 'Q' key is pressed."""
+        from cagent.cli.watch import _cmd_watch
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        (run_dir / "dashboard.json").write_text(
+            json.dumps({"001": {"status": "done", "tool_count": 1}}),
+            encoding="utf-8",
+        )
+
+        args = MagicMock()
+        args.run_id = "test-run"
+        args.web = None
+
+        with patch("cagent.cli.watch.is_tty", return_value=True), \
+             patch("cagent.cli.watch._get_repo_root", return_value=tmp_path), \
+             patch("cagent.cli.watch._find_run_dir", return_value=run_dir), \
+             patch("cagent.cli.watch.enable_ansi"), \
+             patch("cagent.cli.watch.stdin_has_key", return_value=True), \
+             patch("cagent.cli.watch.read_key", return_value="Q"), \
+             patch("cagent.cli.watch.time.sleep"):
+            _cmd_watch(args)
+
+    def test_watch_redraws_on_data_change(self, tmp_path: Path, capsys) -> None:
+        """Watch loop redraws when dashboard data changes."""
+        from cagent.cli.watch import _cmd_watch
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        dashboard_data = {"001": {"status": "running", "tool_count": 1, "started_at": 1000}}
+        (run_dir / "dashboard.json").write_text(
+            json.dumps(dashboard_data), encoding="utf-8"
+        )
+
+        args = MagicMock()
+        args.run_id = "test-run"
+        args.web = None
+
+        loop_count = 0
+
+        def mock_sleep(duration):
+            nonlocal loop_count
+            loop_count += 1
+            if loop_count >= 2:
+                raise KeyboardInterrupt("stop")
+
+        # Use real filesystem - stat and read will work normally.
+        # Only mock stdin/key/sleep to control the loop.
+        with patch("cagent.cli.watch.is_tty", return_value=True), \
+             patch("cagent.cli.watch._get_repo_root", return_value=tmp_path), \
+             patch("cagent.cli.watch._find_run_dir", return_value=run_dir), \
+             patch("cagent.cli.watch.enable_ansi"), \
+             patch("cagent.cli.watch.stdin_has_key", return_value=False), \
+             patch("cagent.cli.watch.time.sleep", side_effect=mock_sleep):
+            try:
+                _cmd_watch(args)
+            except KeyboardInterrupt:
+                pass
+
+        out = capsys.readouterr().out
+        assert "running" in out
+
+    def test_watch_handles_corrupt_json(self, tmp_path: Path) -> None:
+        """Watch loop handles corrupt JSON in dashboard file."""
+        from cagent.cli.watch import _cmd_watch
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        (run_dir / "dashboard.json").write_text("not json", encoding="utf-8")
+
+        args = MagicMock()
+        args.run_id = "test-run"
+        args.web = None
+
+        loop_count = 0
+
+        def mock_sleep(duration):
+            nonlocal loop_count
+            loop_count += 1
+            if loop_count >= 2:
+                raise KeyboardInterrupt("stop")
+
+        # Real filesystem - stat works but json.loads fails on corrupt data
+        with patch("cagent.cli.watch.is_tty", return_value=True), \
+             patch("cagent.cli.watch._get_repo_root", return_value=tmp_path), \
+             patch("cagent.cli.watch._find_run_dir", return_value=run_dir), \
+             patch("cagent.cli.watch.enable_ansi"), \
+             patch("cagent.cli.watch.stdin_has_key", return_value=False), \
+             patch("cagent.cli.watch.time.sleep", side_effect=mock_sleep):
+            try:
+                _cmd_watch(args)
+            except KeyboardInterrupt:
+                pass
+
+    def test_watch_no_dashboard_file(self, tmp_path: Path) -> None:
+        """Watch loop handles missing dashboard file gracefully."""
+        from cagent.cli.watch import _cmd_watch
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        # No dashboard.json
+
+        args = MagicMock()
+        args.run_id = "test-run"
+        args.web = None
+
+        loop_count = 0
+
+        def mock_sleep(duration):
+            nonlocal loop_count
+            loop_count += 1
+            if loop_count >= 2:
+                raise KeyboardInterrupt("stop")
+
+        with patch("cagent.cli.watch.is_tty", return_value=True), \
+             patch("cagent.cli.watch._get_repo_root", return_value=tmp_path), \
+             patch("cagent.cli.watch._find_run_dir", return_value=run_dir), \
+             patch("cagent.cli.watch.enable_ansi"), \
+             patch("cagent.cli.watch.stdin_has_key", return_value=False), \
+             patch("cagent.cli.watch.time.sleep", side_effect=mock_sleep):
+            try:
+                _cmd_watch(args)
+            except KeyboardInterrupt:
+                pass
+
+
+class TestCmdWatchWeb:
+    """Tests for _cmd_watch_web."""
+
+    def test_watch_web_starts_server(self, tmp_path: Path) -> None:
+        """_cmd_watch_web starts the dashboard server."""
+        from cagent.cli.watch import _cmd_watch_web
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+
+        args = MagicMock()
+        args.run_id = "test-run"
+        args.web = 8080
+
+        with patch("cagent.cli.watch._get_repo_root", return_value=tmp_path), \
+             patch("cagent.cli.watch._find_run_dir", return_value=run_dir), \
+             patch("asyncio.run") as mock_run:
+            _cmd_watch_web(args)
+
+        mock_run.assert_called_once()
+
+
+class TestPrintDashboardTableAnsiColors:
+    """Tests for ANSI color paths in _print_dashboard_table."""
+
+    def test_done_status_green_color(self, capsys, monkeypatch):
+        """Done status shows green ANSI color when TTY."""
+        monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+        data = {
+            "001": {"status": "done", "started_at": 1000, "ended_at": 1010, "tool_count": 1},
+        }
+        _print_dashboard_table("run-1", data)
+        out = capsys.readouterr().out
+        assert "\033[32m" in out  # green
+
+    def test_failed_status_red_color(self, capsys, monkeypatch):
+        """Failed status shows red ANSI color when TTY."""
+        monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+        data = {
+            "001": {"status": "failed", "started_at": 1000, "ended_at": 1010, "tool_count": 1, "fail_reason": "timeout"},
+        }
+        _print_dashboard_table("run-1", data)
+        out = capsys.readouterr().out
+        assert "\033[31m" in out  # red
+
+    def test_running_status_yellow_color(self, capsys, monkeypatch):
+        """Running status shows yellow ANSI color when TTY."""
+        monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+        data = {
+            "001": {"status": "running", "started_at": 1000, "tool_count": 1},
+        }
+        _print_dashboard_table("run-1", data)
+        out = capsys.readouterr().out
+        assert "\033[33m" in out  # yellow
+
+    def test_fail_reason_red_in_activity(self, capsys, monkeypatch):
+        """fail_reason without commit_sha shows red in activity column when TTY."""
+        monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+        data = {
+            "001": {
+                "status": "failed",
+                "started_at": 1000,
+                "ended_at": 1010,
+                "tool_count": 1,
+                "fail_reason": "crashed badly",
+            },
+        }
+        _print_dashboard_table("run-1", data)
+        out = capsys.readouterr().out
+        assert "\033[31m" in out
+        assert "crashed badly" in out
+
+    def test_unknown_status_no_color(self, capsys, monkeypatch):
+        """Unknown status has no ANSI color."""
+        monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+        data = {
+            "001": {"status": "pending", "tool_count": 0},
+        }
+        _print_dashboard_table("run-1", data)
+        out = capsys.readouterr().out
+        assert "\033[32m" not in out
+        assert "\033[31m" not in out
+        assert "\033[33m" not in out

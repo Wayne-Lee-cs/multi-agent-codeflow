@@ -58,7 +58,13 @@ def _cmd_plan(args: argparse.Namespace) -> None:
         with open(gitignore_path, "a", encoding="utf-8") as f:
             f.write(f"{prefix}{_CAGENT_GITIGNORE_MARKER}\n{_CAGENT_GITIGNORE_LINES}")
 
+    _cleanup_done = False
+
     def _cleanup_sandbox() -> None:
+        nonlocal _cleanup_done
+        if _cleanup_done:
+            return
+        _cleanup_done = True
         for f in sandbox_files:
             try:
                 if f.exists():

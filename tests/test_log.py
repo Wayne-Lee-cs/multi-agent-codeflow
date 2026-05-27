@@ -290,3 +290,178 @@ class TestPrintIntegration:
         out = capsys.readouterr().out
         assert "integ" in out
         assert "Merging task-001 and task-002" in out
+
+
+class TestLinePrinterVerboseDone:
+    """Test verbose done event with elapsed time and commit sha."""
+
+    def test_verbose_done_with_elapsed_and_commit(self, mock_dashboard, capsys):
+        """Verbose done shows elapsed time and commit sha."""
+        mock_dashboard.tasks["001"] = MagicMock(
+            tool_count=5,
+            commit_sha="abc1234567890",
+            started_at=1234567800.0,
+            ended_at=1234567890.0,  # 90s = 1m30s
+        )
+        printer = LinePrinter(mock_dashboard, quiet=False)
+        event = MockEvent(ts=1234567890.0, kind="done", summary="")
+        printer.push("001", event)
+
+        async def run():
+            push_task = asyncio.create_task(printer.run())
+            await asyncio.sleep(0.01)
+            push_task.cancel()
+            try:
+                await push_task
+            except asyncio.CancelledError:
+                pass
+
+        asyncio.run(run())
+        out = capsys.readouterr().out
+        assert "DONE" in out
+        assert "1m30s" in out
+        assert "5 tools" in out
+        assert "abc1234" in out
+
+    def test_verbose_done_under_60s(self, mock_dashboard, capsys):
+        """Verbose done with elapsed < 60s shows seconds format."""
+        mock_dashboard.tasks["001"] = MagicMock(
+            tool_count=2,
+            commit_sha=None,
+            started_at=1234567800.0,
+            ended_at=1234567830.0,  # 30s
+        )
+        printer = LinePrinter(mock_dashboard, quiet=False)
+        event = MockEvent(ts=1234567830.0, kind="done", summary="")
+        printer.push("001", event)
+
+        async def run():
+            push_task = asyncio.create_task(printer.run())
+            await asyncio.sleep(0.01)
+            push_task.cancel()
+            try:
+                await push_task
+            except asyncio.CancelledError:
+                pass
+
+        asyncio.run(run())
+        out = capsys.readouterr().out
+        assert "30s" in out
+
+    def test_verbose_done_no_task_progress(self, mock_dashboard, capsys):
+        """Verbose done without task progress object."""
+        # Don't add task to dashboard.tasks
+        printer = LinePrinter(mock_dashboard, quiet=False)
+        event = MockEvent(ts=1234567890.0, kind="done", summary="")
+        printer.push("999", event)
+
+        async def run():
+            push_task = asyncio.create_task(printer.run())
+            await asyncio.sleep(0.01)
+            push_task.cancel()
+            try:
+                await push_task
+            except asyncio.CancelledError:
+                pass
+
+        asyncio.run(run())
+        out = capsys.readouterr().out
+        assert "999 DONE" in out
+
+
+class TestLinePrinterVerboseError:
+    """Test verbose error event."""
+
+    def test_verbose_error(self, mock_dashboard, capsys):
+        printer = LinePrinter(mock_dashboard, quiet=False)
+        event = MockEvent(ts=1234567890.0, kind="error", summary="Connection timed out")
+        printer.push("001", event)
+
+        async def run():
+            push_task = asyncio.create_task(printer.run())
+            await asyncio.sleep(0.01)
+            push_task.cancel()
+            try:
+                await push_task
+            except asyncio.CancelledError:
+                pass
+
+        asyncio.run(run())
+        out = capsys.readouterr().out
+        assert "FAIL" in out
+        assert "Connection timed out" in out
+
+
+class TestLinePrinterVerboseDenied:
+    """Test verbose denied event."""
+
+    def test_verbose_denied(self, mock_dashboard, capsys):
+        printer = LinePrinter(mock_dashboard, quiet=False)
+        event = MockEvent(ts=1234567890.0, kind="denied", summary="safety blocked")
+        printer.push("001", event)
+
+        async def run():
+            push_task = asyncio.create_task(printer.run())
+            await asyncio.sleep(0.01)
+            push_task.cancel()
+            try:
+                await push_task
+            except asyncio.CancelledError:
+                pass
+
+        asyncio.run(run())
+        out = capsys.readouterr().out
+        assert "DENIED" in out
+        assert "safety blocked" in out
+
+
+class TestLinePrinterQuietDoneNoCommit:
+    """Test quiet done without commit sha."""
+
+    def test_quiet_done_no_commit(self, mock_dashboard, capsys):
+        mock_dashboard.tasks["001"] = MagicMock(
+            tool_count=3,
+            commit_sha=None,
+            started_at=1234567800.0,
+            ended_at=1234567830.0,
+        )
+        printer = LinePrinter(mock_dashboard, quiet=True)
+        event = MockEvent(ts=1234567830.0, kind="done", summary="")
+        printer.push("001", event)
+
+        async def run():
+            push_task = asyncio.create_task(printer.run())
+            await asyncio.sleep(0.01)
+            push_task.cancel()
+            try:
+                await push_task
+            except asyncio.CancelledError:
+                pass
+
+        asyncio.run(run())
+        out = capsys.readouterr().out
+        assert "DONE" in out
+        assert "3 tools" in out
+        assert "commit" not in out
+
+
+class TestLinePrinterQuietDoneNoTask:
+    """Test quiet done when task not found in dashboard."""
+
+    def test_quiet_done_no_task_progress(self, mock_dashboard, capsys):
+        printer = LinePrinter(mock_dashboard, quiet=True)
+        event = MockEvent(ts=1234567890.0, kind="done", summary="")
+        printer.push("999", event)
+
+        async def run():
+            push_task = asyncio.create_task(printer.run())
+            await asyncio.sleep(0.01)
+            push_task.cancel()
+            try:
+                await push_task
+            except asyncio.CancelledError:
+                pass
+
+        asyncio.run(run())
+        out = capsys.readouterr().out
+        assert "999 DONE" in out

@@ -11,7 +11,7 @@ def _get_version() -> str:
     try:
         from importlib.metadata import version
         return version("cagent")
-    except Exception:
+    except Exception:  # noqa: BLE001 — non-critical version lookup, graceful degradation
         pass
     # Fallback: read from pyproject.toml
     try:
@@ -22,7 +22,7 @@ def _get_version() -> str:
             match = re.search(r'version\s*=\s*"([^"]+)"', pyproject.read_text(encoding="utf-8"))
             if match:
                 return match.group(1)
-    except Exception:
+    except (OSError, ValueError):
         pass
     return "unknown"
 

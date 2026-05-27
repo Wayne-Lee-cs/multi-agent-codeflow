@@ -238,6 +238,25 @@ class TestParseTasksMd:
         assert "Python 3.11+" in conv
         assert len(tasks) == 1
 
+    def test_section_extraction_exact_match(self, tmp_path):
+        """_extract_section must match heading exactly, not as prefix."""
+        f = tmp_path / "tasks.md"
+        f.write_text(
+            "## Conventions\n"
+            "- Use snake_case\n\n"
+            "## Conventions Appendix\n"
+            "This is the appendix.\n\n"
+            "## Tasks\n\n"
+            "### Task 001\n"
+            "- **depends_on**: none\n\n"
+            "Do something.\n",
+            encoding="utf-8",
+        )
+        tasks, conv = parse_tasks_md(f, "run-001")
+        assert len(tasks) == 1
+        assert "snake_case" in conv
+        assert "appendix" not in conv.lower()
+
     def test_field_format_lines_in_prompt_preserved(self, tmp_path):
         """Prompt lines like '- **endpoint**: /users' should not be skipped (Phase 66.4)."""
         f = tmp_path / "tasks.md"

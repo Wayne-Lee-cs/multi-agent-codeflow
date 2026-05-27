@@ -4,6 +4,7 @@ import os
 import sys
 import threading
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -95,4 +96,109 @@ class TestIsTty:
 class TestEnableAnsi:
     def test_does_not_raise(self):
         # Should work on both Windows and Unix without error
-        enable_ansi()
+        result = enable_ansi()
+        assert isinstance(result, bool)
+
+    def test_returns_true_on_unix(self):
+        """On Unix, enable_ansi always returns True."""
+        import cagent.compat as mod
+        if not mod._IS_WINDOWS:
+            assert enable_ansi() is True
+
+    def test_windows_calls_set_console_mode(self, monkeypatch):
+        """On Windows, enable_ansi calls SetConsoleMode with VT flag."""
+        import cagent.compat as mod
+
+        mock_kernel32 = MagicMock()
+        mock_kernel32.GetStdHandle.return_value = 123
+        mock_kernel32.GetConsoleMode.return_value = True
+
+        mock_ctypes = MagicMock()
+        mock_ctypes.windll.kernel32 = mock_kernel32
+        mock_ctypes.c_ulong = type("c_ulong", (), {"__init__": lambda s, *a: None, "value": 0})
+        mock_ctypes.byref = lambda x: x
+
+        monkeypatch.setattr(mod, "_IS_WINDOWS", True)
+        with patch.dict("sys.modules", {"ctypes": mock_ctypes}):
+            # Re-import to pick up the mock
+            import importlib
+            importlib.reload(mod)
+            mod.enable_ansi()
+            mock_kernel32.SetConsoleMode.assert_called_once()
+
+        # Restore
+        monkeypatch.setattr(mod, "_IS_WINDOWS", sys.platform == "win32")
+
+
+class TestStdinHasKey:
+    def test_returns_truthy(self):
+        from cagent.compat import stdin_has_key
+        result = stdin_has_key()
+        # msvcrt.kbhit returns int on Windows, bool on Unix
+        assert result is not None
+
+    def test_windows_uses_kbhit(self, monkeypatch):
+        """On Windows, stdin_has_key delegates to msvcrt.kbhit."""
+        import cagent.compat as mod
+        monkeypatch.setattr(mod, "_IS_WINDOWS", True)
+        mock_msvcrt = MagicMock()
+        mock_msvcrt.kbhit.return_value = True
+        monkeypatch.setattr(mod, "msvcrt", mock_msvcrt)
+        assert mod.stdin_has_key() is True
+        mock_msvcrt.kbhit.assert_called_once()
+
+
+class TestReadKey:
+    def test_windows_uses_getwch(self, monkeypatch):
+        """On Windows, read_key delegates to msvcrt.getwch."""
+        import cagent.compat as mod
+        monkeypatch.setattr(mod, "_IS_WINDOWS", True)
+        mock_msvcrt = MagicMock()
+        mock_msvcrt.getwch.return_value = "q"
+        monkeypatch.setattr(mod, "msvcrt", mock_msvcrt)
+        assert mod.read_key() == "q"
+        mock_msvcrt.getwch.assert_called_once()
+
+
+class TestAtomicWriteErrorCleanup:
+    def test_cleanup_on_replace_failure(self, tmp_path):
+        """atomic_write removes temp file when os.replace fails."""
+        import cagent.compat as mod
+
+        target = tmp_path / "out.txt"
+        with patch.object(mod.os, "replace", side_effect=OSError("disk full")):
+            with pytest.raises(OSError, match="disk full"):
+                mod.atomic_write(target, "content")
+
+        # No temp files left behind
+        tmp_files = [f for f in tmp_path.iterdir() if f.suffix == ".tmp"]
+        assert tmp_files == []
+
+    def test_cleanup_on_fdopen_failure(self, tmp_path):
+        """atomic_write cleans up temp file when fdopen fails and fd is leaked."""
+        import cagent.compat as mod
+
+        target = tmp_path / "out.txt"
+        # When os.fdopen raises, mkstemp has already created the file.
+        # The current code catches the exception and tries os.unlink.
+        # However, the fd is leaked (not closed), so unlink may succeed or fail.
+        # We test that the function at least doesn't crash.
+        with patch.object(mod.os, "fdopen", side_effect=OSError("fdopen failed")):
+            with pytest.raises(OSError, match="fdopen failed"):
+                mod.atomic_write(target, "content")
+
+
+class TestIsPidActiveUnix:
+    def test_unix_active_pid(self, monkeypatch):
+        """Unix path: is_pid_active returns True for active pid."""
+        import cagent.compat as mod
+        monkeypatch.setattr(mod, "_IS_WINDOWS", False)
+        with patch.object(mod.os, "kill", return_value=None):
+            assert mod.is_pid_active(12345) is True
+
+    def test_unix_oserror_returns_false(self, monkeypatch):
+        """Unix path: is_pid_active returns False on OSError."""
+        import cagent.compat as mod
+        monkeypatch.setattr(mod, "_IS_WINDOWS", False)
+        with patch.object(mod.os, "kill", side_effect=OSError("no such process")):
+            assert mod.is_pid_active(99999) is False

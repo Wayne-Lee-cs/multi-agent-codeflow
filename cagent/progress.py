@@ -23,7 +23,7 @@ _VALID_EVENT_KINDS = frozenset({
 })
 
 
-@dataclass
+@dataclass(slots=True)
 class Event:
     ts: float
     kind: Literal[
@@ -32,11 +32,11 @@ class Event:
     ]
     summary: str
     raw: dict[str, Any] = field(default_factory=dict)
-    raw_line_len: int = 0  # character length of stripped JSON line (avoids re-serialization)
-    usage: dict[str, Any] | None = None  # token usage from result events
+    raw_line_len: int = 0
+    usage: dict[str, Any] | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class TaskProgress:
     task_id: str
     status: Literal["pending", "running", "done", "failed", "noop"] = "pending"
@@ -93,7 +93,7 @@ class EventParser:
             subtype = obj.get("subtype", "")
             if subtype == "init":
                 model = obj.get("model", "unknown")
-                return [Event(ts=ts, kind="start", summary=f"start (model={model})", raw=obj)]
+                return [Event(ts=ts, kind="start", summary=f"start (model={model})")]
             return []
 
         if typ == "assistant":
@@ -106,8 +106,8 @@ class EventParser:
             subtype = obj.get("subtype", "")
             usage = obj.get("usage")
             if subtype == "success":
-                return [Event(ts=ts, kind="done", summary="done", raw=obj, usage=usage)]
-            return [Event(ts=ts, kind="error", summary=f"error: {subtype}", raw=obj, usage=usage)]
+                return [Event(ts=ts, kind="done", summary="done", usage=usage)]
+            return [Event(ts=ts, kind="error", summary=f"error: {subtype}", usage=usage)]
 
         return []
 
@@ -123,11 +123,11 @@ class EventParser:
             if block_type == "tool_use":
                 name = block.get("name", "unknown")
                 inp = block.get("input", {})
-                events.append(Event(ts=ts, kind="tool_use", summary=self._summarize_tool(name, inp), raw=obj))
+                events.append(Event(ts=ts, kind="tool_use", summary=self._summarize_tool(name, inp)))
             elif block_type == "text":
-                events.append(Event(ts=ts, kind="text", summary=block.get("text", "")[:500], raw=obj))
+                events.append(Event(ts=ts, kind="text", summary=block.get("text", "")[:500]))
             elif block_type == "thinking":
-                events.append(Event(ts=ts, kind="thinking", summary="thinking...", raw=obj))
+                events.append(Event(ts=ts, kind="thinking", summary="thinking..."))
         return events
 
     def _parse_user(self, obj: dict[str, Any], ts: float) -> list[Event]:
@@ -150,9 +150,9 @@ class EventParser:
 
                 is_error = block.get("is_error", False)
                 if is_error and ("denied" in result_content.lower() or "not allowed" in result_content.lower()):
-                    events.append(Event(ts=ts, kind="denied", summary=f"denied: {result_content}", raw=obj))
+                    events.append(Event(ts=ts, kind="denied", summary=f"denied: {result_content}"))
                 else:
-                    events.append(Event(ts=ts, kind="tool_result", summary=result_content, raw=obj))
+                    events.append(Event(ts=ts, kind="tool_result", summary=result_content))
         return events
 
     @staticmethod
@@ -207,7 +207,8 @@ def _truncate_jsonl_if_large(path: Path, max_bytes: int, keep_ratio: float) -> N
     """
     try:
         size = path.stat().st_size
-    except OSError:
+    except OSError as e:
+        _log.warning("Failed to stat JSONL file %s: %s", path, e)
         return
     if size <= max_bytes:
         return
@@ -228,8 +229,8 @@ def _truncate_jsonl_if_large(path: Path, max_bytes: int, keep_ratio: float) -> N
             lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
             keep_count = max(1, int(len(lines) * keep_ratio))
             path.write_text("".join(lines[-keep_count:]), encoding="utf-8")
-    except OSError:
-        pass
+    except OSError as e:
+        _log.warning("Failed to truncate JSONL file %s: %s", path, e)
 
 
 def _validate_task_id(task_id: str) -> str:
@@ -482,7 +483,7 @@ class Dashboard:
             "raw_line_len": event.raw_line_len,
             "usage": event.usage,
         }
-        line = json.dumps(d, ensure_ascii=False) + "\n"
+        line = json.dumps(d, ensure_ascii=False, separators=(',', ':')) + "\n"
         with self._io_lock:
             if task_id not in self._event_buffers:
                 self._event_buffers[task_id] = []
@@ -490,9 +491,11 @@ class Dashboard:
 
     def _maybe_flush_io(self) -> None:
         """Flush buffered I/O if throttle interval has elapsed."""
-        now = time.time()
-        if (now - self._last_io_flush) >= self._IO_THROTTLE:
-            self._flush_io()
+        with self._io_lock:
+            now = time.time()
+            if (now - self._last_io_flush) < self._IO_THROTTLE:
+                return
+        self._flush_io()
 
     def _flush_io(self) -> None:
         """Write all buffered events and dirty progress to disk."""
@@ -530,7 +533,7 @@ class Dashboard:
                 _truncate_jsonl_if_large(target, self._MAX_EVENT_FILE_SIZE, self._TRUNCATE_KEEP_RATIO)
         for task_id, d in progress_snap.items():
             target = self._progress_dir / f"task-{task_id}.json"
-            atomic_write(target, json.dumps(d, indent=2, ensure_ascii=False))
+            atomic_write(target, json.dumps(d, ensure_ascii=False, separators=(',', ':')))
 
     def _write_dashboard(self, force: bool = False) -> None:
         """Write dashboard.json with time-based throttling (incremental).
@@ -579,12 +582,14 @@ class Dashboard:
             if target.exists():
                 try:
                     full_snapshot = json.loads(target.read_text(encoding="utf-8"))
-                except (json.JSONDecodeError, OSError):
-                    pass
+                except json.JSONDecodeError:
+                    _log.warning("Corrupt JSON in %s, starting fresh", target)
+                except OSError as e:
+                    _log.warning("Failed to read snapshot %s: %s", target, e)
             full_snapshot.update(diff)
         atomic_write(
             target,
-            json.dumps(full_snapshot, indent=2, ensure_ascii=False),
+            json.dumps(full_snapshot, ensure_ascii=False, separators=(',', ':')),
         )
 
     def flush(self) -> None:

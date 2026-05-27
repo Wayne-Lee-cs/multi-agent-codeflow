@@ -6,8 +6,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 import json
+import os
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -401,16 +403,15 @@ class TestRunLock:
         # Lock file should be cleaned up after exit
         assert not lock_path.exists()
 
-    def test_lock_force_skips_check(self, tmp_path):
-        """--force flag bypasses lock acquisition entirely."""
+    def test_lock_force_still_acquires(self, tmp_path):
+        """--force flag still acquires lock but ignores failure."""
         from cagent.cli.run import _run_lock
 
         repo_root = tmp_path
-        # With force=True, no locking is attempted
         with _run_lock(repo_root, force=True):
             lock_path = repo_root / ".cagent" / "run.lock"
-            # Lock file should NOT exist when force=True
-            assert not lock_path.exists()
+            # Lock file SHOULD exist (force still writes PID)
+            assert lock_path.exists()
 
     def test_lock_creates_cagent_dir(self, tmp_path):
         """Lock creates .cagent directory if it doesn't exist."""
@@ -774,6 +775,86 @@ class TestDryRun:
 class TestRunLockLifecycle:
     """Tests for _run_lock exception safety (60.2.3)."""
 
+    def test_lock_file_contains_pid_and_timestamp(self, tmp_path):
+        """Lock file stores PID:TIMESTAMP format for PID reuse protection."""
+        from cagent.cli.run import _run_lock
+
+        repo_root = tmp_path
+        lock_path = repo_root / ".cagent" / "run.lock"
+
+        # Verify stale lock detection handles PID:TIMESTAMP format
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        # Write a stale lock with old timestamp and inactive PID
+        lock_path.write_text("999999999:1000000000.0", encoding="utf-8")
+
+        with _run_lock(repo_root):
+            pass
+
+        # Stale lock should have been cleaned up
+        assert not lock_path.exists()
+
+    def test_stale_lock_with_active_pid_old_timestamp(self, tmp_path):
+        """Stale lock with active PID but old timestamp is cleaned up."""
+        from cagent.cli.run import _run_lock
+
+        repo_root = tmp_path
+        lock_dir = repo_root / ".cagent"
+        lock_dir.mkdir(parents=True)
+        lock_path = lock_dir / "run.lock"
+
+        # Write a lock with current PID but timestamp from 2 days ago
+        old_ts = time.time() - 172800
+        lock_path.write_text(f"{os.getpid()}:{old_ts}", encoding="utf-8")
+
+        # Should clean up the stale lock and acquire new one
+        with _run_lock(repo_root):
+            pass
+
+        # Lock is released and deleted after exit — verify no error occurred
+
+    def test_stale_lock_legacy_format(self, tmp_path):
+        """Legacy lock file (PID only, no timestamp) is still handled."""
+        from cagent.cli.run import _run_lock
+
+        repo_root = tmp_path
+        lock_dir = repo_root / ".cagent"
+        lock_dir.mkdir(parents=True)
+        lock_path = lock_dir / "run.lock"
+
+        # Write a lock in legacy format (just PID, inactive)
+        lock_path.write_text("999999999", encoding="utf-8")
+
+        # Should clean up (PID 999999999 is not active) and acquire
+        with _run_lock(repo_root):
+            pass
+
+    def test_force_lock_ignores_failure(self, tmp_path, capsys):
+        """--force still acquires lock but ignores acquisition failure."""
+        from cagent.cli.run import _run_lock
+
+        repo_root = tmp_path
+        # Pre-create a lock held by a fake active PID
+        lock_dir = repo_root / ".cagent"
+        lock_dir.mkdir(parents=True)
+        lock_path = lock_dir / "run.lock"
+        lock_path.write_text(f"999999999:{time.time()}", encoding="utf-8")
+
+        # With force=True, should succeed even if lock is "held"
+        import sys as _sys
+        if _sys.platform == "win32":
+            import msvcrt
+            with patch.object(msvcrt, "locking", side_effect=OSError("lock held")):
+                with _run_lock(repo_root, force=True):
+                    pass
+        else:
+            import fcntl
+            with patch.object(fcntl, "flock", side_effect=OSError("lock held")):
+                with _run_lock(repo_root, force=True):
+                    pass
+
+        err = capsys.readouterr().err
+        assert "Warning" in err
+
     def test_lock_cleaned_up_on_exception(self, tmp_path):
         """Lock file is removed even when exception occurs inside with block."""
         from cagent.cli.run import _run_lock
@@ -983,6 +1064,307 @@ class TestCmdResume:
 
         err = capsys.readouterr().err
         assert "path traversal" in err.lower()
+
+
+class TestTerminatePidWindows:
+    """Tests for _terminate_pid Windows-specific paths."""
+
+    def test_terminate_windows_taskkill_fallback(self, capsys):
+        """On Windows, PermissionError falls back to taskkill."""
+        from cagent.cli.base import _terminate_pid
+
+        with patch("cagent.cli.base.os.kill", side_effect=PermissionError), \
+             patch("cagent.cli.base.subprocess.run") as mock_taskkill, \
+             patch.object(sys, "platform", "win32"):
+            _terminate_pid(12345)
+
+        mock_taskkill.assert_called_once()
+        cmd = mock_taskkill.call_args[0][0]
+        assert "taskkill" in cmd
+        assert "12345" in cmd
+
+    def test_terminate_windows_taskkill_also_fails(self, capsys):
+        """On Windows, when both kill and taskkill fail, prints error."""
+        from cagent.cli.base import _terminate_pid
+
+        with patch("cagent.cli.base.os.kill", side_effect=PermissionError), \
+             patch("cagent.cli.base.subprocess.run", side_effect=OSError("taskkill failed")), \
+             patch.object(sys, "platform", "win32"):
+            _terminate_pid(12345)
+
+        err = capsys.readouterr().err
+        assert "Failed to terminate" in err
+
+    def test_terminate_windows_oserror_fallback(self, capsys):
+        """On Windows, OSError triggers taskkill fallback."""
+        from cagent.cli.base import _terminate_pid
+
+        with patch("cagent.cli.base.os.kill", side_effect=OSError("access denied")), \
+             patch("cagent.cli.base.subprocess.run") as mock_taskkill, \
+             patch.object(sys, "platform", "win32"):
+            _terminate_pid(12345)
+
+        mock_taskkill.assert_called_once()
+
+    def test_terminate_unix_permission_error(self, capsys):
+        """On Unix, PermissionError prints message."""
+        from cagent.cli.base import _terminate_pid
+
+        with patch("cagent.cli.base.os.kill", side_effect=PermissionError), \
+             patch.object(sys, "platform", "linux"):
+            _terminate_pid(12345)
+
+        err = capsys.readouterr().err
+        assert "Permission denied" in err
+
+
+class TestPromptCleanMemory:
+    """Tests for _prompt_clean_memory."""
+
+    def test_deletes_on_yes(self, tmp_path):
+        """Deletes memory dir when user says 'y'."""
+        from cagent.cli.base import _prompt_clean_memory
+
+        mem_dir = tmp_path / "memory"
+        mem_dir.mkdir()
+        (mem_dir / "task-001.md").write_text("content", encoding="utf-8")
+
+        with patch("builtins.input", return_value="y"):
+            _prompt_clean_memory(mem_dir)
+
+        assert not mem_dir.exists()
+
+    def test_deletes_on_yes_full(self, tmp_path):
+        """Deletes memory dir when user says 'yes'."""
+        from cagent.cli.base import _prompt_clean_memory
+
+        mem_dir = tmp_path / "memory"
+        mem_dir.mkdir()
+        (mem_dir / "task-001.md").write_text("content", encoding="utf-8")
+
+        with patch("builtins.input", return_value="yes"):
+            _prompt_clean_memory(mem_dir)
+
+        assert not mem_dir.exists()
+
+    def test_preserves_on_no(self, tmp_path):
+        """Preserves memory dir when user says 'n'."""
+        from cagent.cli.base import _prompt_clean_memory
+
+        mem_dir = tmp_path / "memory"
+        mem_dir.mkdir()
+        (mem_dir / "task-001.md").write_text("content", encoding="utf-8")
+
+        with patch("builtins.input", return_value="n"):
+            _prompt_clean_memory(mem_dir)
+
+        assert mem_dir.exists()
+        assert (mem_dir / "task-001.md").exists()
+
+    def test_preserves_on_empty(self, tmp_path):
+        """Preserves memory dir when user presses Enter (empty)."""
+        from cagent.cli.base import _prompt_clean_memory
+
+        mem_dir = tmp_path / "memory"
+        mem_dir.mkdir()
+
+        with patch("builtins.input", return_value=""):
+            _prompt_clean_memory(mem_dir)
+
+        assert mem_dir.exists()
+
+    def test_preserves_on_eof(self, tmp_path, capsys):
+        """Preserves memory dir on EOFError."""
+        from cagent.cli.base import _prompt_clean_memory
+
+        mem_dir = tmp_path / "memory"
+        mem_dir.mkdir()
+
+        with patch("builtins.input", side_effect=EOFError):
+            _prompt_clean_memory(mem_dir)
+
+        assert mem_dir.exists()
+        out = capsys.readouterr().out
+        assert "preserved" in out.lower()
+
+
+class TestFindRunDirExtra:
+    """Tests for _find_run_dir edge cases."""
+
+    def test_find_run_dir_no_runs_dir(self, tmp_path, capsys):
+        """Exits when runs directory doesn't exist."""
+        from cagent.cli.base import _find_run_dir
+
+        with pytest.raises(SystemExit, match="1"):
+            _find_run_dir(tmp_path, None)
+
+        err = capsys.readouterr().err
+        assert "No runs found" in err
+
+    def test_find_run_dir_specific_not_found(self, tmp_path, capsys):
+        """Exits when specific run_id not found."""
+        from cagent.cli.base import _find_run_dir
+
+        runs_dir = tmp_path / ".cagent" / "runs"
+        runs_dir.mkdir(parents=True)
+
+        with pytest.raises(SystemExit, match="1"):
+            _find_run_dir(tmp_path, "nonexistent")
+
+        err = capsys.readouterr().err
+        assert "Run not found" in err
+
+    def test_find_run_dir_no_completed_runs(self, tmp_path, capsys):
+        """Exits when no completed runs exist."""
+        from cagent.cli.base import _find_run_dir
+
+        runs_dir = tmp_path / ".cagent" / "runs"
+        runs_dir.mkdir(parents=True)
+        # Create a directory with no dashboard.json or tasks.json
+        (runs_dir / "empty-run").mkdir()
+
+        with pytest.raises(SystemExit, match="1"):
+            _find_run_dir(tmp_path, None)
+
+        err = capsys.readouterr().err
+        assert "No completed runs" in err
+
+    def test_find_run_dir_returns_latest(self, tmp_path):
+        """Returns latest run directory with dashboard.json."""
+        from cagent.cli.base import _find_run_dir
+
+        runs_dir = tmp_path / ".cagent" / "runs"
+        runs_dir.mkdir(parents=True)
+        run1 = runs_dir / "run-aaa"
+        run1.mkdir()
+        (run1 / "dashboard.json").write_text("{}", encoding="utf-8")
+        run2 = runs_dir / "run-zzz"
+        run2.mkdir()
+        (run2 / "dashboard.json").write_text("{}", encoding="utf-8")
+
+        result = _find_run_dir(tmp_path, None)
+        # Sorted reverse, so run-zzz comes first
+        assert result.name == "run-zzz"
+
+    def test_find_run_dir_uses_tasks_json(self, tmp_path):
+        """Returns run directory with tasks.json when no dashboard.json."""
+        from cagent.cli.base import _find_run_dir
+
+        runs_dir = tmp_path / ".cagent" / "runs"
+        runs_dir.mkdir(parents=True)
+        run1 = runs_dir / "run-001"
+        run1.mkdir()
+        (run1 / "tasks.json").write_text("[]", encoding="utf-8")
+
+        result = _find_run_dir(tmp_path, None)
+        assert result == run1
+
+
+class TestIsPidActive:
+    """Tests for _is_pid_active delegation."""
+
+    def test_delegates_to_compat(self):
+        """_is_pid_active delegates to compat.is_pid_active."""
+        from cagent.cli.base import _is_pid_active
+
+        with patch("cagent.compat.is_pid_active", return_value=True) as mock:
+            assert _is_pid_active(12345) is True
+            mock.assert_called_once_with(12345)
+
+
+class TestPreflightCheckWithAuth:
+    """Tests for _preflight_check with check_auth=True."""
+
+    def test_check_auth_calls_auth_preflight(self):
+        """check_auth=True calls _auth_preflight_check."""
+        from cagent.cli.base import _preflight_check
+
+        with patch("cagent.cli.base.shutil.which", return_value="/usr/bin/claude"), \
+             patch("cagent.cli.base._auth_preflight_check") as mock_auth:
+            _preflight_check(check_auth=True)
+
+        mock_auth.assert_called_once()
+
+    def test_check_auth_with_force(self):
+        """check_auth=True and force_auth=True passes force_auth through."""
+        from cagent.cli.base import _preflight_check
+
+        with patch("cagent.cli.base.shutil.which", return_value="/usr/bin/claude"), \
+             patch("cagent.cli.base._auth_preflight_check") as mock_auth:
+            _preflight_check(check_auth=True, force_auth=True)
+
+        mock_auth.assert_called_once()
+        assert mock_auth.call_args[1]["force_auth"] is True
+
+
+class TestAuthDiagnosticsExtra:
+    """Tests for _print_auth_diagnostics env var display."""
+
+    def test_prints_set_api_key(self, capsys, monkeypatch):
+        """Prints API key length when set."""
+        from cagent.cli.base import _print_auth_diagnostics
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-key-12345")
+        _print_auth_diagnostics()
+
+        err = capsys.readouterr().err
+        assert "length=" in err
+
+    def test_prints_base_url(self, capsys, monkeypatch):
+        """Prints ANTHROPIC_BASE_URL when set."""
+        from cagent.cli.base import _print_auth_diagnostics
+
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://proxy.example.com")
+        _print_auth_diagnostics()
+
+        err = capsys.readouterr().err
+        assert "https://proxy.example.com" in err
+
+    def test_prints_not_set(self, capsys, monkeypatch):
+        """Prints 'not set' for missing env vars."""
+        from cagent.cli.base import _print_auth_diagnostics
+
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        _print_auth_diagnostics()
+
+        err = capsys.readouterr().err
+        assert "not set" in err
+
+
+class TestAuthFailureMessages:
+    """Tests for _auth_preflight_check failure message branches."""
+
+    def test_auth_failure_not_found_message(self, tmp_path, capsys):
+        """'not found' in stderr prints claude CLI not found message."""
+        from cagent.cli.base import _auth_preflight_check
+
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+        mock_result.stdout = ""
+        mock_result.stderr = "command not found"
+
+        with patch("cagent.cli.base.subprocess.run", return_value=mock_result):
+            with pytest.raises(SystemExit):
+                _auth_preflight_check("/usr/bin/claude", repo_root=tmp_path)
+
+        err = capsys.readouterr().err
+        assert "not found" in err
+
+    def test_auth_failure_generic_message(self, tmp_path, capsys):
+        """Generic failure prints exit code and stderr."""
+        from cagent.cli.base import _auth_preflight_check
+
+        mock_result = MagicMock()
+        mock_result.returncode = 2
+        mock_result.stdout = ""
+        mock_result.stderr = "some random error"
+
+        with patch("cagent.cli.base.subprocess.run", return_value=mock_result):
+            with pytest.raises(SystemExit):
+                _auth_preflight_check("/usr/bin/claude", repo_root=tmp_path)
+
+        err = capsys.readouterr().err
+        assert "exit code 2" in err or "exited with code 2" in err
 
 
 class TestCleanWorktrees:

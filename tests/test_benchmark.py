@@ -153,7 +153,7 @@ class TestMemoryBenchmark:
 
         elapsed = _bench(run, iterations=iterations // 10)
         ops_per_sec = iterations / (elapsed * 10)
-        assert ops_per_sec > 100, f"Too slow: {ops_per_sec:.0f} writes/s"
+        assert ops_per_sec > 25, f"Too slow: {ops_per_sec:.0f} writes/s"
 
     def test_bench_memory_read(self, tmp_path: Path) -> None:
         """Benchmark: memory read throughput."""

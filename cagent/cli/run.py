@@ -39,26 +39,31 @@ def _run_lock(repo_root: Path, force: bool = False):
 
     If a stale lock file remains from a crashed process, it is automatically
     cleaned up when the recorded PID is no longer active.
+
+    If force=True, still attempts to acquire the lock but ignores failure
+    (prints a warning instead of exiting).
     """
     lock_dir = repo_root / ".cagent"
     lock_dir.mkdir(parents=True, exist_ok=True)
     lock_path = lock_dir / "run.lock"
 
-    if force:
-        print(
-            "Warning: --force used, skipping run lock. "
-            "Ensure no other cagent run is active.",
-            file=sys.stderr,
-        )
-        yield
-        return
-
-    # Clean up stale lock files from crashed processes
+    # Clean up stale lock files from crashed processes.
+    # Lock file format: "PID:TIMESTAMP" (PID reuse protection).
+    # Legacy format: just "PID" (still supported).
     if lock_path.exists():
         try:
-            stale_pid = int(lock_path.read_text(encoding="utf-8").strip())
+            content = lock_path.read_text(encoding="utf-8").strip()
+            parts = content.split(":", 1)
+            stale_pid = int(parts[0])
+            lock_ts = float(parts[1]) if len(parts) > 1 else 0.0
             from .base import _is_pid_active
-            if not _is_pid_active(stale_pid):
+            pid_active = _is_pid_active(stale_pid)
+            # PID reuse protection: if PID is still active but lock is old,
+            # the PID may have been reused by a different process.
+            if not pid_active:
+                lock_path.unlink(missing_ok=True)
+            elif lock_ts > 0 and (time.time() - lock_ts) > 86400:
+                # Lock older than 24h with active PID — likely stale (PID reuse)
                 lock_path.unlink(missing_ok=True)
         except (ValueError, OSError):
             # Corrupted or unreadable lock file — remove it
@@ -71,33 +76,51 @@ def _run_lock(repo_root: Path, force: bool = False):
             import msvcrt
             # Write PID first so the file has content before locking.
             # msvcrt.locking requires the locked byte range to exist.
-            lock_fd.write(str(os.getpid()))
+            payload = f"{os.getpid()}:{time.time()}"
+            lock_fd.write(payload)
             lock_fd.flush()
             try:
                 lock_fd.seek(0)
-                msvcrt.locking(lock_fd.fileno(), msvcrt.LK_NBLCK, 1)
+                msvcrt.locking(lock_fd.fileno(), msvcrt.LK_NBLCK, len(payload))
             except OSError:
-                lock_fd.close()
-                print(
-                    "Error: Another cagent run is active in this repository.\n"
-                    "  Use --force to override (only if you're sure no other run is active).",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
+                if force:
+                    print(
+                        "Warning: --force used, lock acquisition failed. "
+                        "Another cagent run may be active.",
+                        file=sys.stderr,
+                    )
+                else:
+                    lock_fd.close()
+                    print(
+                        "Error: Another cagent run is active in this repository.\n"
+                        "  Use --force to override (only if you're sure no other run is active).",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
         else:
             import fcntl
             try:
                 fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError:
-                lock_fd.close()
-                print(
-                    "Error: Another cagent run is active in this repository.\n"
-                    "  Use --force to override (only if you're sure no other run is active).",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-            lock_fd.write(str(os.getpid()))
-            lock_fd.flush()
+                if force:
+                    print(
+                        "Warning: --force used, lock acquisition failed. "
+                        "Another cagent run may be active.",
+                        file=sys.stderr,
+                    )
+                    lock_fd.write(f"{os.getpid()}:{time.time()}")
+                    lock_fd.flush()
+                else:
+                    lock_fd.close()
+                    print(
+                        "Error: Another cagent run is active in this repository.\n"
+                        "  Use --force to override (only if you're sure no other run is active).",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+            else:
+                lock_fd.write(f"{os.getpid()}:{time.time()}")
+                lock_fd.flush()
         yield
     finally:
         if lock_fd is not None:
@@ -231,7 +254,7 @@ async def _integrate_phase(
         )
         print(f"  integration: done — branch cagent/{run_id}/integration  tip {integration_sha[:12]}")
         return integration_sha
-    except Exception as e:
+    except (RuntimeError, OSError, ValueError) as e:
         print(f"  integration: FAILED: {e}")
         print(f"  Worktree preserved for manual inspection.")
         return None
@@ -356,7 +379,7 @@ def _execute_run(
         if retry_hint:
             print(f"\n  {retry_hint}")
         sys.exit(130)
-    except Exception as e:
+    except (RuntimeError, OSError, ValueError) as e:
         elapsed = _fmt_elapsed(time.time() - run_start)
         print(f"\n\nError after {elapsed}: {e}", file=sys.stderr)
         try:

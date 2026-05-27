@@ -185,6 +185,26 @@ class TestFileIsolation:
         assert mem2.read("task-001") == "run 2 output"
 
 
+class TestAtomicWrite:
+    """Tests for memory write atomicity."""
+
+    def test_write_uses_atomic_write(self, tmp_path):
+        """write() should use atomic_write to avoid partial reads from concurrent threads."""
+        mem = RunMemory(tmp_path)
+        mem.write("task-001", "atomic content")
+        mem_file = tmp_path / "memory" / "task-001.md"
+        assert mem_file.exists()
+        assert mem_file.read_text(encoding="utf-8") == "atomic content"
+
+    def test_write_no_leftover_tmp_files(self, tmp_path):
+        """atomic_write should clean up .tmp files after success."""
+        mem = RunMemory(tmp_path)
+        mem.write("task-001", "content")
+        mem_dir = tmp_path / "memory"
+        tmp_files = list(mem_dir.glob("*.tmp"))
+        assert len(tmp_files) == 0
+
+
 class TestAgentIdValidation:
     """Tests for _validate_agent_id path traversal prevention (Phase 66.3)."""
 
