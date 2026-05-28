@@ -43,6 +43,15 @@ class TestLoadConfig:
         assert cfg["quiet"] is False
         assert cfg["keep_worktrees"] is True
 
+    def test_cagentrc_bool_rejected_for_int_key(self, repo: Path) -> None:
+        """A boolean value for an int-typed key is rejected (not coerced to 1)."""
+        (repo / ".cagentrc").write_text(
+            "jobs = true\ntimeout = 3600\n", encoding="utf-8",
+        )
+        cfg = load_config(repo)
+        assert "jobs" not in cfg
+        assert cfg["timeout"] == 3600
+
     def test_cagentrc_ignores_unknown_keys(self, repo: Path) -> None:
         """Unknown keys in .cagentrc are silently ignored."""
         (repo / ".cagentrc").write_text(

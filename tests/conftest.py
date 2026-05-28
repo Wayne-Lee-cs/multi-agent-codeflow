@@ -88,6 +88,12 @@ def tmp_repo(tmp_path):
         ["git", "config", "user.name", "Test"],
         cwd=tmp_path, capture_output=True, check=True,
     )
+    # Disable commit signing so tests don't depend on the host's git signing
+    # configuration (e.g. a global gpg.format=ssh that can't sign in CI).
+    subprocess.run(
+        ["git", "config", "commit.gpgsign", "false"],
+        cwd=tmp_path, capture_output=True, check=True,
+    )
     readme = tmp_path / "README.md"
     readme.write_text("# test\n", encoding="utf-8")
     subprocess.run(["git", "add", "README.md"], cwd=tmp_path, capture_output=True, check=True)

@@ -481,3 +481,41 @@ class TestCheckTokensWindowsQuotes:
     def test_quoted_rm_recursive_blocked(self):
         reason = _check_tokens('"rm" "-rf" "/tmp"')
         assert reason is not None
+
+
+class TestStaticCheckTokensParity:
+    """The deployed sandbox hook runs the embedded _CHECK_TOKENS_STATIC copy,
+    not the live _check_tokens. Guard against silent drift between the two."""
+
+    @staticmethod
+    def _load_static():
+        import shlex
+        import sys as _sys
+        from cagent.safety import _CHECK_TOKENS_STATIC
+        ns: dict = {"shlex": shlex, "sys": _sys}
+        exec(_CHECK_TOKENS_STATIC, ns)
+        return ns["_check_tokens"]
+
+    @pytest.mark.parametrize("cmd", [
+        "git push origin main",
+        "cd /tmp && git push",
+        "/usr/bin/git push",
+        "git reset --hard HEAD~1",
+        "git clean -fd",
+        "git update-ref refs/heads/x y",
+        "git remote add foo bar",
+        "git remote set-url origin x",
+        "rm -rf /tmp/x",
+        "rm -r -f /tmp/x",
+        "rm --recursive --force dir",
+        "rm -- -r -f",
+        "PATH=/usr/bin rm -r -f /tmp",
+        "A=B C=D",
+        "echo hello",
+        "ls -la && git status",
+        'git" "push',  # malformed quotes
+        "git push'",    # unbalanced quote
+    ])
+    def test_static_matches_live(self, cmd):
+        static_check = self._load_static()
+        assert static_check(cmd) == _check_tokens(cmd), f"drift on: {cmd!r}"

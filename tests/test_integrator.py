@@ -999,8 +999,7 @@ class TestResolveConflicts:
         task = _done_task("1", "abc123")
         with patch("cagent.integrator.base._run_git", side_effect=fake_git), \
              patch("cagent.integrator.base.prepare_sandbox"), \
-             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0), \
-             patch("cagent.integrator.base.shutil.rmtree"):
+             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0):
             result = await _resolve_conflicts(
                 task=task, integrated_tasks=[], worktree_path=tmp_path,
                 run_dir=run_dir, integrator_model_override=None,
@@ -1030,8 +1029,7 @@ class TestResolveConflicts:
 
         with patch("cagent.integrator.base._run_git", side_effect=fake_git), \
              patch("cagent.integrator.base.prepare_sandbox"), \
-             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0), \
-             patch("cagent.integrator.base.shutil.rmtree"):
+             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0):
             result = await _resolve_conflicts(
                 task=task, integrated_tasks=[], worktree_path=tmp_path,
                 run_dir=run_dir, integrator_model_override=None,
@@ -1062,8 +1060,7 @@ class TestResolveConflicts:
         task = _done_task("1", "abc123")
         with patch("cagent.integrator.base._run_git", side_effect=fake_git), \
              patch("cagent.integrator.base.prepare_sandbox"), \
-             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0), \
-             patch("cagent.integrator.base.shutil.rmtree"):
+             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0):
             result = await _resolve_conflicts(
                 task=task, integrated_tasks=[], worktree_path=tmp_path,
                 run_dir=run_dir, integrator_model_override=None,
@@ -1089,8 +1086,7 @@ class TestResolveConflicts:
         task = _done_task("1", "abc123")
         with patch("cagent.integrator.base._run_git", side_effect=fake_git), \
              patch("cagent.integrator.base.prepare_sandbox"), \
-             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0), \
-             patch("cagent.integrator.base.shutil.rmtree"):
+             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0):
             result = await _resolve_conflicts(
                 task=task, integrated_tasks=[], worktree_path=tmp_path,
                 run_dir=run_dir, integrator_model_override=None,
@@ -1116,8 +1112,7 @@ class TestResolveConflicts:
         task = _done_task("1", "abc123")
         with patch("cagent.integrator.base._run_git", side_effect=fake_git), \
              patch("cagent.integrator.base.prepare_sandbox"), \
-             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0), \
-             patch("cagent.integrator.base.shutil.rmtree"):
+             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0):
             result = await _resolve_conflicts(
                 task=task, integrated_tasks=[], worktree_path=tmp_path,
                 run_dir=run_dir, integrator_model_override=None,
@@ -1143,8 +1138,7 @@ class TestResolveConflicts:
         task = _done_task("1", "abc123")
         with patch("cagent.integrator.base._run_git", side_effect=fake_git), \
              patch("cagent.integrator.base.prepare_sandbox"), \
-             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0), \
-             patch("cagent.integrator.base.shutil.rmtree"):
+             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0):
             result = await _resolve_conflicts(
                 task=task, integrated_tasks=[], worktree_path=tmp_path,
                 run_dir=run_dir, integrator_model_override=None,
@@ -1170,8 +1164,7 @@ class TestResolveConflicts:
         task = _done_task("1", "abc123")
         with patch("cagent.integrator.base._run_git", side_effect=fake_git), \
              patch("cagent.integrator.base.prepare_sandbox"), \
-             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0), \
-             patch("cagent.integrator.base.shutil.rmtree"):
+             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0):
             result = await _resolve_conflicts(
                 task=task, integrated_tasks=[], worktree_path=tmp_path,
                 run_dir=run_dir, integrator_model_override=None,
@@ -1201,8 +1194,7 @@ class TestResolveConflicts:
 
         with patch("cagent.integrator.base._run_git", side_effect=fake_git), \
              patch("cagent.integrator.base.prepare_sandbox"), \
-             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0), \
-             patch("cagent.integrator.base.shutil.rmtree"):
+             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0):
             result = await _resolve_conflicts(
                 task=task, integrated_tasks=[prior], worktree_path=tmp_path,
                 run_dir=run_dir, integrator_model_override=None,
@@ -1229,8 +1221,7 @@ class TestResolveConflicts:
         task = _done_task("1", "abc123")
         with patch("cagent.integrator.base._run_git", side_effect=fake_git), \
              patch("cagent.integrator.base.prepare_sandbox"), \
-             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0), \
-             patch("cagent.integrator.base.shutil.rmtree"):
+             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0):
             result = await _resolve_conflicts(
                 task=task, integrated_tasks=[], worktree_path=tmp_path,
                 run_dir=run_dir, integrator_model_override=None,
@@ -1240,11 +1231,15 @@ class TestResolveConflicts:
 
     @pytest.mark.asyncio
     async def test_claude_dir_cleanup(self, tmp_path):
-        """Existing .claude dir gets cleaned up after agent resolution."""
+        """Sandbox files are removed but user-owned .claude content is preserved."""
         run_dir = tmp_path / "run"
         run_dir.mkdir()
         claude_dir = tmp_path / ".claude"
-        claude_dir.mkdir()
+        (claude_dir / "hooks").mkdir(parents=True)
+        # cagent sandbox files (should be removed):
+        (claude_dir / "settings.local.json").write_text("{}", encoding="utf-8")
+        (claude_dir / "hooks" / "cagent-guard.py").write_text("# guard", encoding="utf-8")
+        # user-owned file (must be preserved):
         (claude_dir / "settings.json").write_text("{}", encoding="utf-8")
 
         async def fake_git(*args, cwd, env=None, check=True, timeout=60):
@@ -1266,7 +1261,9 @@ class TestResolveConflicts:
                 timeout=60, dashboard=None,
             )
         assert result is True
-        assert not claude_dir.exists()
+        assert not (claude_dir / "settings.local.json").exists()
+        assert not (claude_dir / "hooks" / "cagent-guard.py").exists()
+        assert (claude_dir / "settings.json").exists()  # user content preserved
 
     @pytest.mark.asyncio
     async def test_rename_in_conflict_files(self, tmp_path):
@@ -1286,8 +1283,7 @@ class TestResolveConflicts:
         task = _done_task("1", "abc123")
         with patch("cagent.integrator.base._run_git", side_effect=fake_git), \
              patch("cagent.integrator.base.prepare_sandbox"), \
-             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0) as mock_agent, \
-             patch("cagent.integrator.base.shutil.rmtree"):
+             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0) as mock_agent:
             await _resolve_conflicts(
                 task=task, integrated_tasks=[], worktree_path=tmp_path,
                 run_dir=run_dir, integrator_model_override=None,

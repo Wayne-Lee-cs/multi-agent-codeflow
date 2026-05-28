@@ -70,6 +70,10 @@ def _parse_and_validate(
     for key, (expected_type, min_val, max_val) in _VALID_KEYS.items():
         if key in data:
             value = data[key]
+            # bool is a subclass of int — reject booleans for int-typed keys
+            # so that e.g. `jobs = true` is not silently accepted as 1.
+            if expected_type is int and isinstance(value, bool):
+                continue
             if not isinstance(value, expected_type):
                 continue
             # Value range validation for numeric types

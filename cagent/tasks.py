@@ -110,6 +110,7 @@ def parse_tasks_md(path: str | Path, run_id: str) -> tuple[list[Task], str]:
     # Parse task blocks
     tasks: list[Task] = []
     task_blocks = _split_task_blocks(raw)
+    seen_ids: set[str] = set()
 
     for block in task_blocks:
         # Extract task ID from ### Task NNN heading
@@ -117,6 +118,12 @@ def parse_tasks_md(path: str | Path, run_id: str) -> tuple[list[Task], str]:
         if not id_match:
             continue
         task_id = id_match.group(1).zfill(3)
+        if task_id in seen_ids:
+            raise ValueError(
+                f"Duplicate task ID '{task_id}' in {path}. "
+                f"Each ### Task NNN heading must have a unique number."
+            )
+        seen_ids.add(task_id)
 
         depends_on_str = _extract_field(block, "depends_on") or "none"
         depends_on = []

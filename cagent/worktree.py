@@ -104,12 +104,25 @@ def cleanup_orphan_worktrees(
         return 0
 
     cleaned = 0
+    run_ids: set[str] = set()
     for wt_path, run_id in orphans:
+        run_ids.add(run_id)
         try:
             _git("worktree", "remove", "--force", str(wt_path), cwd=repo_root, check=False)
             cleaned += 1
         except Exception:
             _log.debug("Failed to remove orphan worktree: %s", wt_path)
+
+    # Delete the now-unreferenced task branches so they don't accumulate.
+    for run_id in run_ids:
+        try:
+            result = _git("branch", "--list", f"cagent/{run_id}/*", cwd=repo_root, check=False)
+        except Exception:
+            continue
+        for line in result.stdout.splitlines():
+            branch = line.strip().removeprefix("* ").strip()
+            if branch:
+                _git("branch", "-D", branch, cwd=repo_root, check=False)
 
     # Clean up empty run directories under worktrees/
     worktrees_root = repo_root / ".cagent" / "worktrees"

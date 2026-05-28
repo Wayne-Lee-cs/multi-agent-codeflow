@@ -163,3 +163,18 @@ class TestCleanupOrphanWorktrees:
 
     def test_returns_zero_when_no_orphans(self, tmp_repo):
         assert cleanup_orphan_worktrees(tmp_repo) == 0
+
+    def test_deletes_orphan_branches(self, tmp_repo):
+        import subprocess
+        run_id = "branch-cleanup-run"
+        wt_path = tmp_repo / ".cagent" / "worktrees" / run_id / "task-001"
+        branch = f"cagent/{run_id}/task-001"
+        create_worktree(tmp_repo, wt_path, branch, current_head(tmp_repo))
+
+        cleaned = cleanup_orphan_worktrees(tmp_repo)
+        assert cleaned == 1
+        branches = subprocess.run(
+            ["git", "branch", "--list", f"cagent/{run_id}/*"],
+            cwd=tmp_repo, capture_output=True, text=True, check=True,
+        ).stdout
+        assert branch not in branches

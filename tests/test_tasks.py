@@ -199,6 +199,16 @@ class TestParseTasksMd:
         with pytest.raises(ValueError, match="No tasks found"):
             parse_tasks_md(f, "run-001")
 
+    def test_duplicate_task_id_raises(self, tmp_path):
+        f = tmp_path / "dup.md"
+        f.write_text(
+            "### Task 001\n\nFirst.\n\n"
+            "### Task 001\n\nSecond with same id.\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="Duplicate task ID"):
+            parse_tasks_md(f, "run-001")
+
     def test_missing_file_raises(self, tmp_path):
         f = tmp_path / "nonexistent.md"
         with pytest.raises(FileNotFoundError):

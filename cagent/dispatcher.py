@@ -252,7 +252,6 @@ async def run(
             )
 
         completed: set[str] = set()
-        failed: set[str] = set()
         stagger_counter = 0
 
         while True:
@@ -277,7 +276,6 @@ async def run(
             # Failed deps block downstream (they are not added to completed).
             async with lock:
                 completed = {t.id for t in tasks if t.status in ("done", "noop")}
-                failed = {t.id for t in tasks if t.status == "failed"}
             stagger_counter += len(ready)
 
         # Mark tasks blocked by failed dependencies (transitive closure)

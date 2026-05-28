@@ -342,7 +342,7 @@ async def _commit_result(
     first_line = task.prompt.strip().split("\n")[0][:72] or "(no description)"
     commit_msg = f"task {task.id}: {first_line}"
 
-    # Exclude .claude/ sandbox files from commit
+    # Remove cagent sandbox files before staging.
     claude_dir = worktree_path / ".claude"
     sandbox_files = [
         claude_dir / "settings.local.json",
@@ -355,23 +355,24 @@ async def _commit_result(
     if hooks_dir.exists() and not any(hooks_dir.iterdir()):
         hooks_dir.rmdir()
 
-    # Restore tracked .claude/ and .gitignore from base (best-effort).
-    # These may not exist in HEAD — ignore failures silently.
-    for path in (".claude/", ".gitignore"):
-        await _run_git_async("checkout", "HEAD", "--", path, cwd=worktree_path, timeout=30)
-
-    # Verify sandbox files are cleared before staging
-    for f in sandbox_files:
-        if f.exists():
-            try:
-                f.unlink()
-            except OSError:
-                pass
-
-    # git add -A
+    # Stage changes WHILE the cagent-injected .gitignore is still in effect,
+    # so artifacts/secrets created during the task (e.g. __pycache__, .venv,
+    # .env, node_modules) are excluded from the commit rather than added.
     r = await _git_op_checked("add", "-A", cwd=worktree_path, task=task, dashboard=dashboard)
     if isinstance(r, AgentResult):
         return r
+
+    # Revert cagent's own bookkeeping (.claude sandbox + the injected .gitignore
+    # lines) from both the index and working tree so they don't pollute the
+    # commit. checkout restores the HEAD version when the path is tracked;
+    # otherwise drop it from the index so cagent additions aren't committed.
+    for path in (".claude", ".gitignore"):
+        rc, _, _ = await _run_git_async("checkout", "HEAD", "--", path, cwd=worktree_path, timeout=30)
+        if rc != 0:
+            await _run_git_async(
+                "rm", "-r", "--cached", "--ignore-unmatch", path,
+                cwd=worktree_path, timeout=30,
+            )
 
     # git commit
     r = await _git_op_checked("commit", "-m", commit_msg, cwd=worktree_path, task=task, dashboard=dashboard)

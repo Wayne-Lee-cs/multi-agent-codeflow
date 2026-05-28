@@ -8,11 +8,35 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from cagent.agent import AgentResult, _run_git_async, run_agent
+import subprocess
+
+from cagent.agent import (
+    _CAGENT_GITIGNORE_LINES,
+    _CAGENT_GITIGNORE_MARKER,
+    AgentResult,
+    _commit_result,
+    _run_git_async,
+    run_agent,
+)
 from cagent.git_utils import GitTimeoutError
 from cagent.tasks import Task
 
 from tests.conftest import AsyncLineIterator, _make_process
+
+
+def _git(*args: str, cwd: Path) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", *args], cwd=cwd, capture_output=True, text=True, check=True,
+    )
+
+
+def _inject_cagent_gitignore(worktree: Path) -> None:
+    """Replicate run_agent's .gitignore injection for direct _commit_result tests."""
+    gi = worktree / ".gitignore"
+    existing = gi.read_text(encoding="utf-8") if gi.exists() else ""
+    prefix = "" if not existing or existing.endswith("\n") else "\n"
+    with open(gi, "a", encoding="utf-8") as f:
+        f.write(f"{prefix}{_CAGENT_GITIGNORE_MARKER}\n{_CAGENT_GITIGNORE_LINES}")
 
 
 def _git_mock_exec(
@@ -513,3 +537,62 @@ class TestResolveClaudeNegativeCache:
             result3 = mod._resolve_claude()
             assert result3 == "/usr/bin/claude"  # found on 3rd attempt
             assert mod._claude_path_cache == "/usr/bin/claude"  # now cached
+
+
+@pytest.mark.asyncio
+async def test_commit_excludes_runtime_artifacts(tmp_repo: Path) -> None:
+    """Artifacts created during a task and matched by the injected .gitignore
+    (e.g. __pycache__, .venv) must not be committed, and cagent's own .gitignore
+    additions must not leak into the commit (regression for gitignore-revert bug)."""
+    wt = tmp_repo / ".cagent" / "worktrees" / "run1" / "task-001"
+    create_worktree = __import__("cagent.worktree", fromlist=["create_worktree"]).create_worktree
+    base_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    create_worktree(tmp_repo, wt, "cagent/run1/task-001", base_sha)
+
+    _inject_cagent_gitignore(wt)
+    # A legitimate change the agent made:
+    (wt / "feature.py").write_text("print('hi')\n", encoding="utf-8")
+    # Artifacts that the injected .gitignore should exclude:
+    (wt / "__pycache__").mkdir()
+    (wt / "__pycache__" / "mod.pyc").write_text("x", encoding="utf-8")
+    (wt / ".env").write_text("SECRET=1\n", encoding="utf-8")
+
+    task = Task(id="001", prompt="add feature", branch="cagent/run1/task-001")
+    result = await _commit_result(task, wt, dashboard=None)
+
+    assert result.status == "done"
+    tracked = _git("ls-tree", "-r", "--name-only", "HEAD", cwd=wt).stdout.split()
+    assert "feature.py" in tracked
+    assert "__pycache__/mod.pyc" not in tracked
+    assert ".env" not in tracked
+    # cagent's injected .gitignore lines must not be committed.
+    assert ".gitignore" not in tracked
+
+
+@pytest.mark.asyncio
+async def test_commit_preserves_base_gitignore(tmp_repo: Path) -> None:
+    """When .gitignore is tracked, the commit keeps the base content and drops
+    cagent's appended lines."""
+    (tmp_repo / ".gitignore").write_text("*.log\n", encoding="utf-8")
+    _git("add", ".gitignore", cwd=tmp_repo)
+    _git("commit", "-m", "add gitignore", cwd=tmp_repo)
+
+    wt = tmp_repo / ".cagent" / "worktrees" / "run2" / "task-001"
+    create_worktree = __import__("cagent.worktree", fromlist=["create_worktree"]).create_worktree
+    base_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    create_worktree(tmp_repo, wt, "cagent/run2/task-001", base_sha)
+
+    _inject_cagent_gitignore(wt)
+    (wt / "feature.py").write_text("x\n", encoding="utf-8")
+
+    task = Task(id="001", prompt="add feature", branch="cagent/run2/task-001")
+    result = await _commit_result(task, wt, dashboard=None)
+
+    assert result.status == "done"
+    committed_gi = _git("show", "HEAD:.gitignore", cwd=wt).stdout
+    assert committed_gi == "*.log\n"
+    assert _CAGENT_GITIGNORE_MARKER not in committed_gi

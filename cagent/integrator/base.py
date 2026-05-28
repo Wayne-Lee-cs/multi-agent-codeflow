@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import shutil
 import subprocess
 import sys
 import time
@@ -334,12 +333,22 @@ async def _resolve_conflicts(
         await _abort_operation(completion_mode, worktree_path)
         return False
 
+    # Remove only the cagent-created sandbox files, not a user's tracked
+    # .claude/ directory (which would otherwise be staged as a deletion).
     claude_dir = worktree_path / ".claude"
-    if claude_dir.exists():
+    for f in (claude_dir / "settings.local.json", claude_dir / "hooks" / "cagent-guard.py"):
         try:
-            shutil.rmtree(claude_dir)
+            f.unlink(missing_ok=True)
         except OSError:
             pass
+    hooks_dir = claude_dir / "hooks"
+    try:
+        if hooks_dir.is_dir() and not any(hooks_dir.iterdir()):
+            hooks_dir.rmdir()
+        if claude_dir.is_dir() and not any(claude_dir.iterdir()):
+            claude_dir.rmdir()
+    except OSError:
+        pass
 
     env_continue = {**os.environ, "GIT_EDITOR": "true"}
     try:
