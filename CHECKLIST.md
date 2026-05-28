@@ -15,6 +15,7 @@
 > **v14.0 (2026-05-27)**: 第七次全面评估 + 8 项安全与 bug 修复。WebSocket readexactly、section 精确匹配、atomic write、I/O 竞态修复。700 tests, 83% coverage。
 > **v15.0 (2026-05-27)**: 性能优化 — 7 项改动使项目更轻量更快速。XOR 18x、JSON 4x、sandbox 4.2x。704 tests。
 > **v16.0 (2026-05-27)**: 覆盖率提升（5 模块 → 82-97%）+ 遗留 MEDIUM 修复（6 项）+ 架构优化 + 5 项安全修复。784 tests, 88.44% coverage。Phase 85-87 + 安全修复全部完成。
+> **v17.0 (2026-05-28)**: 第八次评估。7 项审查 fix（R1-R7）+ 1 项 fixture（F1）已合入 PR #1。800 tests pass。Phase 88（测试脆弱性收敛）+ Phase 89（5 项优化方向）待办。
 > This file tracks only **remaining** and **new** work.
 
 ---
@@ -1583,3 +1584,60 @@
 | Phase 86 (MEDIUM 修复 P1) | 14 | **TODO** |
 | Phase 87 (架构+性能 P2) | 17 | **TODO** |
 | **Total v16.0** | **53** | **0/53 完成** |
+
+---
+
+## v17.0 — 第八次审查（2026-05-28）
+
+### R1-R7 + F1 — PR #1 已合入 (commit `19eed96`)
+
+- [x] **R1** `agent.py:_commit_result` — 调换 `git add -A` 与 `.gitignore` 还原顺序；新建 .gitignore 用 `git rm --cached --ignore-unmatch` 兜底
+- [x] **R1.1** 回归测试 `test_commit_excludes_runtime_artifacts` — 真实 git worktree，验证 `__pycache__/.env` 不被提交
+- [x] **R1.2** 回归测试 `test_commit_preserves_base_gitignore` — 验证 base 仓库 `.gitignore` 内容保留、cagent 注入行被剔除
+- [x] **R2** `safety.py` — `TestStaticCheckTokensParity` 加 18 例参数化测试比对活函数与静态副本
+- [x] **R3** `worktree.py:cleanup_orphan_worktrees` — 收集 `run_ids` 并批量 `branch -D cagent/<run>/*`
+- [x] **R3.1** 测试 `test_deletes_orphan_branches` — 验证孤儿分支被清理
+- [x] **R4** `tasks.py:parse_tasks_md` — `seen_ids` 集合检测重复 + ValueError
+- [x] **R4.1** 测试 `test_duplicate_task_id_raises`
+- [x] **R5** `config.py` — int 键 `if isinstance(value, bool): continue` 守卫
+- [x] **R5.1** 测试 `test_cagentrc_bool_rejected_for_int_key`
+- [x] **R6** `dispatcher.py` — 删除未使用的 `failed: set[str]` 声明与重赋值
+- [x] **R7** `integrator/base.py:_resolve_conflicts` — 定点 `unlink` 沙箱文件 + 空目录 `rmdir`，不再 rmtree
+- [x] **R7.1** 测试 `test_claude_dir_cleanup` 重写 — 断言沙箱文件被删但用户 `settings.json` 保留
+- [x] **R7.2** 移除 10 处失效的 `patch("cagent.integrator.base.shutil.rmtree")` mock
+- [x] **F1** `tests/conftest.py:tmp_repo` — `git config commit.gpgsign false`，修复 19 个环境性 ERROR
+
+### Phase 88 — 测试脆弱性收敛 (P1) — TODO
+
+> 本地 0 失败 0 错误的硬性目标。改动前后均失败的 7 项，属于宿主环境依赖。
+
+- [ ] **88.1** `tests/test_compat.py::TestStdinHasKey::test_returns_truthy` — `monkeypatch.setattr(sys, "stdin", fake)`，提供带 `fileno()` 的对象
+- [ ] **88.2** `tests/test_compat.py::TestStdinHasKey::test_windows_uses_kbhit` — `@pytest.mark.skipif(sys.platform != "win32")` 或 `sys.modules["msvcrt"] = MagicMock()`
+- [ ] **88.3** `tests/test_compat.py::TestReadKey::test_windows_uses_getwch` — 同 88.2 套路
+- [ ] **88.4** `tests/test_compat.py::TestEnableAnsi::test_windows_calls_set_console_mode` — `sys.modules["ctypes"].windll = MagicMock()` + skipif
+- [ ] **88.5** `tests/test_cli.py::TestTerminatePidWindows::test_terminate_windows_taskkill_fallback` — patch `sys.platform` + 完整 mock `subprocess.run` Windows 分支
+- [ ] **88.6** `test_terminate_windows_taskkill_also_fails` — 同 88.5
+- [ ] **88.7** `test_terminate_windows_oserror_fallback` — 同 88.5
+- [ ] **88.V** 验收 — Linux 下 `python -m pytest -q` 报告 0 failed 0 errored；Windows runner 上 skip 不超过 7 个测试
+
+### Phase 89 — 优化方向 (P2/P3) — TODO
+
+- [ ] **89.1** P2 — `dispatcher.py:193` 把 token 预算从 dashboard 解耦；新建 `TokenBudget` 累计器或独立的 `total_tokens` 字段；dashboard 仅作展示
+- [ ] **89.1.1** 测试 — 无 dashboard 时仍能触发 `budget_exceeded`
+- [ ] **89.2** P2 — `safety.py` 构建期生成 hook 副本 — 从单一源（活函数）通过 `inspect.getsource` 或 AST 拷贝生成 `_CHECK_TOKENS_STATIC`；移除手工同步的 95 行字符串
+- [ ] **89.2.1** 验收 — 修改 `_check_tokens` 后无需手动同步静态副本，R2 parity 测试自动通过
+- [ ] **89.3** P3 — `progress.py:403` 累计 `assistant.message.usage` 而非仅 `result.usage`；处理可能的累计与增量混合
+- [ ] **89.3.1** 测试 — 多轮 stream-json fixture 验证 token 计数与 usage 求和一致
+- [ ] **89.4** P3 — 根目录文档归档：`SPEC_v9.md`、`SPEC_v10.md`、`REVIEW.md`、`REVIEW_REPORT.md` 移入 `docs/archive/` 或合并入 `ARCHIVE.md`
+- [ ] **89.5** P3 — `git_utils.py:117` Windows 路径 `proc.wait()` 包 `asyncio.wait_for(timeout=5)`，超时后 `proc.kill()` 兜底
+
+## v17.0 Progress Summary
+
+| Phase | Items | Status |
+|-------|-------|--------|
+| R1-R7 + F1 (审查 fix, PR #1) | 14 | ✅ 14/14 |
+| Phase 88 (测试脆弱性收敛 P1) | 8 | TODO 0/8 |
+| Phase 89 (优化方向 P2/P3) | 9 | TODO 0/9 |
+| **Total v17.0** | **31** | **14/31 完成 (45%)** |
+
+基线：800 passed, 7 brittle（待 Phase 88 收敛），0 product bug。

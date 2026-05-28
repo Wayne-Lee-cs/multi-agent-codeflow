@@ -15,6 +15,7 @@
 **v14.0 已发布** — 第七次全面评估 + 8 项安全与 bug 修复。WebSocket readexactly、_extract_section 精确匹配、memory atomic_write、I/O throttle 竞态修复。700 tests, 83% coverage。
 **v15.0 已发布** — 性能优化：7 项改动使项目更轻量更快速。XOR masking 18x、prepare_sandbox 4.2x、JSON 序列化 4x、内存占用显著减少。704 tests。
 **v16.0 已发布** — 覆盖率提升（5 模块 → 80%+）+ 遗留 MEDIUM 修复（6 项）+ 架构深度优化 + 5 项安全修复。784 tests, 88.44% coverage。Phase 85-87 + 安全修复全部完成。
+**v17.0 进行中** — 第八次评估（2026-05-28）。7 项审查 fix + 1 项 fixture 加固已合入 PR #1（800 tests）。剩余：Phase 88 测试脆弱性收敛（7 项）+ Phase 89 优化方向（5 项）。
 
 ### v5.1 已完成项
 
@@ -592,3 +593,55 @@ cagent/
 - Windows: `os.kill(SIGTERM)` 实为 TerminateProcess，CTRL_BREAK_EVENT 为最佳 effort
 - Write 工具内容检查假阳性: 测试/文档中合法提及危险命令会被 sandbox 阻止（defense-in-depth 权衡）
 - `--api-key` 进程参数泄露: 值出现在 `ps aux`/`wmic` 进程列表中，推荐使用 `ANTHROPIC_API_KEY` 环境变量代替
+
+---
+
+## v17.0 Roadmap (2026-05-28)
+
+第八次全面评估。已修复 7 项审查发现（已合入 PR #1）。剩余工作聚焦于**测试脆弱性收敛**与若干优化方向。
+
+### 已完成（已合入 PR #1, commit `19eed96`）
+
+| # | 严重度 | 位置 | 修法 |
+|---|--------|------|------|
+| R1 | 中 | `agent.py:_commit_result` | 调换 `git add -A` 与 `.gitignore` 还原顺序；新建 .gitignore 用 `rm --cached --ignore-unmatch` 兜底。运行期 `__pycache__`/`.venv`/`.env`/`node_modules` 不再被提交 |
+| R2 | 中 | `safety.py` | 为部署到 hook 的静态副本 `_CHECK_TOKENS_STATIC` 与活函数 `_check_tokens` 加 18 例参数化一致性测试 |
+| R3 | 低 | `worktree.py:cleanup_orphan_worktrees` | 真正删除孤儿 `cagent/<run>/*` 分支（docstring 之前声称但未实现） |
+| R4 | 低 | `tasks.py:parse_tasks_md` | 检测重复 `### Task NNN` 并报错 |
+| R5 | 低 | `config.py:_parse_and_validate` | int 配置键显式拒绝 TOML 布尔值（bool 是 int 子类陷阱） |
+| R6 | 低 | `dispatcher.py` | 移除波次调度死代码 `failed` 集合 |
+| R7 | 低 | `integrator/base.py:_resolve_conflicts` | 用定点删除替代 `shutil.rmtree(.claude)`，保留用户被追踪的 `.claude/` 内容 |
+| F1 | 附加 | `tests/conftest.py:tmp_repo` | 显式 `git config commit.gpgsign=false`，让 worktree/e2e 测试不依赖宿主签名配置（修复了 19 个环境性 ERROR） |
+
+### Phase 88: 测试脆弱性收敛 (P1) — TODO
+
+> 全套测试本地仍有 7 项失败，全部为**测试环境脆弱性**（非产品 bug）。需固化平台/输入条件，让套件在任意环境确定性通过。
+
+| # | 测试 | 失败原因 | 修法 |
+|---|------|----------|------|
+| 88.1 | `test_compat::TestStdinHasKey::test_returns_truthy` | pytest 捕获 stdin 下 `sys.stdin.fileno()` 抛 `UnsupportedOperation` | mock `sys.stdin` 为有 `fileno()` 的对象，或用 `-s` 标记 + `monkeypatch` |
+| 88.2 | `test_compat::TestStdinHasKey::test_windows_uses_kbhit` | Linux 环境无 `msvcrt.kbhit` | `@pytest.mark.skipif(sys.platform != "win32")` 或 mock 整个 `msvcrt` 模块（`sys.modules["msvcrt"] = MagicMock()`） |
+| 88.3 | `test_compat::TestReadKey::test_windows_uses_getwch` | 同 88.2，无 `msvcrt.getwch` | 同上 |
+| 88.4 | `test_compat::TestEnableAnsi::test_windows_calls_set_console_mode` | 无 `ctypes.windll` | mock `ctypes.windll` 为 MagicMock + skipif |
+| 88.5 | `test_cli::TestTerminatePidWindows::test_terminate_windows_taskkill_fallback` | `subprocess.run` mock 路径不全 | 完整 mock `subprocess.run` 的 Windows 分支 + 平台检测 patch |
+| 88.6 | `test_cli::TestTerminatePidWindows::test_terminate_windows_taskkill_also_fails` | 同 88.5 | 同上 |
+| 88.7 | `test_cli::TestTerminatePidWindows::test_terminate_windows_oserror_fallback` | 同 88.5 | 同上 |
+
+**判定标准**：在 Linux 环境下 `python -m pytest -q` 0 失败 0 错误；CI 中 Windows runner 仍能跑被 skip 的平台测试。
+
+### Phase 89: 优化方向（来自第八次审查） — TODO
+
+| # | 优先级 | 任务 | 位置 | 说明 |
+|---|--------|------|------|------|
+| 89.1 | P2 | Token 预算解耦 dashboard | `dispatcher.py:193` | 当前 `if max_tokens is not None and dashboard` — 无 dashboard 时预算完全不生效。改为独立 token 计数器，dashboard 仅作展示 |
+| 89.2 | P2 | 安全检查单一源生成 | `safety.py` | 构建期由活函数源生成 hook 副本，根除维护两份的负担（R2 的参数化测试只能捕获、不能预防） |
+| 89.3 | P3 | 中间轮 token 统计 | `progress.py:403` | 目前只累计 `result` 事件 usage，多轮对话中间 assistant 的 usage 未计入，可能低估预算消耗 |
+| 89.4 | P3 | 根目录文档归档 | 根目录 | 13 个 md（SPEC_v9/SPEC_v10/REVIEW/REVIEW_REPORT/CHECKLIST 85KB 等），版本化文档统一归 `ARCHIVE.md` 或 `docs/` |
+| 89.5 | P3 | `run_git_async` 超时后 `proc.wait()` 加超时 | `git_utils.py:117` | Windows 路径 `CTRL_BREAK_EVENT` 后无界等待，进程不响应会挂死 |
+
+### v17.0 优先级排序
+
+1. **Phase 88.1-88.7** — 测试脆弱性收敛（P1，本地 0 失败的硬性目标）
+2. **Phase 89.1** — Token 预算解耦（P2，正确性影响）
+3. **Phase 89.2** — 安全检查单一源（P2，维护性）
+4. **Phase 89.3-89.5** — 锦上添花（P3）

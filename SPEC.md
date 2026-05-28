@@ -1,8 +1,9 @@
-# cagent — Technical Specification (v16.0)
+# cagent — Technical Specification (v17.0)
 
-> 最新更新（2026-05-27）。
-> 基于 784 tests, 88.44% coverage, mypy 0 errors, 22 source files。
-> v14.0: 第七次全面评估 + 8 项 bug 修复。v15.0: 7 项性能优化。v16.0: 覆盖率提升 + MEDIUM 修复 + 安全加固。
+> 最新更新（2026-05-28，第八次评估）。
+> v16.0 基线：784 tests, 88.44% coverage, mypy 0 errors, 22 source files。
+> v17.0 进行中：7 项审查 fix 已合入 PR #1（800 tests pass），剩余 12 项见 §11。
+> v14.0: 第七次全面评估 + 8 项 bug 修复。v15.0: 7 项性能优化。v16.0: 覆盖率提升 + MEDIUM 修复 + 安全加固。v17.0: 第八次评估 — 见 §11。
 
 ---
 
@@ -316,3 +317,60 @@ v10.0 Phase 76 仍有 6 项 MEDIUM 未完成：
 | 代码质量 | 8.5 | 8.5 | 9.0 | 9.0 |
 | 架构 | 8.0 | 8.0 | 8.0 | 8.5 |
 | **综合** | **8.5** | **8.7** | **8.8** | **9.1** |
+
+---
+
+## 11. v17.0 评估（2026-05-28，第八次审查）
+
+### 11.1 评估范围与基线
+
+- 22 个源文件（cagent/，~6,500 LOC），13 个测试文件（~12,700 LOC）
+- 起点：v16.0 (788 tests, 88.44% coverage)
+- 终点：v17.0 PR #1 合入后 800 通过，新增 24 个测试
+
+### 11.2 已修复（7 项审查发现 + 1 项 fixture）
+
+| ID | 严重度 | 类别 | 描述 |
+|----|--------|------|------|
+| R1 | 中 | 正确性 | `agent.py`: 注入的 `.gitignore` 在 `git add -A` 前被 checkout HEAD 还原 → 运行期产物（`__pycache__`/`.venv`/`.env`/`node_modules`）会被提交。修法：调换顺序，保护生效时暂存，再还原/取消暂存 |
+| R2 | 中 | 安全维护性 | `safety.py`: `_check_tokens` 与部署到 hook 的静态副本 `_CHECK_TOKENS_STATIC` 无一致性测试 → 安全边界静默漂移风险。修法：18 例参数化 parity 测试 |
+| R3 | 低 | 资源泄漏 | `worktree.py:cleanup_orphan_worktrees` docstring 声称删分支但未实现 → 孤儿 `cagent/*` 分支累积 |
+| R4 | 低 | 输入校验 | `tasks.py`: markdown 重复 `### Task NNN` 静默覆盖 → 新增校验 |
+| R5 | 低 | 类型陷阱 | `config.py`: TOML 布尔被当 int 接受（bool ⊂ int）→ 显式拒绝 |
+| R6 | 低 | 死代码 | `dispatcher.py`: 未使用的 `failed` 集合 |
+| R7 | 低 | 一致性 | `integrator/base.py`: `shutil.rmtree(.claude)` 误删用户被追踪内容 → 定点删除沙箱文件 |
+| F1 | 附加 | 测试基础设施 | `conftest.py:tmp_repo`: 关 commit 签名 → 修复 19 个环境性 worktree/e2e ERROR |
+
+### 11.3 剩余开放项
+
+#### 11.3.1 测试脆弱性（7 项，全部非产品 bug，详见 PLAN §Phase 88）
+
+| 测试 | 根因 | 平台 |
+|------|------|------|
+| `TestStdinHasKey::test_returns_truthy` | pytest 捕获 stdin 无 `fileno()` | 通用 |
+| `TestStdinHasKey::test_windows_uses_kbhit` | `msvcrt` 不存在 | Linux 上跑 Windows 测试 |
+| `TestReadKey::test_windows_uses_getwch` | 同上 | 同上 |
+| `TestEnableAnsi::test_windows_calls_set_console_mode` | `ctypes.windll` 不存在 | 同上 |
+| `TestTerminatePidWindows::test_terminate_windows_*` (3 个) | `subprocess.run` mock 路径不全 | 同上 |
+
+**判定**：这些测试在改动前就失败，与本次修复无关。属于"测试设计依赖宿主环境"，应通过 `@pytest.mark.skipif` + 模块级 `sys.modules` mock 固化。
+
+#### 11.3.2 优化方向（5 项，详见 PLAN §Phase 89）
+
+| ID | 优先级 | 类别 | 描述 |
+|----|--------|------|------|
+| 89.1 | P2 | 正确性 | Token 预算解耦 dashboard（无 dashboard 时预算失效） |
+| 89.2 | P2 | 维护性 | 安全检查单一源（构建期生成 hook，根除两份维护） |
+| 89.3 | P3 | 准确性 | progress.py 中间轮 token 累计（当前可能低估） |
+| 89.4 | P3 | 文档卫生 | 根目录 13 个 md 归档（SPEC_v9/v10、REVIEW、85KB CHECKLIST 等） |
+| 89.5 | P3 | 健壮性 | `run_git_async` 超时后 `proc.wait()` 加超时上限 |
+
+### 11.4 评分变化
+
+| 维度 | v16.0 | v17.0 PR #1 后 | Phase 88 后 | Phase 89 后 |
+|------|-------|----------------|-------------|-------------|
+| 安全性 | 9.0 | 9.2 (R2 加固) | 9.2 | 9.5 (89.2 单一源) |
+| 正确性 | 9.0 | 9.3 (R1/R3/R4/R7) | 9.3 | 9.5 (89.1/89.3) |
+| 测试充分性 | 8.5 | 8.7 (+24 tests) | 9.2 (脆弱性收敛) | 9.2 |
+| 代码质量 | 8.5 | 8.7 (R5/R6) | 8.7 | 9.0 (89.4) |
+| **综合** | **8.7** | **8.85** | **9.0** | **9.2** |
