@@ -38,8 +38,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Documented that the `merge` strategy's `branch -f`/`branch -D` calls are
   best-effort no-ops while worker worktrees are still checked out.
 
+### CI / cross-platform
+- Added GitHub Actions CI (Ubuntu + Windows × Python 3.11/3.12): mypy, pytest
+  with coverage gate, and a build/`twine check` job. First run surfaced and we
+  fixed several latent cross-platform issues:
+  - mypy now passes on **both** Linux and Windows (`compat.py` Windows-only API
+    accesses and `git_utils.py`'s aliased `import sys as _sys` were only checked
+    on Windows before).
+  - `LinePrinter.run()` blocks on the queue instead of a `wait_for(timeout=0.5)`
+    poll, fixing a Windows/Python-3.11 ProactorEventLoop hang during loop teardown.
+  - Guarded 7 Windows-only tests so the suite is green on Linux.
+  - Added `pytest-timeout` (per-test 120s) and CI `timeout-minutes` so a hung
+    test fails fast instead of stalling for hours.
+
 ### Quality
-- 792 tests passing, mypy clean (26 files), ~88% coverage, zero RuntimeWarnings.
+- 792 tests passing, mypy clean on Linux + Windows (26 files), ~88% coverage,
+  zero RuntimeWarnings; CI green across the full matrix.
 
 ## [16.0.0] - 2026-05-27
 
