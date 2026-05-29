@@ -1,6 +1,11 @@
 # cagent
 
-> **v17.0.0** — 784 tests, 88.44% coverage, zero third-party dependencies.
+[![CI](https://github.com/Wayne-Lee-cs/multi-agent-codeflow/actions/workflows/ci.yml/badge.svg)](https://github.com/Wayne-Lee-cs/multi-agent-codeflow/actions/workflows/ci.yml)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Zero dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)](pyproject.toml)
+
+> **v17.0.0** — 792 tests, ~88% coverage, zero third-party dependencies.
 
 Concurrent agent workflow dispatcher — run multiple `claude -p` workers in parallel git worktrees.
 
