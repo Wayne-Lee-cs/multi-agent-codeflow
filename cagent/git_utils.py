@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -77,9 +78,8 @@ async def run_git_async(
     On Windows, the subprocess is created with CREATE_NEW_PROCESS_GROUP so
     that the entire process tree can be killed on timeout.
     """
-    import sys as _sys
     creationflags = 0
-    if _sys.platform == "win32":
+    if sys.platform == "win32":
         creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
 
     try:
@@ -99,7 +99,7 @@ async def run_git_async(
         )
     except asyncio.TimeoutError:
         # Kill the entire process tree on Windows via CTRL_BREAK_EVENT
-        if _sys.platform == "win32":
+        if sys.platform == "win32":
             try:
                 import os as _os
                 import signal as _signal

@@ -5,6 +5,7 @@ on:
     branches: [master]
   pull_request:
     branches: [master]
+  workflow_dispatch: {}  # allow manual runs from the Actions tab / gh CLI
 
 # Cancel superseded runs on the same ref to save CI minutes.
 concurrency:
@@ -15,6 +16,8 @@ jobs:
   test:
     name: test (${{ matrix.os }}, py${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
+    # Hard cap so a hung test fails fast instead of burning CI minutes.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -47,6 +50,7 @@ jobs:
   build:
     name: build wheel + sdist
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

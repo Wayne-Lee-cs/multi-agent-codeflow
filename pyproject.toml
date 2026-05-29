@@ -34,7 +34,7 @@ Issues = "https://github.com/Wayne-Lee-cs/multi-agent-codeflow/issues"
 cagent = "cagent.cli:main"
 
 [project.optional-dependencies]
-dev = ["mypy>=1.0", "pytest", "pytest-asyncio", "pytest-cov", "build"]
+dev = ["mypy>=1.0", "pytest", "pytest-asyncio", "pytest-cov", "pytest-timeout", "build"]
 
 [tool.setuptools.packages.find]
 include = ["cagent*"]
@@ -45,6 +45,10 @@ testpaths = ["tests"]
 pythonpath = ["."]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+# Per-test timeout (pytest-timeout). Fails a hung test with a full traceback
+# instead of letting CI stall for hours. "thread" method works on Windows too.
+timeout = 120
+timeout_method = "thread"
 
 [tool.coverage.run]
 source = ["cagent"]

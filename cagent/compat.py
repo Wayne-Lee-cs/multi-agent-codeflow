@@ -16,15 +16,17 @@ else:
 
 def stdin_has_key() -> bool:
     """Non-blocking check for a keypress on stdin."""
+    # _IS_WINDOWS is the runtime guard (also monkeypatched in tests), so mypy
+    # cannot platform-narrow it; msvcrt is Windows-only in typeshed.
     if _IS_WINDOWS:
-        return msvcrt.kbhit()
+        return bool(msvcrt.kbhit())  # type: ignore[attr-defined]
     return bool(select.select([sys.stdin], [], [], 0)[0])
 
 
 def read_key() -> str:
     """Read a single keypress character."""
     if _IS_WINDOWS:
-        return msvcrt.getwch()
+        return str(msvcrt.getwch())  # type: ignore[attr-defined]
     return sys.stdin.read(1)
 
 
@@ -43,7 +45,7 @@ def enable_ansi() -> bool:
     if _IS_WINDOWS:
         try:
             import ctypes
-            kernel32 = ctypes.windll.kernel32
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
             # STD_OUTPUT_HANDLE = -11
             handle = kernel32.GetStdHandle(-11)
             # Get current console mode
@@ -68,7 +70,7 @@ def is_pid_active(pid: int) -> bool:
     try:
         if _IS_WINDOWS:
             import ctypes
-            kernel32 = ctypes.windll.kernel32
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
             _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
             _STILL_ACTIVE = 259
             handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
