@@ -227,6 +227,101 @@ class TestCheckTokens:
         assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
+class TestCheckTokensStaticConsistency:
+    """Guard the two copies of the token check against silent drift.
+
+    `safety._check_tokens` is the maintained source, while
+    `safety._CHECK_TOKENS_STATIC` is the copy embedded verbatim into the
+    generated hook script — and the embedded copy is what actually runs in the
+    sandbox. If they diverge, the sandbox could silently stop blocking a
+    command that the in-process check still rejects (a security gap). This test
+    execs the embedded copy and asserts byte-for-byte identical decisions
+    across a broad command battery, so any future edit to one copy that is not
+    mirrored in the other fails immediately.
+    """
+
+    @staticmethod
+    def _load_static_check():
+        import shlex
+        import sys
+
+        from cagent.safety import _CHECK_TOKENS_STATIC
+
+        # The embedded copy assumes `shlex` and `sys` are in scope (the hook
+        # script imports them at the top); it imports `Path` itself.
+        ns: dict = {"shlex": shlex, "sys": sys}
+        exec(_CHECK_TOKENS_STATIC, ns)
+        return ns["_check_tokens"]
+
+    # Broad battery covering every branch of the token checker.
+    _COMMANDS = [
+        # git push / update-ref / reset --hard / remote
+        "git push",
+        "git push origin main",
+        "cd /tmp && git push",
+        "/usr/bin/git push",
+        "C:/Program Files/Git/bin/git.exe push",
+        'git "push"',
+        "git update-ref refs/heads/x HEAD",
+        "git reset --hard HEAD~1",
+        "git reset --soft HEAD~1",
+        "git remote set-url origin x",
+        "git remote add origin x",
+        "git remote -v",
+        # git clean
+        "git clean -f",
+        "git clean -fd",
+        "git clean --force",
+        "git clean -n",
+        "/usr/bin/git clean -fd",
+        # rm variants
+        "rm -rf /tmp/x",
+        "rm -fr /tmp/x",
+        "rm -Rf /tmp/x",
+        "rm -r /tmp/x",
+        "rm --recursive /tmp/x",
+        "rm --force /tmp/x",
+        "rm -i -r -f dir/",
+        "rm --recursive --force dir/",
+        "rm -r -f -- /tmp",
+        "rm -- -r -f",
+        "rm file.txt",
+        "rm -f file.txt",
+        # env var prefixes and chains
+        "A=B C=D",
+        "PATH=/usr/bin rm -r -f /tmp",
+        "echo hi && rm -r -f /tmp",
+        "echo hi; git push",
+        "ls | grep foo",
+        "true || git push",
+        # malformed / edge
+        'echo "unbalanced',
+        "",
+        "   ",
+        # safe commands
+        "ls -la",
+        "git status",
+        "git commit -m 'x'",
+        "npm install",
+        "pytest tests/",
+        "echo rm -rf",  # mentioned but not invoked as command
+    ]
+
+    def test_static_matches_runtime(self):
+        static_check = self._load_static_check()
+        mismatches = []
+        for cmd in self._COMMANDS:
+            runtime = _check_tokens(cmd)
+            static = static_check(cmd)
+            # Compare on block/no-block decision AND the exact reason string.
+            if (runtime is None) != (static is None) or runtime != static:
+                mismatches.append((cmd, runtime, static))
+        assert not mismatches, (
+            "embedded _CHECK_TOKENS_STATIC drifted from runtime _check_tokens:\n"
+            + "\n".join(f"  {c!r}: runtime={r!r} static={s!r}" for c, r, s in mismatches)
+        )
+
+
 class TestPrepareSandbox:
     def test_creates_settings_local_json(self, tmp_path):
         prepare_sandbox(tmp_path)

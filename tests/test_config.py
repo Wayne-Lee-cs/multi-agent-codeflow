@@ -117,19 +117,25 @@ class TestLoadConfig:
 
 class TestApplyConfig:
     def _make_args(self, **kwargs: object) -> argparse.Namespace:
-        """Create an argparse Namespace with run-command defaults."""
-        defaults = {
-            "jobs": 4,
-            "timeout": 1800,
-            "strategy": "cherry-pick",
-            "squash": False,
-            "quiet": False,
-            "retries": 0,
-            "worker_model": None,
-            "integrator_model": None,
-            "max_turns": None,
-            "max_tokens": None,
-            "keep_worktrees": False,
+        """Create an argparse Namespace mimicking an unprovided run command.
+
+        Overridable options default to the UNSET sentinel (matching the real
+        argparse setup), so that "not provided" is distinguishable from an
+        explicit value. Pass kwargs to simulate explicit CLI values.
+        """
+        from cagent.config import UNSET
+        defaults: dict[str, object] = {
+            "jobs": UNSET,
+            "timeout": UNSET,
+            "strategy": UNSET,
+            "squash": UNSET,
+            "quiet": UNSET,
+            "retries": UNSET,
+            "worker_model": UNSET,
+            "integrator_model": UNSET,
+            "max_turns": UNSET,
+            "max_tokens": UNSET,
+            "keep_worktrees": UNSET,
         }
         defaults.update(kwargs)
         return argparse.Namespace(**defaults)
@@ -146,6 +152,19 @@ class TestApplyConfig:
         args = self._make_args(jobs=16)
         apply_config(args, {"jobs": 8})
         assert args.jobs == 16
+
+    def test_cli_explicit_default_value_not_overridden(self) -> None:
+        """Explicit CLI value equal to the hard default still wins over config.
+
+        Regression for the 'current == default' bug: passing --jobs 4 (= default)
+        or --strategy cherry-pick (= default) must NOT be silently overridden by
+        a differing config-file value.
+        """
+        args = self._make_args(jobs=4, strategy="cherry-pick", quiet=False)
+        apply_config(args, {"jobs": 8, "strategy": "merge", "quiet": True})
+        assert args.jobs == 4
+        assert args.strategy == "cherry-pick"
+        assert args.quiet is False
 
     def test_none_defaults_overridden(self) -> None:
         """None-valued defaults (optional args) are overridden."""

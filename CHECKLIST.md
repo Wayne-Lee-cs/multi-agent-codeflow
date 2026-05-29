@@ -15,6 +15,7 @@
 > **v14.0 (2026-05-27)**: 第七次全面评估 + 8 项安全与 bug 修复。WebSocket readexactly、section 精确匹配、atomic write、I/O 竞态修复。700 tests, 83% coverage。
 > **v15.0 (2026-05-27)**: 性能优化 — 7 项改动使项目更轻量更快速。XOR 18x、JSON 4x、sandbox 4.2x。704 tests。
 > **v16.0 (2026-05-27)**: 覆盖率提升（5 模块 → 82-97%）+ 遗留 MEDIUM 修复（6 项）+ 架构优化 + 5 项安全修复。784 tests, 88.44% coverage。Phase 85-87 + 安全修复全部完成。
+> **v17.0 (2026-05-29)**: 第八次全面评估。发现 1 HIGH（rebase 策略冲突解决用错完成命令，被 mock 掩盖）+ 3 MEDIUM + 4 LOW + 2 优化。Phase 88 规划，共 9 项。详见末尾 Phase 88。
 > This file tracks only **remaining** and **new** work.
 
 ---
@@ -1583,3 +1584,69 @@
 | Phase 86 (MEDIUM 修复 P1) | 14 | **TODO** |
 | Phase 87 (架构+性能 P2) | 17 | **TODO** |
 | **Total v16.0** | **53** | **0/53 完成** |
+
+---
+
+## Phase 88 — 第八次全面评估修复 (v17.0, 2026-05-29)
+
+> 发现 1 HIGH + 3 MEDIUM + 4 LOW + 2 优化方向。详细分析见 SPEC.md §11，方案表见 PLAN.md Phase 88。
+
+### 88.1 P0 / HIGH — rebase 策略冲突解决用错完成命令 ✅
+
+- [x] **88.1.1** `integrator/rebase.py` — `completion_mode="rebase"` → `completion_mode="cherry-pick"`（含解释性注释）
+- [x] **88.1.2** 测试 — 新增 `TestRebaseStrategyRealGitConflict::test_rebase_strategy_resolves_real_conflict`：真实 git 仓库制造两任务冲突，**不 mock** `--continue`/`--abort`，仅 mock 集成 agent；验证两任务均集成、工作树干净无悬挂
+- [x] **88.1.3** 回归 — `_resolve_conflicts` 的 "rebase" 模式单测（base 函数能力，直接调用）不受影响，仍通过
+
+### 88.2 P1 — EventParser 对畸形 tool_result 不健壮 ✅
+
+- [x] **88.2.1** `progress.py` — list 首元素加 `isinstance(first, dict)` 守卫，非 dict 退化为 `str(first)[:80]`，空 list 返回 ""
+- [x] **88.2.2** `EventParser.feed` 外层包 `try/except Exception` → 记 `_log.warning` 并退化为 raw text event
+- [x] **88.2.3** 测试 — `test_user_tool_result_list_of_plain_strings`、`test_user_tool_result_list_of_non_dict`、`test_feed_degrades_on_unexpected_event_shape`
+
+### 88.3 P1 — apply_config 覆盖用户显式默认值参数 ✅
+
+- [x] **88.3.1** `config.py` — 新增 `UNSET` sentinel（`_Unset`）；`run` 子命令 11 个可覆盖项默认改为 `UNSET`；`apply_config` 重写为 CLI > config > default 优先级解析
+- [x] **88.3.2** 测试 — `test_cli_explicit_default_value_not_overridden`（`--jobs 4`/`--strategy cherry-pick`/`--quiet` 显式默认值不被配置覆盖）；`_make_args` helper 改用 UNSET
+
+### 88.4 P2 — merge 策略死代码清理 ✅
+
+- [x] **88.4.1** `integrator/merge.py` — `branch -f`/`branch -D` 加注释说明：集成期间 worker worktree 仍在，git 拒绝操作其检出分支故必失败（被 check=False 吞），无害且分支由 `cagent clean` 回收。保留为 worktree 已消失场景的 best-effort
+
+### 88.5 P2 — README 同步 ✅
+
+- [x] **88.5.1** `README.md` — `v12.0.0 — 585 tests, 75.59%` → `v17.0.0 — 784 tests, 88.44%`
+- [x] **88.5.2** `README.md` Module Map — `cagent/integrator.py` → `cagent/integrator/`；同步修正 PLAN.md 架构图；`pyproject.toml` 16.0.0 → 17.0.0
+
+### 88.6 P2 — 测试 RuntimeWarning 消除 ✅
+
+- [x] **88.6.1** 根因实为 `tests/test_cli_watch.py::test_watch_web_starts_server`（MagicMock patch `asyncio.run` 致 `run_dashboard_server(...)` 协程未 await）；改 `side_effect=_consume` 关闭协程。`-W error::RuntimeWarning` 下全套通过
+
+### 88.7 P3 — dispatcher 预算解耦 dashboard — 经分析为「有意设计」，不修改
+
+- [x] **88.7.1** 复审结论：dashboard 是跨 `--resume` 累积 token 的权威存储（见 `cli/run.py` "Prefer dashboard cumulative totals"），改用 results 累计会破坏 resume 预算累计；无 dashboard 时本就无 token 来源。`and dashboard` 是合理依赖而非 bug。保持现状并在 SPEC §11 记录
+
+### 88.O 优化方向
+
+- [x] **88.O1** `safety.py` 双份维护隐患 — 采用「一致性测试」方案（尊重 v16.0 S4 移除 inspect.getsource 的决策）。新增 `TestCheckTokensStaticConsistency::test_static_matches_runtime`：exec 嵌入版 `_CHECK_TOKENS_STATIC`，对 50 条命令电池断言与运行时 `_check_tokens` 决策+原因串逐条一致，未来任一份漂移立即失败（堵住静默安全缺口）
+- [x] **88.O3** 测试保真度（采纳第八次评审建议）— 新增 `TestStrategiesRealGitConflict`：cherry-pick/merge/rebase 三策略各一个**真实 git 冲突解决**测试，仅 mock 集成 agent、git 全真。共享 helper `_setup_real_conflict_repo` 使新增策略测试仅需数行。系统性堵住「过度 mock 让坏命令假绿」盲区
+- [ ] **88.O2** `server.py`/`cli/plan.py` — HTML 外置 + 覆盖率补强（保留备选，较大结构改动）
+
+### Phase 88 验收 ✅
+
+- [x] 全部测试通过（786 + 后续新增解析测试），mypy 0 errors（26 文件），**0 RuntimeWarning**
+- [x] rebase 策略真实冲突可正确续接（真实 git 端到端测试验证）
+- [x] README/pyproject 与实际版本/测试数/架构一致
+
+## v17.0 Progress Summary
+
+| Phase | Items | Status |
+|-------|-------|--------|
+| Phase 88.1 (rebase HIGH bug P0) | 3 | ✅ 3/3 |
+| Phase 88.2-88.3 (MEDIUM P1) | 5 | ✅ 5/5 |
+| Phase 88.4-88.6 (LOW/文档 P2) | 4 | ✅ 4/4 |
+| Phase 88.7 (P3) | 1 | ✅ 复审为设计预期，文档化 |
+| Phase 88.O1 + 88.O3 (优化：测试保真度) | 2 | ✅ safety 一致性测试 + 三策略真实 git 冲突测试 |
+| Phase 88.O2 (server HTML 外置) | 1 | ⏳ 保留未实施 |
+| **Total v17.0** | **16** | **13 修复 + 1 文档化 + 2 优化 / 1 保留** |
+
+> 测试总数: 792 passed, mypy 0 errors (26 files), 88% coverage, 0 RuntimeWarning。

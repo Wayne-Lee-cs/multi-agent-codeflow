@@ -85,30 +85,56 @@ def _parse_and_validate(
     return result
 
 
-def apply_config(args: Any, config: dict[str, Any]) -> None:
-    """Apply config defaults to argparse Namespace — CLI args take precedence.
+class _Unset:
+    """Sentinel for argparse defaults.
 
-    Only sets a value if the argparse attribute is at its default (None, False, or
-    the argparse-declared default).
+    Distinguishes "the user did not pass this flag" from "the user passed a
+    value that happens to equal the hard default" (e.g. ``--jobs 4`` or
+    ``--strategy cherry-pick``). Config-overridable options in the run
+    subparser use this as their default so an explicit CLI value always wins
+    over the config file, even when it equals the built-in default.
     """
-    _ARGPARSE_DEFAULTS = {
-        "jobs": 4,
-        "timeout": 1800,
-        "strategy": "cherry-pick",
-        "squash": False,
-        "quiet": False,
-        "retries": 0,
-        "worker_model": None,
-        "integrator_model": None,
-        "max_turns": None,
-        "max_tokens": None,
-        "keep_worktrees": False,
-    }
 
-    for key, value in config.items():
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "<unset>"
+
+
+UNSET = _Unset()
+
+
+# Hard defaults for config-overridable options. Used to fill in a value when
+# neither the CLI nor the config file provides one.
+_ARGPARSE_DEFAULTS: dict[str, Any] = {
+    "jobs": 4,
+    "timeout": 1800,
+    "strategy": "cherry-pick",
+    "squash": False,
+    "quiet": False,
+    "retries": 0,
+    "worker_model": None,
+    "integrator_model": None,
+    "max_turns": None,
+    "max_tokens": None,
+    "keep_worktrees": False,
+}
+
+
+def apply_config(args: Any, config: dict[str, Any]) -> None:
+    """Resolve each overridable option with precedence: CLI > config file > default.
+
+    Overridable args use the :data:`UNSET` sentinel as their argparse default.
+    An explicit CLI value (even one equal to the hard default, e.g. ``--jobs 4``)
+    is therefore distinguishable from "not provided" and always wins over the
+    config file. After this call every overridable attribute holds a concrete
+    value (the sentinel is fully resolved).
+    """
+    for key, hard_default in _ARGPARSE_DEFAULTS.items():
         if not hasattr(args, key):
             continue
         current = getattr(args, key)
-        default = _ARGPARSE_DEFAULTS.get(key)
-        if current == default:
-            setattr(args, key, value)
+        if current is UNSET:
+            # Not provided on the CLI → config file wins, else the hard default.
+            setattr(args, key, config.get(key, hard_default))
+        # else: explicitly provided on the CLI → keep as-is, ignore the config.

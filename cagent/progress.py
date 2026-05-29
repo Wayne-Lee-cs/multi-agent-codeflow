@@ -80,7 +80,20 @@ class EventParser:
                 raw_line_len=line_len,
             )]
 
-        events = self._parse_event(obj)
+        try:
+            events = self._parse_event(obj)
+        except Exception:
+            # A malformed-but-valid-JSON event (unexpected shapes/types) must
+            # never crash the streaming loop in run_agent and fail the whole
+            # task. Degrade to a raw text event instead.
+            _log.warning("Failed to parse stream event, degrading to raw text", exc_info=True)
+            return [Event(
+                ts=time.time(),
+                kind="text",
+                summary=line[:80],
+                raw={"raw": line},
+                raw_line_len=line_len,
+            )]
         for ev in events:
             ev.raw_line_len = line_len
         return events
@@ -142,7 +155,16 @@ class EventParser:
             if block_type == "tool_result":
                 result_content = block.get("content", "")
                 if isinstance(result_content, list):
-                    result_content = str(result_content[0].get("text", ""))[:80] if result_content else ""
+                    if result_content:
+                        first = result_content[0]
+                        # List items are normally {"type": "text", "text": ...},
+                        # but tolerate plain strings / other shapes defensively.
+                        if isinstance(first, dict):
+                            result_content = str(first.get("text", ""))[:80]
+                        else:
+                            result_content = str(first)[:80]
+                    else:
+                        result_content = ""
                 elif isinstance(result_content, str):
                     result_content = result_content[:80]
                 else:

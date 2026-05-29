@@ -47,26 +47,32 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command")
 
     # --- run ---
+    # Config-overridable options default to the UNSET sentinel so that an
+    # explicit CLI value (even one equal to the hard default, e.g. --jobs 4)
+    # always wins over a value from the config file. apply_config() resolves
+    # the sentinel to config-or-default. Non-overridable options keep concrete
+    # defaults.
+    from cagent.config import UNSET
     run_p = sub.add_parser("run", help="Run tasks from a file concurrently")
     run_p.add_argument("tasks_file", help="Path to tasks file")
-    run_p.add_argument("-j", "--jobs", type=int, default=4, help="Concurrency (default: 4)")
+    run_p.add_argument("-j", "--jobs", type=int, default=UNSET, help="Concurrency (default: 4)")
     run_p.add_argument("--base", default=None, help="Base branch/SHA (default: HEAD)")
-    run_p.add_argument("--squash", action="store_true", help="Squash integration into one commit")
-    run_p.add_argument("--strategy", choices=["cherry-pick", "merge", "rebase"], default="cherry-pick", help="Integration strategy (default: cherry-pick)")
-    run_p.add_argument("--keep-worktrees", action="store_true", help="Keep worktrees after run")
-    run_p.add_argument("--worker-model", default=None, help="Model override for workers")
-    run_p.add_argument("--integrator-model", default=None, help="Model override for integrator")
-    run_p.add_argument("--timeout", type=int, default=1800, help="Per-agent timeout in seconds")
-    run_p.add_argument("--retries", type=int, default=0, help="Max retries for transient failures (default: 0)")
-    run_p.add_argument("--quiet", action="store_true", help="Only print START/DONE/FAIL events")
+    run_p.add_argument("--squash", action="store_true", default=UNSET, help="Squash integration into one commit")
+    run_p.add_argument("--strategy", choices=["cherry-pick", "merge", "rebase"], default=UNSET, help="Integration strategy (default: cherry-pick)")
+    run_p.add_argument("--keep-worktrees", action="store_true", default=UNSET, help="Keep worktrees after run")
+    run_p.add_argument("--worker-model", default=UNSET, help="Model override for workers")
+    run_p.add_argument("--integrator-model", default=UNSET, help="Model override for integrator")
+    run_p.add_argument("--timeout", type=int, default=UNSET, help="Per-agent timeout in seconds")
+    run_p.add_argument("--retries", type=int, default=UNSET, help="Max retries for transient failures (default: 0)")
+    run_p.add_argument("--quiet", action="store_true", default=UNSET, help="Only print START/DONE/FAIL events")
     run_p.add_argument("--api-key", default=None, help="API key for claude -p (WARNING: value visible in process listings; prefer --api-key-file or ANTHROPIC_API_KEY env var)")
     run_p.add_argument("--api-key-file", default=None, help="Read API key from file (safer than --api-key; key is never exposed in process listings)")
     run_p.add_argument("--dry-run", action="store_true", help="Show plan without executing")
     run_p.add_argument("--force", action="store_true", help="Skip run lock check (for concurrent runs)")
     run_p.add_argument("--resume", default=None, help="Resume from a previous run ID")
     run_p.add_argument("--post-integrate-cmd", default=None, help="Command to run after integration (e.g. 'pytest'); failures trigger agent repair, max 2 rounds")
-    run_p.add_argument("--max-turns", type=int, default=None, help="Max conversation turns per task (passed to claude -p --max-turns)")
-    run_p.add_argument("--max-tokens", type=int, default=None, help="Token budget for entire run (input+output combined); stops dispatching new tasks when exceeded. Note: budget is checked between tasks, so concurrent tasks may overshoot by up to (concurrency-1) tasks worth of tokens.")
+    run_p.add_argument("--max-turns", type=int, default=UNSET, help="Max conversation turns per task (passed to claude -p --max-turns)")
+    run_p.add_argument("--max-tokens", type=int, default=UNSET, help="Token budget for entire run (input+output combined); stops dispatching new tasks when exceeded. Note: budget is checked between tasks, so concurrent tasks may overshoot by up to (concurrency-1) tasks worth of tokens.")
 
     # --- status ---
     status_p = sub.add_parser("status", help="Show run status snapshot")

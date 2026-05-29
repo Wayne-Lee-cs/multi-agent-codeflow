@@ -538,9 +538,15 @@ class TestCmdWatchWeb:
         args.run_id = "test-run"
         args.web = 8080
 
+        # Close the coroutine passed to asyncio.run so it isn't left un-awaited
+        # (which would emit "coroutine was never awaited" RuntimeWarning at GC).
+        def _consume(coro):
+            if hasattr(coro, "close"):
+                coro.close()
+
         with patch("cagent.cli.watch._get_repo_root", return_value=tmp_path), \
              patch("cagent.cli.watch._find_run_dir", return_value=run_dir), \
-             patch("asyncio.run") as mock_run:
+             patch("asyncio.run", side_effect=_consume) as mock_run:
             _cmd_watch_web(args)
 
         mock_run.assert_called_once()

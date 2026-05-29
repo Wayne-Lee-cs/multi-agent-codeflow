@@ -45,6 +45,14 @@ async def merge_strategy(
         task_branch = f"cagent/{run_id}/task-{task.id}"
         temp_branches.append(task_branch)
         try:
+            # NOTE: during integration the worker worktrees still exist (they are
+            # cleaned only afterwards in the run summary phase), so task_branch is
+            # checked out elsewhere. Git therefore refuses both this `branch -f`
+            # and the `branch -D` cleanup below (they return non-zero and are
+            # ignored via check=False). They are harmless: task_branch already
+            # points at commit_sha (the worker committed there) and the branches
+            # are reclaimed later by `cagent clean`. We keep `branch -f` as a
+            # best-effort guard for callers where the worktree is already gone.
             await _run_git("branch", "-f", task_branch, task.commit_sha, cwd=worktree_path, check=False)
 
             result = await _run_git("merge", "--no-ff", task_branch, cwd=worktree_path, check=False)
@@ -78,6 +86,9 @@ async def merge_strategy(
             failed.append(task)
             _report(dashboard, "error", f"merge task {task.id} exception: {e}")
 
+    # Best-effort cleanup. Normally a no-op because these branches are checked
+    # out in their (not-yet-removed) worker worktrees, so git refuses the delete;
+    # they are reclaimed later by the run summary / `cagent clean`.
     for branch in temp_branches:
         await _run_git("branch", "-D", branch, cwd=worktree_path, check=False)
 

@@ -15,6 +15,7 @@
 **v14.0 已发布** — 第七次全面评估 + 8 项安全与 bug 修复。WebSocket readexactly、_extract_section 精确匹配、memory atomic_write、I/O throttle 竞态修复。700 tests, 83% coverage。
 **v15.0 已发布** — 性能优化：7 项改动使项目更轻量更快速。XOR masking 18x、prepare_sandbox 4.2x、JSON 序列化 4x、内存占用显著减少。704 tests。
 **v16.0 已发布** — 覆盖率提升（5 模块 → 80%+）+ 遗留 MEDIUM 修复（6 项）+ 架构深度优化 + 5 项安全修复。784 tests, 88.44% coverage。Phase 85-87 + 安全修复全部完成。
+**v17.0 评估完成** — 第八次全面评估（2026-05-29）。发现 1 个被 mock 掩盖的 HIGH 逻辑 bug（rebase 策略冲突解决用错完成命令）+ 3 项中优先级 + 4 项低优先级 + 2 项优化方向。Phase 88 规划，共 9 项。详见本文件 Phase 88 与 SPEC.md §11。
 
 ### v5.1 已完成项
 
@@ -562,6 +563,38 @@
 
 ---
 
+## Phase 88 — 第八次全面评估修复 (v17.0, 2026-05-29)
+
+> 第八次全面评估发现 1 HIGH + 3 MEDIUM + 4 LOW + 2 优化方向。
+> 核心发现：rebase 策略的冲突解决路径被过度 mock 掩盖了一个真实会失败的逻辑 bug。
+
+### 88.x 修复任务
+
+| # | 优先级 | 任务 | 文件 | 修复方案 |
+|---|--------|------|------|----------|
+| 88.1 | **P0 / HIGH** | rebase 策略冲突解决用错完成命令 | `integrator/rebase.py:62` | `_resolve_conflicts(..., completion_mode="rebase")` → `completion_mode="cherry-pick"`。rebase 策略内部用 `git cherry-pick` 重放，冲突必须用 `git cherry-pick --continue` 续接、`git cherry-pick --abort` 中止，而非 `git rebase --*`（无 rebase 在进行 → 必失败 + 悬挂状态级联污染下一任务） |
+| 88.2 | P1 | EventParser 对畸形 `tool_result` 不健壮 | `progress.py:145` | `result_content[0].get(...)` 前加 `isinstance(result_content[0], dict)` 守卫；或在 `EventParser.feed` 外层包 `try/except Exception` 退化为 raw text event，避免单行畸形输出经 `agent.py:188` 冒泡到 dispatcher 把整个任务标记为 "unhandled error" |
+| 88.3 | P1 | `apply_config` 覆盖用户显式传入的"等于默认值"参数 | `config.py:88-114` | 改用 argparse `default=SUPPRESS` 或 sentinel 区分"未传"与"传了默认值"。当前 `--strategy cherry-pick`（=默认）会被配置文件的 `strategy="merge"` 覆盖，`--jobs 4`、`--quiet` 同理 |
+| 88.4 | P2 | merge 策略对已被 worktree 检出的分支做 `branch -f`/`branch -D`（静默失效死代码） | `integrator/merge.py:48,82` | worker worktree 在集成后才清理，集成期间这些分支被检出，`git branch -f/-D` 必然失败被 `check=False` 吞掉。删除无效代码或加注释说明，避免误导维护者 |
+| 88.5 | P2 | README 严重过时 | `README.md` | 开头 `v12.0.0 — 585 tests, 75.59%` → `v17.0.0 — 784 tests, 88.44%`；架构 Module Map 中 `cagent/integrator.py`（单文件）→ `cagent/integrator/`（包：base/cherry_pick/merge/rebase）|
+| 88.6 | P2 | 测试 `run_dashboard_server` 协程未 await 警告 | `tests/test_compat.py` | mock 创建了协程对象但未消费，产生 `RuntimeWarning: coroutine never awaited`。改为消费/关闭协程或用 `MagicMock` 替代，恢复 0 warning |
+| 88.7 | P3 | dispatcher 预算执行隐式依赖 dashboard 存在 | `dispatcher.py:193` | `--max-tokens` 检查被 `and dashboard` 门控，无 dashboard 时预算静默失效。解耦为独立的 token 累计器，不依赖 dashboard |
+
+### 88.opt 优化方向（非 bug）
+
+| # | 优先级 | 方向 | 说明 |
+|---|--------|------|------|
+| 88.O1 | P2 | `_check_tokens` 双份维护消除 | `safety.py` 运行时版 + `_CHECK_TOKENS_STATIC` 嵌入版（~80 行）必须手动同步，维护陷阱。考虑 hook 改为 `import` 模块或加"两份必须同步"的强约束 + 一致性测试 |
+| 88.O2 | P3 | 大文件拆分 + 覆盖率洼地 | `server.py`(851，内嵌 HTML/JS) 可外置资源；`cli/run.py`(736)。覆盖率重点：`server.py` 81%、`cli/plan.py` 80% |
+
+### 88 验收标准
+
+- [ ] 88.1 修复后补一个**不 mock 掉 `--continue`/`--abort` 的真实 git repo 集成测试**（用 `tmp_path` 建真实仓库制造 rebase 策略冲突），防回归
+- [ ] 全部 784+ 测试通过，mypy 0 errors，0 RuntimeWarning
+- [ ] README 与实际版本/测试数/架构一致
+
+---
+
 ## Architecture
 
 ```
@@ -569,7 +602,7 @@ cagent/
 ├── cli/                  — 命令入口 (base/run/watch/plan/logcmd/misc)
 ├── agent.py              — Worker: claude -p 子进程 + worktree 隔离
 ├── dispatcher.py         — 调度: 依赖图 + wave 并发 + budget 控制
-├── integrator.py         — 集成: 多策略 (cherry-pick/merge/rebase) + 冲突解决 + 多轮验证
+├── integrator/           — 集成包: base + cherry_pick/merge/rebase 策略 + 冲突解决 + 多轮验证
 ├── git_utils.py          — 统一 git helper (sync + async)
 ├── safety.py             — 沙箱: regex + shlex token + Write 内容扫描
 ├── progress.py           — Dashboard + 事件流 + token 追踪

@@ -3,6 +3,7 @@
 > 最新更新（2026-05-27）。
 > 基于 784 tests, 88.44% coverage, mypy 0 errors, 22 source files。
 > v14.0: 第七次全面评估 + 8 项 bug 修复。v15.0: 7 项性能优化。v16.0: 覆盖率提升 + MEDIUM 修复 + 安全加固。
+> v17.0（2026-05-29）: 第八次全面评估，发现 rebase 策略冲突解决 HIGH bug（被 mock 掩盖）等 8 项问题。详见 §11。
 
 ---
 
@@ -316,3 +317,73 @@ v10.0 Phase 76 仍有 6 项 MEDIUM 未完成：
 | 代码质量 | 8.5 | 8.5 | 9.0 | 9.0 |
 | 架构 | 8.0 | 8.0 | 8.0 | 8.5 |
 | **综合** | **8.5** | **8.7** | **8.8** | **9.1** |
+
+---
+
+## 11. 第八次全面评估（v17.0, 2026-05-29）
+
+### 11.1 评估结论
+
+全部 25 个源文件、测试套件、mypy、pytest 复审。784 tests 全部通过，mypy 0 errors，覆盖率 88%。
+本轮发现 **1 个被 mock 掩盖的 HIGH 逻辑 bug** + 3 MEDIUM + 4 LOW + 2 优化方向。整体仍属高质量，但暴露出"过度 mock 掩盖真实失败路径"的系统性测试风险。
+
+### 11.2 确认的 Bug
+
+#### 11.2.1 [HIGH] rebase 策略冲突解决用错完成命令 — `integrator/rebase.py:62`
+
+**现象**：`rebase_strategy` 内部用 `git cherry-pick` 重放提交（`rebase.py:55`），但冲突时调用 `_resolve_conflicts(..., completion_mode="rebase")`。该 `completion_mode` 在 `base.py:362-367` 执行 `git rebase --continue`、在 `base.py:213`（`_abort_operation`）执行 `git rebase --abort`。
+
+**根因**：当前进行中的操作是 cherry-pick，没有 rebase 在进行。真实环境下：
+1. `git rebase --continue` → "No rebase in progress" → 抛 RuntimeError
+2. except → `git rebase --abort` → 同样失败
+3. 返回 False，**cherry-pick 状态悬挂未清理**，污染下一个任务的 cherry-pick（级联失败）
+
+**为什么 784 测试没抓到**：`test_integrate_rebase_strategy_conflict_resolution`（`test_integrator.py:547-563`）的 mock 把 `cherry-pick --continue/--abort` 特判返回 0，而 `rebase --continue` 落到默认分支也返回 0——mock 让一个真实会失败的命令"成功"，测试通过但真实路径是坏的。
+
+**修复**：`completion_mode="rebase"` → `completion_mode="cherry-pick"`（同时修正 continue 与 abort）。与 README "Known Limitations" 中"rebase 内部用 cherry-pick"的声明一致。
+
+**防回归**：补一个不 mock `--continue`/`--abort` 的真实 git repo 集成测试（`tmp_path` 建真实仓库制造 rebase 策略冲突）。
+
+### 11.3 中优先级问题
+
+| # | 文件 | 问题 | 影响 |
+|---|------|------|------|
+| 11.3.1 | `progress.py:145` | `EventParser._parse_user` 中 `result_content[0].get("text",...)` 未校验元素类型 | 若 `tool_result` content 列表元素是字符串，抛 `AttributeError`；该异常在 `agent.py:188` 流解析循环中仅 TimeoutError 被捕获，冒泡到 dispatcher 把整个任务标记 "unhandled error"——单行畸形输出可搞挂整个任务 |
+| 11.3.2 | `config.py:88-114` | `apply_config` 用 `current == default` 判断是否被用户改过 | 用户显式传入恰等于默认值的参数（`--strategy cherry-pick`、`--jobs 4`、`--quiet`）会被配置文件覆盖，违反"CLI 优先于配置"承诺 |
+| 11.3.3 | `integrator/merge.py:48,82` | `branch -f`/`branch -D` 作用于仍被 worker worktree 检出的分支 | Git 拒绝操作其他 worktree 检出的分支，命令必失败被 `check=False` 吞掉。无实际危害但属误导性死代码 |
+
+### 11.4 低优先级 / 文档
+
+| # | 位置 | 问题 |
+|---|------|------|
+| 11.4.1 | `README.md` | 版本/测试数严重过时（`v12.0.0 / 585 tests / 75.59%` vs 实际 `v17.0 / 784 / 88.44%`）；Module Map 仍把 `integrator.py` 当单文件（实为 `integrator/` 包） |
+| 11.4.2 | `tests/test_compat.py` | `run_dashboard_server` 协程创建后未 await，产生 `RuntimeWarning: coroutine never awaited` |
+| 11.4.3 | `dispatcher.py:193` | `--max-tokens` 预算检查被 `and dashboard` 门控，无 dashboard 时静默失效（隐式耦合） |
+| 11.4.4 | `integrator/base.py:320` | `_resolve_conflicts` 的 `git grep` 标记检查：grep 自身异常（rc 128）被当作"无标记"放行（边缘鲁棒性） |
+
+### 11.5 优化方向（非 bug）
+
+| 方向 | 优先级 | 状态 | 说明 |
+|------|--------|------|------|
+| `_check_tokens` 双份维护 | P2 | ✅ 已实施 | 采用一致性测试方案（尊重 v16.0 S4 移除 inspect.getsource 的决策，不回退）。`TestCheckTokensStaticConsistency` exec 嵌入版，对 50 条命令电池断言与运行时逐条一致，锁死漂移 |
+| 测试保真度（降低过度 mock） | P1 | ✅ 已实施 | rebase HIGH bug 系被过度 mock 掩盖。新增 `TestStrategiesRealGitConflict`：三策略各一真实 git 冲突解决测试（仅 mock 集成 agent），共享 `_setup_real_conflict_repo` helper，便于为新策略扩展 |
+| 大文件拆分 + 覆盖率洼地 | P3 | ⏳ 保留 | `server.py`(851，内嵌 HTML/JS) 可外置；覆盖率重点 `server.py` 81%、`cli/plan.py` 80% |
+
+### 11.6（优化后复审，2026-05-29）
+
+- 测试：**792 passed**（原 784 + 8 新增：1 config 回归 + 3 解析鲁棒 + 1 safety 一致性 + 3 策略真实 git），`-W error::RuntimeWarning` 零警告
+- 类型：mypy **0 errors（26 files）**；覆盖率 **88%**（阈值 78%）
+- 本次优化为**纯测试新增，生产代码零改动**，无回归面
+- 待办：88.O2（server HTML 外置）；可选 — `integrate()` 的策略 if/elif 可演进为注册表式分发以提升可扩展性（当前 3 策略下清晰度足够，暂记备选）
+
+### 11.6 预期评分变化（Phase 88 后）
+
+| 维度 | 当前(v16) | Phase 88 后 | 关键依据 |
+|------|-----------|-------------|----------|
+| 安全性 | 9.5 | 9.5 | 无新安全问题 |
+| 正确性 | 9.0 | 9.5 | 修复 rebase HIGH bug + 解析器鲁棒性 |
+| 测试充分性 | 9.0 | 9.2 | 补真实 git 集成测试，减少过度 mock |
+| 性能 | 9.0 | 9.0 | → |
+| 代码质量 | 9.0 | 9.2 | 清理死代码 + 消除 _check_tokens 双份隐患 |
+| 架构 | 8.5 | 8.5 | → |
+| **综合** | **8.7** | **9.0** | rebase 真实可用 + 测试可信度提升 |

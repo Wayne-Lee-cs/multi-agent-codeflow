@@ -171,6 +171,52 @@ class TestEventParser:
         events = self.parser.feed(json.dumps(obj))
         assert len(events) == 1
 
+    def test_user_tool_result_list_of_plain_strings(self):
+        """tool_result content as a list of plain strings must not crash.
+
+        Regression: previously `result_content[0].get(...)` assumed dict items
+        and raised AttributeError on string items, which bubbled up and failed
+        the whole task.
+        """
+        obj = {
+            "type": "user",
+            "message": {
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "tu_1", "content": ["plain string"]}
+                ]
+            }
+        }
+        events = self.parser.feed(json.dumps(obj))
+        assert len(events) == 1
+        assert events[0].kind == "tool_result"
+        assert "plain string" in events[0].summary
+
+    def test_user_tool_result_list_of_non_dict(self):
+        """tool_result content as a list of non-dict, non-str items is tolerated."""
+        obj = {
+            "type": "user",
+            "message": {
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "tu_1", "content": [123]}
+                ]
+            }
+        }
+        events = self.parser.feed(json.dumps(obj))
+        assert len(events) == 1
+        assert events[0].kind == "tool_result"
+
+    def test_feed_degrades_on_unexpected_event_shape(self):
+        """A valid-JSON event with a shape that breaks parsing degrades to text.
+
+        The streaming loop must never raise, or it would fail the whole task.
+        Here `message.content` is a string (not a list), which `.get` on blocks
+        would choke on inside _parse_assistant.
+        """
+        obj = {"type": "assistant", "message": {"content": "not-a-list"}}
+        # Must not raise; either yields no events or a degraded text event.
+        events = self.parser.feed(json.dumps(obj))
+        assert isinstance(events, list)
+
     def test_result_success(self):
         obj = {"type": "result", "subtype": "success"}
         events = self.parser.feed(json.dumps(obj))

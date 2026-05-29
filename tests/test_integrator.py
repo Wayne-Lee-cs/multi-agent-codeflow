@@ -18,6 +18,7 @@ from cagent.integrator import (
     integrate,
 )
 from cagent.integrator.base import _resolve_conflicts, _abort_operation, _report
+from cagent.integrator.cherry_pick import cherry_pick_strategy
 from cagent.integrator.merge import merge_strategy
 from cagent.integrator.rebase import rebase_strategy
 from cagent.tasks import Task
@@ -1568,6 +1569,156 @@ class TestRebaseStrategy:
             )
         assert integrated == []
         assert failed == [task]
+
+
+def _setup_real_conflict_repo(repo: Path, tmp_path: Path):
+    """Build a real git repo where two tasks edit shared.txt incompatibly.
+
+    Returns (task_a, task_b, integration_worktree, run_dir). Both tasks change
+    the same line from "base" to different values, so the second commit always
+    conflicts when replayed/merged onto the first. An integration worktree is
+    created at base on branch cagent/r1/integration.
+
+    Shared by the real-git conflict-resolution tests for all three strategies,
+    so adding coverage for a new strategy is a few lines reusing this helper.
+    """
+    import subprocess
+
+    from cagent.worktree import create_worktree
+
+    def _git(*args: str) -> str:
+        return subprocess.run(
+            ["git", *args], cwd=repo, capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+    (repo / "shared.txt").write_text("base\n", encoding="utf-8")
+    _git("add", "shared.txt")
+    _git("commit", "-m", "base shared")
+    base_sha = _git("rev-parse", "HEAD")
+
+    _git("checkout", "-b", "cagent/r1/task-001", base_sha)
+    (repo / "shared.txt").write_text("A\n", encoding="utf-8")
+    _git("add", "shared.txt")
+    _git("commit", "-m", "task A")
+    a_sha = _git("rev-parse", "HEAD")
+
+    _git("checkout", "-b", "cagent/r1/task-002", base_sha)
+    (repo / "shared.txt").write_text("B\n", encoding="utf-8")
+    _git("add", "shared.txt")
+    _git("commit", "-m", "task B")
+    b_sha = _git("rev-parse", "HEAD")
+
+    # Detach the main worktree off the branches so the integration worktree
+    # can be created freely.
+    _git("checkout", base_sha)
+
+    wt = tmp_path / "intwt"
+    create_worktree(repo, wt, "cagent/r1/integration", base_sha)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    task_a = _done_task("001", a_sha)
+    task_a.branch = "cagent/r1/task-001"
+    task_b = _done_task("002", b_sha)
+    task_b.branch = "cagent/r1/task-002"
+    return task_a, task_b, wt, run_dir
+
+
+async def _fake_resolver_agent(prompt, worktree_path, run_dir, model_override,
+                               timeout, dashboard, task_id="_integrator", api_key=None):
+    """Stand-in integrator agent that resolves the conflict by writing a clean
+    (marker-free) merged file. All git operations run for real."""
+    (Path(worktree_path) / "shared.txt").write_text("A\nB\n", encoding="utf-8")
+    return 0
+
+
+def _assert_clean_merged(wt: Path) -> None:
+    """Assert the integration worktree merged both sides with no markers and
+    left no operation dangling (clean working tree)."""
+    import subprocess
+
+    content = (wt / "shared.txt").read_text(encoding="utf-8")
+    assert "<<<<<<<" not in content
+    assert "A" in content and "B" in content
+    status = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=wt, capture_output=True, text=True
+    ).stdout
+    assert "shared.txt" not in status  # fully committed, nothing dangling
+
+
+class TestStrategiesRealGitConflict:
+    """Real-git conflict-resolution tests for every integration strategy.
+
+    These run against a real git repository and mock ONLY the integrator agent
+    (not git itself), so a wrong completion/abort command surfaces as a genuine
+    failure. This guards the whole strategy family against the class of bug
+    where over-mocking let a command that fails for real appear to succeed
+    (the original rebase `completion_mode` bug).
+    """
+
+    @pytest.mark.asyncio
+    async def test_cherry_pick_resolves_real_conflict(self, tmp_repo, tmp_path):
+        task_a, task_b, wt, run_dir = _setup_real_conflict_repo(tmp_repo, tmp_path)
+        with patch("cagent.integrator.base._run_claude_agent", side_effect=_fake_resolver_agent), \
+             patch("cagent.integrator.base.prepare_sandbox"):
+            integrated, failed = await cherry_pick_strategy(
+                tasks=[task_a, task_b],
+                worktree_path=wt,
+                run_dir=run_dir,
+                integrator_model_override=None,
+                timeout=60,
+                dashboard=None,
+                memory=None,
+            )
+        assert task_a in integrated
+        assert task_b in integrated
+        assert failed == []
+        _assert_clean_merged(wt)
+
+    @pytest.mark.asyncio
+    async def test_merge_resolves_real_conflict(self, tmp_repo, tmp_path):
+        task_a, task_b, wt, run_dir = _setup_real_conflict_repo(tmp_repo, tmp_path)
+        with patch("cagent.integrator.base._run_claude_agent", side_effect=_fake_resolver_agent), \
+             patch("cagent.integrator.base.prepare_sandbox"):
+            integrated, failed = await merge_strategy(
+                tasks=[task_a, task_b],
+                worktree_path=wt,
+                run_dir=run_dir,
+                integration_branch="cagent/r1/integration",
+                run_id="r1",
+                integrator_model_override=None,
+                timeout=60,
+                dashboard=None,
+                memory=None,
+            )
+        assert task_a in integrated
+        assert task_b in integrated
+        assert failed == []
+        _assert_clean_merged(wt)
+
+    @pytest.mark.asyncio
+    async def test_rebase_resolves_real_conflict(self, tmp_repo, tmp_path):
+        # Regression for the completion_mode bug: rebase replays via cherry-pick,
+        # so the conflict must be completed with `git cherry-pick --continue`.
+        # With the old "rebase" mode, task_b would land in `failed`.
+        task_a, task_b, wt, run_dir = _setup_real_conflict_repo(tmp_repo, tmp_path)
+        with patch("cagent.integrator.base._run_claude_agent", side_effect=_fake_resolver_agent), \
+             patch("cagent.integrator.base.prepare_sandbox"):
+            integrated, failed = await rebase_strategy(
+                tasks=[task_a, task_b],
+                worktree_path=wt,
+                run_dir=run_dir,
+                integration_branch="cagent/r1/integration",
+                integrator_model_override=None,
+                timeout=60,
+                dashboard=None,
+                memory=None,
+                run_id="r1",
+            )
+        assert task_a in integrated
+        assert task_b in integrated
+        assert failed == []
+        _assert_clean_merged(wt)
 
 
 # --- integrate() top-level function tests ---

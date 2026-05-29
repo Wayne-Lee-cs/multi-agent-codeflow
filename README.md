@@ -1,6 +1,6 @@
 # cagent
 
-> **v12.0.0** — 585 tests, 75.59% coverage, zero third-party dependencies.
+> **v17.0.0** — 784 tests, 88.44% coverage, zero third-party dependencies.
 
 Concurrent agent workflow dispatcher — run multiple `claude -p` workers in parallel git worktrees.
 
@@ -215,7 +215,7 @@ CLI (argparse + config file)
 | `cagent/config.py` | Configuration file loading (.cagentrc, pyproject.toml) |
 | `cagent/dispatcher.py` | Async task scheduling, dependency graph, retry, budget |
 | `cagent/agent.py` | Subprocess management, stream parsing, commit |
-| `cagent/integrator.py` | Branch integration, conflict resolution, post-validate |
+| `cagent/integrator/` | Branch integration package: `base` + `cherry_pick`/`merge`/`rebase` strategies, conflict resolution, post-validate |
 | `cagent/safety.py` | Sandbox hook generation, deny patterns |
 | `cagent/tasks.py` | Task data model, plain text / Markdown parsing |
 | `cagent/worktree.py` | Git worktree CRUD |

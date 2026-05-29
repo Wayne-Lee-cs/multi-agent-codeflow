@@ -68,7 +68,14 @@ async def rebase_strategy(
                         timeout=timeout,
                         dashboard=dashboard,
                         memory=memory,
-                        completion_mode="rebase",
+                        # This strategy replays commits via `git cherry-pick`
+                        # (not `git rebase`), so conflicts must be completed with
+                        # `git cherry-pick --continue` / aborted with
+                        # `git cherry-pick --abort`. Using "rebase" here would run
+                        # `git rebase --continue` with no rebase in progress —
+                        # it always fails and leaves the cherry-pick dangling,
+                        # cascading into the next task.
+                        completion_mode="cherry-pick",
                         api_key=api_key,
                     )
                     if success:
