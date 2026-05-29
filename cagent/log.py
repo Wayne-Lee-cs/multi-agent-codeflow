@@ -23,12 +23,18 @@ class LinePrinter:
         self._queue.put_nowait((task_id, event))
 
     async def run(self) -> None:
-        """Consume events and print to stdout. Run as a background task."""
+        """Consume events and print to stdout. Run as a background task.
+
+        Blocks on the queue until an event arrives or the task is cancelled.
+        We deliberately use a plain ``await queue.get()`` rather than a
+        ``wait_for(..., timeout=0.5)`` polling loop: there is no periodic work
+        to do, so polling only wasted wakeups — and the pending 0.5s timer it
+        left behind could keep the Windows ProactorEventLoop spinning in
+        ``_poll`` on Python 3.11, hanging loop teardown in tests.
+        """
         while True:
             try:
-                task_id, event = await asyncio.wait_for(self._queue.get(), timeout=0.5)
-            except asyncio.TimeoutError:
-                continue
+                task_id, event = await self._queue.get()
             except asyncio.CancelledError:
                 # Flush remaining events before exiting
                 while not self._queue.empty():
