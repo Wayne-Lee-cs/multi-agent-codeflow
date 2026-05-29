@@ -1069,6 +1069,7 @@ class TestCmdResume:
 class TestTerminatePidWindows:
     """Tests for _terminate_pid Windows-specific paths."""
 
+    @pytest.mark.skipif(sys.platform != "win32", reason="references signal.CTRL_BREAK_EVENT (Windows-only)")
     def test_terminate_windows_taskkill_fallback(self, capsys):
         """On Windows, PermissionError falls back to taskkill."""
         from cagent.cli.base import _terminate_pid
@@ -1083,6 +1084,7 @@ class TestTerminatePidWindows:
         assert "taskkill" in cmd
         assert "12345" in cmd
 
+    @pytest.mark.skipif(sys.platform != "win32", reason="references signal.CTRL_BREAK_EVENT (Windows-only)")
     def test_terminate_windows_taskkill_also_fails(self, capsys):
         """On Windows, when both kill and taskkill fail, prints error."""
         from cagent.cli.base import _terminate_pid
@@ -1095,6 +1097,7 @@ class TestTerminatePidWindows:
         err = capsys.readouterr().err
         assert "Failed to terminate" in err
 
+    @pytest.mark.skipif(sys.platform != "win32", reason="references signal.CTRL_BREAK_EVENT (Windows-only)")
     def test_terminate_windows_oserror_fallback(self, capsys):
         """On Windows, OSError triggers taskkill fallback."""
         from cagent.cli.base import _terminate_pid

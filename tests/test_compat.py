@@ -105,6 +105,10 @@ class TestEnableAnsi:
         if not mod._IS_WINDOWS:
             assert enable_ansi() is True
 
+    @pytest.mark.skipif(
+        sys.platform != "win32",
+        reason="reload() resets _IS_WINDOWS to the real platform, defeating the monkeypatch off-Windows",
+    )
     def test_windows_calls_set_console_mode(self, monkeypatch):
         """On Windows, enable_ansi calls SetConsoleMode with VT flag."""
         import cagent.compat as mod
@@ -131,6 +135,10 @@ class TestEnableAnsi:
 
 
 class TestStdinHasKey:
+    @pytest.mark.skipif(
+        sys.platform != "win32",
+        reason="Unix path uses select() on stdin, which has no fileno() under pytest capture",
+    )
     def test_returns_truthy(self):
         from cagent.compat import stdin_has_key
         result = stdin_has_key()
@@ -143,7 +151,8 @@ class TestStdinHasKey:
         monkeypatch.setattr(mod, "_IS_WINDOWS", True)
         mock_msvcrt = MagicMock()
         mock_msvcrt.kbhit.return_value = True
-        monkeypatch.setattr(mod, "msvcrt", mock_msvcrt)
+        # raising=False: on non-Windows `msvcrt` is never imported into the module.
+        monkeypatch.setattr(mod, "msvcrt", mock_msvcrt, raising=False)
         assert mod.stdin_has_key() is True
         mock_msvcrt.kbhit.assert_called_once()
 
@@ -155,7 +164,8 @@ class TestReadKey:
         monkeypatch.setattr(mod, "_IS_WINDOWS", True)
         mock_msvcrt = MagicMock()
         mock_msvcrt.getwch.return_value = "q"
-        monkeypatch.setattr(mod, "msvcrt", mock_msvcrt)
+        # raising=False: on non-Windows `msvcrt` is never imported into the module.
+        monkeypatch.setattr(mod, "msvcrt", mock_msvcrt, raising=False)
         assert mod.read_key() == "q"
         mock_msvcrt.getwch.assert_called_once()
 
