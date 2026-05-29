@@ -10,5 +10,10 @@ htmlcov/
 .pytest_cache/
 .mypy_cache/
 
+# Build / packaging artifacts
+build/
+dist/
+*.egg-info/
+
 # Local Claude Code / skill state
 .claude/*.local.md

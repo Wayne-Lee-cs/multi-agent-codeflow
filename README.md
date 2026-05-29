@@ -29,18 +29,28 @@ Concurrent agent workflow dispatcher — run multiple `claude -p` workers in par
 ## Installation
 
 ```bash
-# Option A: pip install (recommended)
-pip install -e .
+# Option A: install the CLI in an isolated environment (recommended)
+pipx install cagent          # once published to PyPI
 cagent run tasks.txt
 
-# Option B: clone-and-run (zero install)
+# Option B: install straight from the repo (works today, no PyPI needed)
+pipx install "git+https://github.com/Wayne-Lee-cs/multi-agent-codeflow.git"
+
+# Option C: clone-and-run (zero install)
+git clone https://github.com/Wayne-Lee-cs/multi-agent-codeflow.git
+cd multi-agent-codeflow
 python -m cagent run tasks.txt
 ```
 
-For development (adds mypy, pytest, pytest-asyncio, pytest-cov):
+Plain `pip install cagent` (or `pip install .` from a clone) also works — `pipx`
+is recommended only because it keeps the CLI isolated from your global site-packages.
+
+For development (adds mypy, pytest, pytest-asyncio, pytest-cov, build):
 
 ```bash
 pip install -e ".[dev]"
+python -m pytest          # run the test suite
+python -m build           # build wheel + sdist into dist/
 ```
 
 ## Quick Start
