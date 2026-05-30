@@ -89,6 +89,12 @@ def _run_lock(repo_root: Path, force: bool = False):
                         "Another cagent run may be active.",
                         file=sys.stderr,
                     )
+                    # Write PID so stale lock detection works on next run
+                    # (Phase 90.M1 fix).
+                    lock_fd.seek(0)
+                    lock_fd.truncate()
+                    lock_fd.write(f"{os.getpid()}:{time.time()}")
+                    lock_fd.flush()
                 else:
                     lock_fd.close()
                     print(
@@ -368,8 +374,12 @@ def _execute_run(
                 except (ValueError, OSError, ProcessLookupError):
                     pass
 
-        # Persist current task state
-        dump_state(run_dir, all_tasks)
+        # Persist current task state (Phase 90.M4: wrap to avoid masking
+        # the original KeyboardInterrupt with a dump_state failure).
+        try:
+            dump_state(run_dir, all_tasks)
+        except (OSError, ValueError) as dump_err:
+            print(f"  Warning: failed to save state: {dump_err}", file=sys.stderr)
         done = sum(1 for t in all_tasks if t.status == "done")
         failed = sum(1 for t in all_tasks if t.status == "failed")
         running = sum(1 for t in all_tasks if t.status == "running")

@@ -318,13 +318,118 @@ async def _git_op_checked(
     return True, stdout, stderr
 
 
+async def _strip_cagent_gitignore_block(worktree_path: Path) -> None:
+    """Remove the cagent marker block from .gitignore if present.
+
+    After `git checkout HEAD -- .gitignore` restores the original file, any
+    residual marker block injected by run_agent must be stripped.  If the file
+    consisted *only* of the marker block, delete the file entirely so it does
+    not pollute `git status`.
+
+    IMPORTANT: If the HEAD version of .gitignore already contains the marker
+    block (i.e. it was committed by the user or a prior run), we leave it
+    alone — stripping it would create a diff against HEAD and defeat the noop
+    detection.
+    """
+    gitignore_path = worktree_path / ".gitignore"
+    if not gitignore_path.exists():
+        return
+    try:
+        content = gitignore_path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    if _CAGENT_GITIGNORE_MARKER not in content:
+        return
+    # Check if HEAD already has the marker — if so, don't strip.
+    try:
+        head_result = await _run_git_async(
+            "show", "HEAD:.gitignore", cwd=worktree_path, timeout=10,
+        )
+        if _CAGENT_GITIGNORE_MARKER in head_result[1]:
+            return  # marker was in HEAD — leave it
+    except (RuntimeError, GitTimeoutError):
+        pass  # HEAD has no .gitignore or git failed — safe to strip
+    # Remove the block: marker line + all lines until the next blank line or
+    # end-of-file.  The cagent block looks like:
+    #   # cagent worktree exclusions
+    #   .claude/
+    #   .env
+    #   ...
+    #   <blank line or EOF>
+    lines = content.splitlines(keepends=True)
+    new_lines: list[str] = []
+    skip = False
+    for line in lines:
+        if line.strip() == _CAGENT_GITIGNORE_MARKER:
+            skip = True
+            continue
+        if skip:
+            # A blank line ends the cagent block.
+            if line.strip() == "":
+                skip = False
+                continue  # also skip the blank separator
+            # Still inside the cagent block — skip.
+            continue
+        new_lines.append(line)
+    result = "".join(new_lines).strip()
+    if not result:
+        # File was only the cagent block — remove it entirely.
+        try:
+            gitignore_path.unlink()
+        except OSError:
+            pass
+    else:
+        gitignore_path.write_text(result + "\n", encoding="utf-8")
+
+
 async def _commit_result(
     task: Task,
     worktree_path: Path,
     dashboard: Dashboard | None,
 ) -> AgentResult:
-    """Check for changes in worktree and commit if any."""
-    # Check git status
+    """Check for changes in worktree and commit if any.
+
+    Step ordering matters: sandbox cleanup + file restoration must happen
+    *before* the `git status --porcelain` noop check, otherwise the injected
+    .gitignore block makes status non-empty and a true noop is misreported as
+    failed (Phase 89.1 fix).
+    """
+    # --- Phase A: clean up sandbox artifacts and restore tracked files ---
+    claude_dir = worktree_path / ".claude"
+    sandbox_files = [
+        claude_dir / "settings.local.json",
+        claude_dir / "hooks" / "cagent-guard.py",
+    ]
+    for f in sandbox_files:
+        if f.exists():
+            try:
+                f.unlink()
+            except OSError:
+                pass
+    hooks_dir = claude_dir / "hooks"
+    if hooks_dir.exists():
+        try:
+            if not any(hooks_dir.iterdir()):
+                hooks_dir.rmdir()
+        except OSError:
+            pass
+
+    # Restore tracked .claude/ and .gitignore from HEAD (best-effort).
+    # These may not exist in HEAD — ignore failures silently.
+    # Catch GitTimeoutError so a slow git doesn't surface as "unhandled error"
+    # (Phase 90.H6 fix).
+    for path in (".claude/", ".gitignore"):
+        try:
+            await _run_git_async("checkout", "HEAD", "--", path, cwd=worktree_path, timeout=30)
+        except (RuntimeError, GitTimeoutError):
+            pass
+
+    # Strip any residual cagent marker block from .gitignore (Phase 89.3).
+    # If the repo had no .gitignore originally, checkout above fails and the
+    # injected file remains — the strip function handles that too.
+    await _strip_cagent_gitignore_block(worktree_path)
+
+    # --- Phase B: check for real agent changes ---
     result = await _git_op("status", "--porcelain", cwd=worktree_path, task=task, dashboard=dashboard)
     if isinstance(result, AgentResult):
         return result
@@ -333,40 +438,14 @@ async def _commit_result(
     status_output = stdout.strip()
 
     if not status_output:
-        # No changes
+        # No changes — this is a genuine noop (Phase 89.1 fix).
         if dashboard:
             dashboard.set_task_status(task.id, "noop")
         return AgentResult(task_id=task.id, status="noop")
 
-    # Stage and commit
+    # --- Phase C: stage and commit ---
     first_line = task.prompt.strip().split("\n")[0][:72] or "(no description)"
     commit_msg = f"task {task.id}: {first_line}"
-
-    # Exclude .claude/ sandbox files from commit
-    claude_dir = worktree_path / ".claude"
-    sandbox_files = [
-        claude_dir / "settings.local.json",
-        claude_dir / "hooks" / "cagent-guard.py",
-    ]
-    for f in sandbox_files:
-        if f.exists():
-            f.unlink()
-    hooks_dir = claude_dir / "hooks"
-    if hooks_dir.exists() and not any(hooks_dir.iterdir()):
-        hooks_dir.rmdir()
-
-    # Restore tracked .claude/ and .gitignore from base (best-effort).
-    # These may not exist in HEAD — ignore failures silently.
-    for path in (".claude/", ".gitignore"):
-        await _run_git_async("checkout", "HEAD", "--", path, cwd=worktree_path, timeout=30)
-
-    # Verify sandbox files are cleared before staging
-    for f in sandbox_files:
-        if f.exists():
-            try:
-                f.unlink()
-            except OSError:
-                pass
 
     # git add -A
     r = await _git_op_checked("add", "-A", cwd=worktree_path, task=task, dashboard=dashboard)

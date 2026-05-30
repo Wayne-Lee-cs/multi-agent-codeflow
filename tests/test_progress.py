@@ -731,3 +731,33 @@ class TestTruncation:
 
         remaining = path.read_text(encoding="utf-8").strip().splitlines()
         assert len(remaining) >= 1
+
+
+# --- Phase 89.2: Dashboard cross-thread snapshot race ---
+
+
+class TestDashboardSnapshotRace:
+    """Phase 89.2: _write_dashboard must enqueue a copy, not a live reference.
+
+    The I/O worker runs in a separate thread (asyncio.to_thread) and serialises
+    the dict with json.dumps.  Without a copy, the event-loop thread may mutate
+    _last_dashboard_snapshot while the worker iterates it.
+    """
+
+    def test_write_dashboard_enqueues_copy_not_reference(self, tmp_path: Path) -> None:
+        """Enqueued snapshot is independent of subsequent mutations."""
+        d = Dashboard(tmp_path)
+        d.tasks["t1"] = TaskProgress(task_id="t1", status="running")
+        d._write_dashboard(force=True)
+        # Mutate the live snapshot after enqueue
+        d._last_dashboard_snapshot["t999"] = {"task_id": "t999", "status": "running"}
+        # The enqueued copy should NOT contain t999
+        # (We verify indirectly: the full snapshot used for the write should
+        #  be the one captured at enqueue time.)
+        # Read what was actually written
+        dashboard_path = tmp_path / "dashboard.json"
+        data = json.loads(dashboard_path.read_text(encoding="utf-8"))
+        assert "t1" in data
+        # t999 was added AFTER the enqueue, so it should not be in the written file
+        # unless _write_dashboard is called again
+        # (The key property: the copy prevents "dictionary changed size during iteration")

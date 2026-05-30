@@ -24,6 +24,7 @@ __all__ = [
     "_run_claude_agent",
     "_validate_cmd_str",
     "_has_conflict_markers",
+    "_is_conflict_xy",
     "_resolve_conflicts",
     "_abort_operation",
     "_report",
@@ -50,8 +51,9 @@ def _validate_cmd_str(cmd_str: str) -> bool:
     """Validate that a command string does not contain control characters.
 
     This function validates trusted input from CLI arguments (--post-integrate-cmd).
-    Rejects control characters, null bytes, backticks, and $(...) command
-    substitution to prevent injection via task prompts.
+    Rejects control characters, null bytes, backticks, $(...) command
+    substitution, and shell metacharacters (|, ;, &, >, <) to prevent
+    injection via task prompts.
     """
     if not cmd_str:
         return False
@@ -62,6 +64,10 @@ def _validate_cmd_str(cmd_str: str) -> bool:
     if '`' in cmd_str:
         return False
     if '$(' in cmd_str:
+        return False
+    # Reject shell metacharacters that enable command chaining / redirection.
+    # This prevents injection like "legit_cmd; rm -rf /" or "cmd | malicious".
+    if any(c in cmd_str for c in '|;&><'):
         return False
     return True
 
@@ -149,6 +155,14 @@ async def _run_claude_agent(
     try:
         proc.stdin.write(prompt.encode("utf-8"))
         await asyncio.wait_for(proc.stdin.drain(), timeout=30)
+    except (OSError, BrokenPipeError, asyncio.TimeoutError):
+        # stdin write failed — kill the process to avoid zombie (Phase 90.M9).
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        await proc.wait()
+        return None
     finally:
         proc.stdin.close()
         try:
@@ -183,13 +197,21 @@ async def _run_claude_agent(
     return proc.returncode
 
 
+def _is_conflict_xy(xy: str) -> bool:
+    """Check if a 2-char git porcelain XY status indicates a conflict.
+
+    Conflicts are indicated by 'U' (unmerged) in either position, or by
+    the special double-letter codes DD (both deleted) and AA (both added).
+    """
+    return "U" in xy or xy in ("DD", "AA")
+
+
 def _has_conflict_markers(status_output: str) -> bool:
     """Check if git porcelain status contains any conflict markers."""
     for line in status_output.splitlines():
         if len(line) < 2:
             continue
-        xy = line[:2]
-        if "U" in xy or xy in ("DD", "AA"):
+        if _is_conflict_xy(line[:2]):
             return True
     return False
 
@@ -237,7 +259,7 @@ async def _resolve_conflicts(
     status = await _run_git("status", "--porcelain", cwd=worktree_path, check=False)
     conflict_files = []
     for line in status.stdout.splitlines():
-        if len(line) >= 3 and ("U" in line[:2] or line[:2] in ("DD", "AA")):
+        if len(line) >= 3 and _is_conflict_xy(line[:2]):
             raw = line[3:].strip()
             if " -> " in raw:
                 raw = raw.split(" -> ", 1)[1]
@@ -273,7 +295,8 @@ async def _resolve_conflicts(
             f"There are no previously merged tasks — this is the first integration."
         )
 
-    operation = {"cherry-pick": "cherry-pick", "merge": "merge", "rebase": "rebase"}[completion_mode]
+    _mode_labels = {"cherry-pick": "cherry-pick", "merge": "merge", "rebase": "rebase"}
+    operation = _mode_labels.get(completion_mode, completion_mode)
     prompt = (
         f"You are resolving merge conflicts in a {operation} operation.\n\n"
         f"{context_block}\n\n"
@@ -317,8 +340,19 @@ async def _resolve_conflicts(
         await _abort_operation(completion_mode, worktree_path)
         return False
 
+    # Stage all files first so `git grep` also covers newly-created untracked
+    # files that the agent may have written conflict markers into (Phase 89.5).
+    await _run_git("add", "-A", cwd=worktree_path, check=False)
+
+    # Detect residual conflict markers. Only the start (<<<<<<<), ancestor
+    # (|||||||) and end (>>>>>>>) markers are line-anchored and followed by a
+    # space or end-of-line in real git conflicts; a genuine conflict always
+    # contains the <<<<<<< / >>>>>>> pair. The bare ======= separator is NOT
+    # matched on its own — markdown setext headings and ASCII banners legitimately
+    # contain lines of seven-or-more '=' characters, which previously caused false
+    # positives that aborted otherwise-successful conflict resolutions.
     grep_result = await _run_git(
-        "grep", "-rl", "-E", r"^(<{7}|={7}|\|{7}|>{7})",
+        "grep", "-rl", "-E", r"^(<{7}|>{7}|\|{7})( |$)",
         cwd=worktree_path,
         check=False,
     )
@@ -342,11 +376,8 @@ async def _resolve_conflicts(
             pass
 
     env_continue = {**os.environ, "GIT_EDITOR": "true"}
-    try:
-        await _run_git("add", "-A", cwd=worktree_path)
-    except RuntimeError:
-        await _abort_operation(completion_mode, worktree_path)
-        return False
+    # Note: `git add -A` already done above before grep (Phase 89.5).
+    # The second add was redundant (Phase 90.M8 fix).
 
     if completion_mode == "cherry-pick":
         try:
@@ -358,6 +389,7 @@ async def _resolve_conflicts(
         try:
             await _run_git("commit", "--no-edit", cwd=worktree_path, env=env_continue)
         except RuntimeError:
+            await _run_git("merge", "--abort", cwd=worktree_path, check=False)
             return False
     elif completion_mode == "rebase":
         try:

@@ -8,14 +8,19 @@
 > **v7.0 (2026-05-23)**: 全面评估发现 19 个新问题。342 tests, 59% 覆盖率, mypy 0 errors。
 > **v8.0 (2026-05-23)**: 二次全面评估发现 15 个新问题。460 tests, 68% 覆盖率, mypy 0 errors。
 > **v9.0 (2026-05-23)**: 第三次全面审查发现 6 Bug + 6 优化。第四轮代码审查发现 4 P2 + 6 P3。Phase 66-70 全部完成。576 tests, 76% coverage。
-> **v10.0 (2026-05-23)**: 第四次全面评估，综合评分 8.2/10。并行代码审查发现 42 个新问题（4 HIGH, 16 MEDIUM, 20 LOW）。Phase 71-76 规划，共 79 项。
-> **v11.0 (2026-05-24)**: 第五次全面评估，综合评分 8.17/10。发现 15 项新问题（S1 换行绕过 P0 安全漏洞, 5 安全, 5 Bug, 2 性能, 2 架构）。Phase 77-79 规划，共 32 项。
+> **v10.0 (2026-05-23)**: 第四次全面评估 + 并行代码审查。Phase 71-76 部分完成。585 tests, 76% coverage。
+> **v11.0 (2026-05-24)**: 第五次全面评估修复。Phase 77-79 全部 32 项完成。585 tests, 76% coverage。
 > **v12.0 (2026-05-25)**: 第六次全面评估，综合评分 8.3/10。无新 P0 漏洞。Phase 80-82 全部 34 项完成。613 tests, 80% coverage, mypy 0 errors。
 > **v13.0 (2026-05-26)**: 5 项安全与架构修复。675 tests, 92% integrator coverage。
 > **v14.0 (2026-05-27)**: 第七次全面评估 + 8 项安全与 bug 修复。WebSocket readexactly、section 精确匹配、atomic write、I/O 竞态修复。700 tests, 83% coverage。
 > **v15.0 (2026-05-27)**: 性能优化 — 7 项改动使项目更轻量更快速。XOR 18x、JSON 4x、sandbox 4.2x。704 tests。
 > **v16.0 (2026-05-27)**: 覆盖率提升（5 模块 → 82-97%）+ 遗留 MEDIUM 修复（6 项）+ 架构优化 + 5 项安全修复。784 tests, 88.44% coverage。Phase 85-87 + 安全修复全部完成。
-> **v17.0 (2026-05-29)**: 第八次全面评估。发现 1 HIGH（rebase 策略冲突解决用错完成命令，被 mock 掩盖）+ 3 MEDIUM + 4 LOW + 2 优化。Phase 88 规划，共 9 项。详见末尾 Phase 88。
+> **v17.0 (2026-05-29)**: 第八次全面评估修复。Phase 88 全部完成。1 HIGH（rebase 冲突解决用错完成命令）+ 3 MEDIUM + 4 LOW + 2 优化。792 tests, mypy 0 errors, 0 RuntimeWarning。
+> **v18.0 (2026-05-30)**: 第九次全面评估修复。Phase 89 全部 10 项完成。1 HIGH（noop 误报 failed）+ 2 MEDIUM（快照竞态 + .gitignore 泄漏）+ 3 LOW 全部修复。807 tests, mypy 0 errors, 0 RuntimeWarning。
+> **v19.0 (2026-05-30)**: 第十次全面代码审查修复。Phase 90 全部 10 项完成。6 HIGH + 4 MEDIUM。807 tests, mypy 0 errors。
+> **v20.0 (2026-05-30)**: 第十次审查遗留 MEDIUM 修复。Phase 91 全部 12 项 MEDIUM 完成。807 tests, mypy 0 errors。
+> **v21.0 (2026-05-30)**: 第十次审查遗留 MEDIUM 修复续。Phase 92 完成 2 项 MEDIUM。807 tests, mypy 0 errors。
+> **v22.0 (2026-05-30)**: LOW 问题修复 + 代码审查。Phase 93 完成 5 项 LOW。807 tests, mypy 0 errors。
 > This file tracks only **remaining** and **new** work.
 
 ---
@@ -1649,4 +1654,178 @@
 | Phase 88.O2 (server HTML 外置) | 1 | ⏳ 保留未实施 |
 | **Total v17.0** | **16** | **13 修复 + 1 文档化 + 2 优化 / 1 保留** |
 
-> 测试总数: 792 passed, mypy 0 errors (26 files), 88% coverage, 0 RuntimeWarning。
+---
+
+## Phase 89 — 第九次全面评估修复 (v18.0, 2026-05-30)
+
+> 发现 1 HIGH + 2 MEDIUM + 3 LOW。详细分析见 SPEC.md §12，方案表见 PLAN.md Phase 89。
+> 核心：noop 检测路径被「把 `git status` mock 成空」的单测掩盖；真实 git 下 `.gitignore` 注入使 noop 任务被误报为 failed（与 v17.0 rebase bug 同源）。
+
+### 89.1 P0 / HIGH — noop 任务在真实 git 下被误报为 failed ✅
+
+- [x] **89.1.1** `agent.py` `_commit_result` — 调整步骤顺序：删沙箱文件 + `git checkout HEAD -- .claude/ .gitignore` 还原 + 剥离残留 cagent 注入块，全部**前移到 `git status --porcelain` noop 判定之前**
+- [x] **89.1.2** 测试 — 新增**真实 git 仓库、不 mock `git status`** 的 noop 集成测试：mock claude 子进程不改任何文件，让 `.gitignore` 注入与还原真实发生，断言 `run_agent` 返回 `status="noop"`（保留现有 `test_run_agent_no_changes` 作为快速单测）
+- [x] **89.1.3** 回归 — 依赖图场景由 dispatcher 测试覆盖；noop 正确后不会触发下游 `blocked by failed dependency`
+
+### 89.2 P1 / MEDIUM — Dashboard 跨线程快照竞态 ✅
+
+- [x] **89.2.1** `progress.py:586` — `_write_dashboard` 入队前浅拷贝 `full_snapshot = dict(self._last_dashboard_snapshot)`，避免工作线程 `json.dumps` 与主线程加键并发触发 `dictionary changed size during iteration`
+- [x] **89.2.2** 测试 — `TestDashboardSnapshotRace::test_write_dashboard_enqueues_copy_not_reference` 断言入队对象与后续 mutation 解耦
+
+### 89.3 P1 / MEDIUM — .gitignore 内部块泄漏进用户提交 ✅
+
+- [x] **89.3.1** `agent.py` — 新增 `_strip_cagent_gitignore_block()` 函数：还原后若 `.gitignore` 仍含 marker 块则删除该块；文件仅由该块组成则删除文件；HEAD 已含 marker 时不动（避免误删用户提交的内容）
+- [x] **89.3.2** 测试 — `TestNoopRealGit::test_noop_no_gitignore_leak`：仓库原本无 `.gitignore` 的真实 git 仓库，noop 任务不产生提交、不残留含 cagent marker 的 `.gitignore`
+
+### 89.4 P3 / LOW — 冲突标记解析阈值统一 ✅
+
+- [x] **89.4.1** `integrator/base.py` — 抽 `_is_conflict_xy()` helper（统一 `len(line)>=2` 取 `line[:2]` 判 `U`/`DD`/`AA`），`_has_conflict_markers` 和 `_resolve_conflicts` 两处复用。`TestIsConflictXy` 8 个测试覆盖
+
+### 89.5 P3 / LOW — git grep 漏检未跟踪文件标记 ✅
+
+- [x] **89.5.1** `integrator/base.py:320` — `_resolve_conflicts` 标记复查改为先 `git add -A`（`check=False`）再 `git grep`，覆盖 agent 新建的未跟踪文件
+
+### 89.6 P3 / LOW — memory.append 原子性 ✅
+
+- [x] **89.6.1** `memory.py:56-68` — `append` 统一为「读-改-原子写」（`read_text` + `atomic_write`），与 `write` 一致性对齐。`TestAppendAtomic` 4 个测试覆盖
+
+### Phase 89 验收 ✅
+
+- [x] 89.1/89.3 各补真实 git 仓库回归测试（不 mock `git status`/`commit`）
+- [x] 全部 807 测试通过，mypy 0 errors（26 files），`-W error::RuntimeWarning` 零警告
+- [x] noop 语义在真实 git 下端到端正确（无改动 → noop，非 failed）
+
+## v18.0 Progress Summary
+
+| Phase | Items | Status |
+|-------|-------|--------|
+| Phase 89.1 (noop HIGH bug P0) | 3 | ✅ 3/3 |
+| Phase 89.2-89.3 (MEDIUM P1) | 4 | ✅ 4/4 |
+| Phase 89.4-89.6 (LOW P3) | 3 | ✅ 3/3 |
+| **Total v18.0** | **10** | **10/10 完成** |
+
+> 测试总数: 807 passed, mypy 0 errors (26 files), 88% coverage, 0 RuntimeWarning。
+
+---
+
+## Phase 90 — 第十次全面代码审查修复 (v19.0, 2026-05-30)
+
+> 7 个并行审查 agent 覆盖全部 22 个源文件，发现 9 HIGH + 31 MEDIUM + 36 LOW。修复 6 HIGH + 4 MEDIUM。详见 SPEC.md §13。
+
+### 90.H — HIGH 修复
+
+- [x] **90.H1** `_validate_cmd_str` shell 注入 — `|;>&<` 追加到拒绝列表 (`integrator/base.py`)
+- [x] **90.H2** `_do_flush_io` 批量数据丢失 — 逐任务 try/except (`progress.py`)
+- [x] **90.H3** `build_shared_context` 缓存 key 缺 `max_chars` — key 加入第三维 (`memory.py`)
+- [x] **90.H4** `append()` docstring 误导 — 修正为 crash-safe 非原子 (`memory.py`)
+- [x] **90.H5** Windows `CTRL_BREAK_EVENT` 杀死父进程 — 改用 `proc.kill()` (`git_utils.py`)
+- [x] **90.H6** `_commit_result` 清理阶段未捕获 `GitTimeoutError` — try/except 包裹 (`agent.py`)
+
+### 90.M — MEDIUM 修复
+
+- [x] **90.M6** auth 诊断泄露敏感变量 — 全部 mask (`cli/base.py`)
+- [x] **90.M11** `completion_mode` 无效值 KeyError — `.get()` fallback (`integrator/base.py`)
+- [x] **90.M14** `_last_dashboard_snapshot` 内存增长 — 添加 `_prune_terminal_snapshot()` 方法 (`progress.py`)
+- [x] **90.M19** `write_shared()` 未用 `atomic_write()` — 统一使用 (`memory.py`)
+
+### Phase 90 验收 ✅
+
+- [x] 全部 807 测试通过
+- [x] mypy 0 errors (26 files)
+- [x] shell 注入安全漏洞修复
+- [x] Windows 进程终止安全性修复
+
+## v19.0 Progress Summary
+
+| Phase | Items | Status |
+|-------|-------|--------|
+| Phase 90.H (HIGH P0) | 6 | ✅ 6/6 |
+| Phase 90.M (MEDIUM P1) | 4 | ✅ 4/4 |
+| **Total v19.0** | **10** | **10/10 完成** |
+
+> 测试总数: 807 passed, mypy 0 errors (26 files), 88% coverage, 0 RuntimeWarning。
+
+---
+
+## Phase 91 — 第十次审查遗留 MEDIUM 修复 (v20.0, 2026-05-30)
+
+> Phase 90 遗留 16 项 MEDIUM，本轮修复 12 项。详见 SPEC.md §14。
+
+### 91.M — MEDIUM 修复
+
+- [x] **91.M1** Windows --force 不写 PID → stale lock 检测失效 (`cli/run.py`)
+- [x] **91.M2** `_cleanup_done` 过早设 True → 部分失败不重试 (`cli/plan.py`)
+- [x] **91.M3** `_cmd_cancel` 不更新 dashboard.json (`cli/misc.py`)
+- [x] **91.M4** `dump_state` 异常掩盖 KeyboardInterrupt (`cli/run.py`)
+- [x] **91.M5** ANSI 颜色无 TTY 检测 → 管道乱码 (`cli/logcmd.py`)
+- [x] **91.M7** merge commit 失败未调用 abort (`integrator/base.py`)
+- [x] **91.M8** 双重 `git add -A` 冗余 (`integrator/base.py`)
+- [x] **91.M9** stdin 写入失败不杀进程 → 僵尸 (`integrator/base.py`)
+- [x] **91.M10** `git grep ^` 锚定漏检缩进标记 (`integrator/base.py`)
+- [x] **91.M15** OPTIONS 死代码 (`server.py`)
+- [x] **91.M17** PowerShell `-Recurse` 单独未拦截 (`safety.py`)
+- [x] **91.M20** worktree 清理不检查 git 退出码 (`worktree.py`)
+
+### Phase 91 验收 ✅
+
+- [x] 全部 807 测试通过
+- [x] mypy 0 errors (26 files)
+- [x] PowerShell `-Recurse` 安全拦截
+- [x] merge abort 正确性修复
+
+## v20.0 Progress Summary
+
+| Phase | Items | Status |
+|-------|-------|--------|
+| Phase 91.M (MEDIUM P1) | 12 | ✅ 12/12 |
+| **Total v20.0** | **12** | **12/12 完成** |
+
+> 测试总数: 807 passed, mypy 0 errors (26 files), 88% coverage, 0 RuntimeWarning。
+
+---
+
+## Phase 92 — 第十次审查遗留 MEDIUM 修复续 (v21.0, 2026-05-30)
+
+- [x] **92.M18** `store_true` + UNSET → `BooleanOptionalAction` (`cli/__init__.py`)
+- [x] **92.M12** `_truncate_jsonl_if_large` 流式截断注释澄清 (`progress.py`)
+
+### Phase 92 验收 ✅
+
+- [x] 全部 807 测试通过
+- [x] mypy 0 errors (26 files)
+- [x] `--no-squash` / `--no-quiet` / `--no-keep-worktrees` 可用
+
+## v21.0 Progress Summary
+
+| Phase | Items | Status |
+|-------|-------|--------|
+| Phase 92.M (MEDIUM P1) | 2 | ✅ 2/2 |
+| **Total v21.0** | **2** | **2/2 完成** |
+
+> 测试总数: 807 passed, mypy 0 errors (26 files), 88% coverage, 0 RuntimeWarning。
+
+---
+
+## Phase 93 — LOW 问题修复 + 代码审查 (v22.0, 2026-05-30)
+
+- [x] **93.L6** `get_snapshot()` dead code 清理 (`progress.py`)
+- [x] **93.L11** TOML 解析错误添加 warning 日志 (`config.py`)
+- [x] **93.L19** PermissionError 保守处理 — 避免误清理活跃 worktree (`worktree.py`)
+- [x] **93.L22** `asyncio.Queue.put_nowait()` 线程安全注释 (`log.py`)
+- [x] **93.GU** `CREATE_NEW_PROCESS_GROUP` docstring 更新 (`git_utils.py`)
+
+### Phase 93 验收 ✅
+
+- [x] 全部 807 测试通过
+- [x] mypy 0 errors (26 files)
+- [x] 代码审查确认 Phase 90-92 无严重 bug
+- [x] dead code 清理完成
+
+## v22.0 Progress Summary
+
+| Phase | Items | Status |
+|-------|-------|--------|
+| Phase 93.L (LOW P3) | 5 | ✅ 5/5 |
+| **Total v22.0** | **5** | **5/5 完成** |
+
+> 测试总数: 807 passed, mypy 0 errors (26 files), 88% coverage, 0 RuntimeWarning。

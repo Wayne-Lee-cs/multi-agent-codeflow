@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import tomllib
 from pathlib import Path
 from typing import Any
+
+_log = logging.getLogger(__name__)
 
 
 # Config key validation: (type, min_value, max_value)
@@ -54,7 +57,10 @@ def _parse_and_validate(
     try:
         with open(path, "rb") as f:
             data = tomllib.load(f)
-    except (tomllib.TOMLDecodeError, OSError):
+    except tomllib.TOMLDecodeError:
+        _log.warning("Invalid TOML in %s — ignoring config", path)
+        return {}
+    except OSError:
         return {}
 
     if section:

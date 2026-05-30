@@ -92,16 +92,20 @@ def _print_event_line(line: str, kind_filter: str | None) -> None:
 
     color = ""
     reset = "\033[0m"
-    if kind == "tool_use":
-        color = "\033[36m"
-    elif kind == "error":
-        color = "\033[31m"
-    elif kind == "denied":
-        color = "\033[33m"
-    elif kind == "done":
-        color = "\033[32m"
-    elif kind == "text":
-        color = "\033[37m"
+    # Only emit ANSI colors when stdout is a TTY (Phase 90.M5 fix).
+    if hasattr(sys.stdout, "isatty") and sys.stdout.isatty():
+        if kind == "tool_use":
+            color = "\033[36m"
+        elif kind == "error":
+            color = "\033[31m"
+        elif kind == "denied":
+            color = "\033[33m"
+        elif kind == "done":
+            color = "\033[32m"
+        elif kind == "text":
+            color = "\033[37m"
+    else:
+        reset = ""
 
     print(f"[{ts_str}] {color}{kind:<12}{reset} {summary}")
 

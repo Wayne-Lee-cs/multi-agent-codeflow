@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import sys
 from pathlib import Path
 
 from cagent.compat import is_pid_active as _is_pid_active
@@ -77,6 +76,11 @@ def detect_orphan_worktrees(repo_root: str | Path) -> list[tuple[Path, str]]:
                     if _is_pid_active(pid):
                         has_active_pid = True
                         break
+                except PermissionError:
+                    # Cannot read PID file — assume process may be active
+                    # to avoid cleaning up a live worktree (Phase 93.L19).
+                    has_active_pid = True
+                    break
                 except (ValueError, OSError):
                     pass
 
@@ -106,10 +110,13 @@ def cleanup_orphan_worktrees(
     cleaned = 0
     for wt_path, run_id in orphans:
         try:
-            _git("worktree", "remove", "--force", str(wt_path), cwd=repo_root, check=False)
-            cleaned += 1
+            result = _git("worktree", "remove", "--force", str(wt_path), cwd=repo_root, check=False)
+            if result.returncode == 0:
+                cleaned += 1
+            else:
+                _log.warning("git worktree remove failed for %s: %s", wt_path, result.stderr.strip())
         except Exception:
-            _log.debug("Failed to remove orphan worktree: %s", wt_path)
+            _log.warning("Failed to remove orphan worktree: %s", wt_path, exc_info=True)
 
     # Clean up empty run directories under worktrees/
     worktrees_root = repo_root / ".cagent" / "worktrees"

@@ -19,7 +19,12 @@ class LinePrinter:
         self._queue: asyncio.Queue[tuple[str, Event]] = asyncio.Queue()
 
     def push(self, task_id: str, event: Event) -> None:
-        """Called by dashboard to push an event for printing."""
+        """Called by dashboard to push an event for printing.
+
+        Note: asyncio.Queue.put_nowait() is not thread-safe, but push() is
+        only called from the event-loop thread (via dashboard.update()), so
+        this is safe. Do NOT call from a different thread.
+        """
         self._queue.put_nowait((task_id, event))
 
     async def run(self) -> None:

@@ -75,8 +75,9 @@ async def run_git_async(
     When env=None (default), subprocess inherits the parent process environment.
     If check=True (default), raises RuntimeError on non-zero exit code.
 
-    On Windows, the subprocess is created with CREATE_NEW_PROCESS_GROUP so
-    that the entire process tree can be killed on timeout.
+    On Windows, the subprocess is created with CREATE_NEW_PROCESS_GROUP to
+    isolate it from the parent's Ctrl+C signals (the process tree is killed
+    via proc.kill() on timeout, not CTRL_BREAK_EVENT).
     """
     creationflags = 0
     if sys.platform == "win32":
@@ -98,22 +99,14 @@ async def run_git_async(
             proc.communicate(), timeout=timeout
         )
     except asyncio.TimeoutError:
-        # Kill the entire process tree on Windows via CTRL_BREAK_EVENT
-        if sys.platform == "win32":
-            try:
-                import os as _os
-                import signal as _signal
-                _os.kill(proc.pid, _signal.CTRL_BREAK_EVENT)
-            except (ProcessLookupError, OSError):
-                try:
-                    proc.kill()
-                except ProcessLookupError:
-                    pass
-        else:
-            try:
-                proc.kill()
-            except ProcessLookupError:
-                pass
+        # Kill the process.  On Windows we use proc.kill() (TerminateProcess)
+        # instead of CTRL_BREAK_EVENT because the latter sends the signal to
+        # the entire console process group, which would also kill the parent
+        # cagent process (Phase 90.H5 fix).
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
         await proc.wait()
         raise GitTimeoutError(
             f"git {' '.join(args)} timed out after {timeout}s"

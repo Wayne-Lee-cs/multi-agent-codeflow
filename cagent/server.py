@@ -495,8 +495,8 @@ class DashboardServer:
                 await self._send_http_response(writer, 403, b"Forbidden: invalid token")
                 return
 
-            # Handle HTTP requests
-            if method not in ("GET", "OPTIONS"):
+            # Handle HTTP requests (OPTIONS already handled above via preflight)
+            if method != "GET":
                 await self._send_http_response(writer, 405, b"Method Not Allowed")
             elif method == "GET" and ws_path in ("/", "/index.html"):
                 await self._serve_dashboard(writer, headers)

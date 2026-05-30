@@ -1314,14 +1314,16 @@ class TestAuthDiagnosticsExtra:
         assert "length=" in err
 
     def test_prints_base_url(self, capsys, monkeypatch):
-        """Prints ANTHROPIC_BASE_URL when set."""
+        """Prints ANTHROPIC_BASE_URL masked when set (Phase 90.M6)."""
         from cagent.cli.base import _print_auth_diagnostics
 
         monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://proxy.example.com")
         _print_auth_diagnostics()
 
         err = capsys.readouterr().err
-        assert "https://proxy.example.com" in err
+        # Value is masked to prevent leaking proxy URLs in CI/shared environments
+        assert "ANTHROPIC_BASE_URL: (set, length=" in err
+        assert "https://proxy.example.com" not in err
 
     def test_prints_not_set(self, capsys, monkeypatch):
         """Prints 'not set' for missing env vars."""

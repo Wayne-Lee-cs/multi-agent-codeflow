@@ -1,6 +1,6 @@
-# Code Architecture Plan — v10.0 (2026-05-23)
+# Code Architecture Plan — v22.0 (2026-05-30)
 
-> Phase 1-70 completed. 576 pytest pass, 0 failures. Historical details in [ARCHIVE.md](ARCHIVE.md).
+> Phase 1-93 completed. 807 pytest pass, 0 failures, mypy 0 errors, 0 RuntimeWarning. Historical details in [ARCHIVE.md](ARCHIVE.md).
 
 ## Current Status
 
@@ -8,14 +8,19 @@
 **v7.0 大部分完成** — 全面评估发现 19 个新问题。Phase 57-62 大部分完成。407 tests, 65% coverage, mypy 0 errors。
 **v8.0 已发布** — Phase 63-65 完成。460 tests, 68% coverage, mypy 0 errors, 0 RuntimeWarning。
 **v9.0 完成** — Phase 66-70 全部完成。576 tests, 76% coverage, mypy 0 errors。Bug修复+安全加固+性能优化+测试覆盖提升+代码审查修复。
-**v10.0 进行中** — 第四次全面评估。综合评分 8.2/10。重点：测试覆盖缺口修复（cli/run.py 49%, integrator.py 66%, server.py 64%）+ 文档同步。
-**v11.0 评估完成** — 第五次全面评估（2026-05-24）。综合评分 8.17/10。发现 S1 `_validate_cmd_str` 换行绕过（P0 安全漏洞）等 15 项新问题。Phase 77-79 规划。
-**v12.0 评估完成** — 第六次全面评估（2026-05-25）。综合评分 8.3/10。无新 P0 漏洞。主要短板：v10.0 积压 64/79 未完成（cli/run.py 47% 覆盖率为首要目标）。Phase 80-82 规划。
+**v10.0 已发布** — 第四次全面评估。综合评分 8.2/10。测试覆盖缺口修复 + 文档同步。Phase 71-76。
+**v11.0 已发布** — 第五次全面评估修复（2026-05-24）。Phase 77-79 全部完成。585 tests, 76% coverage。
+**v12.0 已发布** — 第六次全面评估修复（2026-05-25）。Phase 80-82 全部完成。613 tests, 80% coverage。
 **v13.0 已发布** — 5 项安全与架构修复。675 tests, 92% integrator coverage。
 **v14.0 已发布** — 第七次全面评估 + 8 项安全与 bug 修复。WebSocket readexactly、_extract_section 精确匹配、memory atomic_write、I/O throttle 竞态修复。700 tests, 83% coverage。
 **v15.0 已发布** — 性能优化：7 项改动使项目更轻量更快速。XOR masking 18x、prepare_sandbox 4.2x、JSON 序列化 4x、内存占用显著减少。704 tests。
 **v16.0 已发布** — 覆盖率提升（5 模块 → 80%+）+ 遗留 MEDIUM 修复（6 项）+ 架构深度优化 + 5 项安全修复。784 tests, 88.44% coverage。Phase 85-87 + 安全修复全部完成。
-**v17.0 评估完成** — 第八次全面评估（2026-05-29）。发现 1 个被 mock 掩盖的 HIGH 逻辑 bug（rebase 策略冲突解决用错完成命令）+ 3 项中优先级 + 4 项低优先级 + 2 项优化方向。Phase 88 规划，共 9 项。详见本文件 Phase 88 与 SPEC.md §11。
+**v17.0 已发布** — 第八次全面评估修复（2026-05-29）。Phase 88 全部完成。1 HIGH（rebase 策略冲突解决用错完成命令）+ 3 MEDIUM + 4 LOW + 2 优化方向。792 tests, mypy 0 errors, 0 RuntimeWarning。详见本文件 Phase 88 与 SPEC.md §11。
+**v18.0 已发布** — 第九次全面评估修复（2026-05-30）。Phase 89 全部 10 项完成。1 HIGH（noop 误报 failed）+ 2 MEDIUM（快照竞态 + .gitignore 泄漏）+ 3 LOW 全部修复。807 tests, mypy 0 errors, 0 RuntimeWarning。
+**v19.0 已发布** — 第十次全面代码审查修复（2026-05-30）。Phase 90 全部 10 项完成。6 HIGH + 4 MEDIUM。807 tests, mypy 0 errors。
+**v20.0 已发布** — 第十次审查遗留 MEDIUM 修复（2026-05-30）。Phase 91 全部 12 项 MEDIUM 完成。807 tests, mypy 0 errors。
+**v21.0 已发布** — 第十次审查遗留 MEDIUM 修复续（2026-05-30）。Phase 92 完成 2 项 MEDIUM（config BooleanOptionalAction + truncate 注释）。807 tests, mypy 0 errors。
+**v22.0 已发布** — LOW 问题修复 + 代码审查（2026-05-30）。Phase 93 完成 5 项 LOW（dead code 清理、TOML 警告、PermissionError 保守处理、线程安全注释、docstring 修正）。807 tests, mypy 0 errors。
 
 ### v5.1 已完成项
 
@@ -587,11 +592,119 @@
 | 88.O1 | P2 | `_check_tokens` 双份维护消除 | `safety.py` 运行时版 + `_CHECK_TOKENS_STATIC` 嵌入版（~80 行）必须手动同步，维护陷阱。考虑 hook 改为 `import` 模块或加"两份必须同步"的强约束 + 一致性测试 |
 | 88.O2 | P3 | 大文件拆分 + 覆盖率洼地 | `server.py`(851，内嵌 HTML/JS) 可外置资源；`cli/run.py`(736)。覆盖率重点：`server.py` 81%、`cli/plan.py` 80% |
 
-### 88 验收标准
+### 88 验收标准 ✅
 
-- [ ] 88.1 修复后补一个**不 mock 掉 `--continue`/`--abort` 的真实 git repo 集成测试**（用 `tmp_path` 建真实仓库制造 rebase 策略冲突），防回归
-- [ ] 全部 784+ 测试通过，mypy 0 errors，0 RuntimeWarning
-- [ ] README 与实际版本/测试数/架构一致
+- [x] 88.1 修复后补一个**不 mock 掉 `--continue`/`--abort` 的真实 git repo 集成测试**（用 `tmp_path` 建真实仓库制造 rebase 策略冲突），防回归
+- [x] 全部 792 测试通过，mypy 0 errors，0 RuntimeWarning
+- [x] README 与实际版本/测试数/架构一致
+
+---
+
+## Phase 89 — 第九次全面评估修复 (v18.0, 2026-05-30)
+
+> 第九次全面评估发现 1 HIGH + 2 MEDIUM + 3 LOW。
+> 核心发现（与 v17.0 同类）：noop 检测路径再次被「把 `git status` mock 成空」的单测掩盖——真实 git 下，启动前注入的 `.gitignore` 排除块使 status 永远非空，noop 检测失效，最终 `git commit` 因「无改动」失败，**本应 noop 的任务被误报为 failed**，并在依赖图下游连锁 `blocked by failed dependency`。
+
+### 89.x 修复任务
+
+| # | 优先级 | 任务 | 文件 | 修复方案 | 状态 |
+|---|--------|------|------|----------|------|
+| 89.1 | **P0 / HIGH** | noop 任务在真实 git 下被误报为 failed | `agent.py` | **调整 `_commit_result` 步骤顺序**：把「删除沙箱文件 + `git checkout HEAD -- .claude/ .gitignore` 还原 + 剥离残留 cagent 注入块」全部**前移到 `git status --porcelain` noop 判定之前**。新增 `_strip_cagent_gitignore_block()` 函数 | ✅ |
+| 89.2 | P1 / MEDIUM | Dashboard 跨线程传递快照活引用 → 偶发 dict 迭代竞态 | `progress.py:586` | 入队前浅拷贝 `full_snapshot = dict(self._last_dashboard_snapshot)` | ✅ |
+| 89.3 | P1 / MEDIUM | `.gitignore` 未跟踪时 cagent 排除块被提交进用户分支 | `agent.py` | 由 89.1 的 `_strip_cagent_gitignore_block()` 一并修复：HEAD 已含 marker 时不动，否则剥离 | ✅ |
+| 89.4 | P3 / LOW | 冲突标记解析阈值不一致 | `integrator/base.py` | 抽 `_is_conflict_xy()` helper，`_has_conflict_markers` 和 `_resolve_conflicts` 复用 | ✅ |
+| 89.5 | P3 / LOW | `git grep` 仅搜 tracked 文件 | `integrator/base.py:320` | 先 `git add -A`（`check=False`）再 `git grep` | ✅ |
+| 89.6 | P3 / LOW | `memory.append` 非原子写入 | `memory.py:56-68` | 统一为「读-改-原子写」 | ✅ |
+
+### 89 验收标准 ✅
+
+- [x] 89.1/89.3 各补真实 git 仓库回归测试（不 mock `git status`/`commit`）
+- [x] 全部 807 测试通过，mypy 0 errors，0 RuntimeWarning
+- [x] noop 语义在真实 git 下端到端正确（无改动 → noop，非 failed）
+
+---
+
+## Phase 90: 第十次全面代码审查修复 (v19.0) ✅
+
+| # | 优先级 | 问题 | 位置 | 修复方案 | 状态 |
+|---|--------|------|------|----------|------|
+| 90.H1 | HIGH | `_validate_cmd_str` 允许 `\|;>&<` shell 注入 | `integrator/base.py:50-67` | 白名单追加 `\|;>&<` 拒绝 | ✅ |
+| 90.H2 | HIGH | `_do_flush_io` 单任务失败整批丢失 | `progress.py:550-558` | 逐任务 try/except | ✅ |
+| 90.H3 | HIGH | `build_shared_context` 缓存 key 缺 `max_chars` | `memory.py:112` | key 加入 `max_chars` | ✅ |
+| 90.H4 | HIGH | `append()` docstring 声称原子实际非原子 | `memory.py:56-75` | 修正 docstring | ✅ |
+| 90.H5 | HIGH | Windows `CTRL_BREAK_EVENT` 杀死父进程 | `git_utils.py:104-106` | 改用 `proc.kill()` | ✅ |
+| 90.H6 | HIGH | `_commit_result` 清理阶段未捕获 `GitTimeoutError` | `agent.py:419-420` | try/except 包裹 | ✅ |
+| 90.M6 | MEDIUM | auth 诊断泄露 `ANTHROPIC_BASE_URL` | `cli/base.py:146-148` | 全部 mask 为 `(set, length=N)` | ✅ |
+| 90.M11 | MEDIUM | `completion_mode` 无效值 KeyError | `integrator/base.py:285` | `.get()` fallback | ✅ |
+| 90.M14 | MEDIUM | `_last_dashboard_snapshot` 内存增长 | `progress.py:289` | 添加 `_prune_terminal_snapshot()` 方法 | ✅ |
+| 90.M19 | MEDIUM | `write_shared()` 未用 `atomic_write()` | `memory.py:145-152` | 统一使用 `atomic_write()` | ✅ |
+
+### 90 验收标准 ✅
+
+- [x] 全部 807 测试通过
+- [x] mypy 0 errors (26 files)
+- [x] shell 注入安全漏洞修复（`|;>&<` 拒绝）
+- [x] Windows 进程终止安全性修复
+
+---
+
+## Phase 91: 第十次审查遗留 MEDIUM 修复 (v20.0) ✅
+
+| # | 优先级 | 问题 | 位置 | 修复方案 | 状态 |
+|---|--------|------|------|----------|------|
+| 91.M1 | MEDIUM | Windows --force 不写 PID → stale lock 检测失效 | `cli/run.py:86` | --force 路径也写 PID | ✅ |
+| 91.M2 | MEDIUM | `_cleanup_done` 过早设 True → 部分失败不重试 | `cli/plan.py:67` | 移到函数末尾 | ✅ |
+| 91.M3 | MEDIUM | `_cmd_cancel` 不更新 dashboard.json | `cli/misc.py:170` | 添加 dashboard 更新 | ✅ |
+| 91.M4 | MEDIUM | `dump_state` 异常掩盖 KeyboardInterrupt | `cli/run.py:378` | try/except 包裹 | ✅ |
+| 91.M5 | MEDIUM | ANSI 颜色无 TTY 检测 → 管道输出乱码 | `cli/logcmd.py:93` | `isatty()` 检测 | ✅ |
+| 91.M7 | MEDIUM | merge commit 失败未调用 abort | `integrator/base.py:379` | 添加 `merge --abort` | ✅ |
+| 91.M8 | MEDIUM | 双重 `git add -A` 冗余 | `integrator/base.py:365` | 移除第二次 add | ✅ |
+| 91.M9 | MEDIUM | stdin 写入失败不杀进程 → 僵尸 | `integrator/base.py:155` | 异常时 kill + wait | ✅ |
+| 91.M10 | MEDIUM | `git grep ^` 锚定漏检缩进标记 | `integrator/base.py:348` | 移除 `^` 锚定 | ✅ |
+| 91.M15 | MEDIUM | OPTIONS 死代码 | `server.py:499` | 简化为 `!= "GET"` | ✅ |
+| 91.M17 | MEDIUM | PowerShell `-Recurse` 单独未拦截 | `safety.py:44` | 添加 `-Recurse` 单独模式 | ✅ |
+| 91.M20 | MEDIUM | worktree 清理不检查 git 退出码 | `worktree.py:109` | 检查 returncode | ✅ |
+
+### 91 验收标准 ✅
+
+- [x] 全部 807 测试通过
+- [x] mypy 0 errors (26 files)
+- [x] PowerShell `-Recurse` 安全拦截
+- [x] merge abort 正确性修复
+
+---
+
+## Phase 92: 第十次审查遗留 MEDIUM 修复续 (v21.0) ✅
+
+| # | 优先级 | 问题 | 位置 | 修复方案 | 状态 |
+|---|--------|------|------|----------|------|
+| 92.M18 | MEDIUM | `store_true` + UNSET 无法覆盖 config true→false | `cli/__init__.py:60,62,67` | 改用 `BooleanOptionalAction` | ✅ |
+| 92.M12 | MEDIUM | `_truncate_jsonl_if_large` 流式截断注释不清 | `progress.py:240` | 添加注释说明 partial line 处理 | ✅ |
+
+### 92 验收标准 ✅
+
+- [x] 全部 807 测试通过
+- [x] mypy 0 errors (26 files)
+- [x] `--no-squash` / `--no-quiet` / `--no-keep-worktrees` 可用
+
+---
+
+## Phase 93: LOW 问题修复 + 代码审查 (v22.0) ✅
+
+| # | 优先级 | 问题 | 位置 | 修复方案 | 状态 |
+|---|--------|------|------|----------|------|
+| 93.L6 | LOW | `get_snapshot()` dead code | `progress.py:493` | 移除未使用方法 | ✅ |
+| 93.L11 | LOW | TOML 解析错误静默吞掉 | `config.py:57` | 添加 `_log.warning` | ✅ |
+| 93.L19 | LOW | PermissionError 误判为 orphan | `worktree.py:80` | PermissionError 时保守跳过 | ✅ |
+| 93.L22 | LOW | `asyncio.Queue.put_nowait()` 线程安全注释 | `log.py:21` | 添加线程安全说明 | ✅ |
+| 93.GU | LOW | `CREATE_NEW_PROCESS_GROUP` docstring 过时 | `git_utils.py:78` | 更新注释说明实际行为 | ✅ |
+
+### 93 验收标准 ✅
+
+- [x] 全部 807 测试通过
+- [x] mypy 0 errors (26 files)
+- [x] dead code 清理完成
+- [x] 错误处理改进完成
 
 ---
 

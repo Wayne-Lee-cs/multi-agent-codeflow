@@ -43,6 +43,7 @@ DENY_PATTERNS = [
     # Windows dangerous commands (PowerShell) — also match alias 'ri'
     r"(?:Remove-Item|ri)\s.*-Recurse.*-Force",
     r"(?:Remove-Item|ri)\s.*-Force.*-Recurse",
+    r"(?:Remove-Item|ri)\s.*-Recurse",
     r"\bdel\s+/[sS]",
     r"\brd\s+/[sS]",
     # Command chain / indirect execution patterns.

@@ -242,6 +242,8 @@ def _truncate_jsonl_if_large(path: Path, max_bytes: int, keep_ratio: float) -> N
             with open(path, "rb") as f:
                 f.seek(-keep_bytes, 2)
                 tail = f.read()
+            # The seek may land mid-line — discard the partial first line
+            # to avoid writing a truncated JSON entry (Phase 90.M12 fix).
             nl_idx = tail.find(b"\n")
             if nl_idx >= 0:
                 tail = tail[nl_idx + 1:]
@@ -488,14 +490,6 @@ class Dashboard:
             self._maybe_flush_io()
         self._write_dashboard(force=is_final)
 
-    def get_snapshot(self) -> dict[str, dict[str, Any]]:
-        """Return a serializable snapshot of all task progress.
-
-        Manual dict construction avoids asdict() recursively serializing
-        last_event.raw (which can be large), keeping I/O lightweight.
-        """
-        return {tid: _task_progress_dict(tp) for tid, tp in self.tasks.items()}
-
     def _buffer_event(self, task_id: str, event: Event) -> None:
         """Buffer an event line in memory for batch writing."""
         d = {
@@ -544,18 +538,40 @@ class Dashboard:
     _TRUNCATE_KEEP_RATIO = 0.8  # keep last 80% of lines when truncating
 
     def _do_flush_io(self, data: dict[str, Any]) -> None:
-        """Actually write buffered events and progress to disk (runs in thread)."""
+        """Actually write buffered events and progress to disk (runs in thread).
+
+        Each task is wrapped in its own try/except so that a single task's
+        I/O failure does not discard the entire batch (Phase 90.H2 fix).
+        """
         buffers = data["buffers"]
         progress_snap = data["progress"]
         for task_id, lines in buffers.items():
             if lines:
-                target = self._events_dir / f"task-{task_id}.jsonl"
-                with open(target, "a", encoding="utf-8") as f:
-                    f.writelines(lines)
-                _truncate_jsonl_if_large(target, self._MAX_EVENT_FILE_SIZE, self._TRUNCATE_KEEP_RATIO)
+                try:
+                    target = self._events_dir / f"task-{task_id}.jsonl"
+                    with open(target, "a", encoding="utf-8") as f:
+                        f.writelines(lines)
+                    _truncate_jsonl_if_large(target, self._MAX_EVENT_FILE_SIZE, self._TRUNCATE_KEEP_RATIO)
+                except OSError:
+                    _log.warning("Failed to flush events for task %s", task_id, exc_info=True)
         for task_id, d in progress_snap.items():
-            target = self._progress_dir / f"task-{task_id}.json"
-            atomic_write(target, json.dumps(d, ensure_ascii=False, separators=(',', ':')))
+            try:
+                target = self._progress_dir / f"task-{task_id}.json"
+                atomic_write(target, json.dumps(d, ensure_ascii=False, separators=(',', ':')))
+            except OSError:
+                _log.warning("Failed to flush progress for task %s", task_id, exc_info=True)
+
+    _TERMINAL_STATUSES = frozenset({"done", "failed", "noop", "unhandled error"})
+
+    def _prune_terminal_snapshot(self) -> None:
+        """Remove terminal-state tasks from the in-memory snapshot.
+
+        Called after flush to prevent unbounded memory growth over long runs
+        with many tasks (Phase 90.M14 fix).  Safe to call multiple times.
+        """
+        for tid in list(self._last_dashboard_snapshot):
+            if self._last_dashboard_snapshot[tid].get("status") in self._TERMINAL_STATUSES:
+                del self._last_dashboard_snapshot[tid]
 
     def _write_dashboard(self, force: bool = False) -> None:
         """Write dashboard.json with time-based throttling (incremental).
@@ -583,7 +599,12 @@ class Dashboard:
                 self._last_dashboard_snapshot[tid] = tp_dict
                 diff[tid] = tp_dict
 
-        full_snapshot = self._last_dashboard_snapshot
+        # Shallow-copy the snapshot before enqueuing (Phase 89.2 fix).
+        # The I/O worker runs in a separate thread via asyncio.to_thread and
+        # serialises the dict with json.dumps.  Without a copy, the event-loop
+        # thread may mutate _last_dashboard_snapshot (adding keys) while the
+        # worker iterates it, causing "dictionary changed size during iteration".
+        full_snapshot = dict(self._last_dashboard_snapshot)
 
         if self._io_queue is not None:
             self._io_queue.put_nowait(("dashboard", {"diff": diff, "full": full_snapshot}))

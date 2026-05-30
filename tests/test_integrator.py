@@ -17,7 +17,7 @@ from cagent.integrator import (
     _validate_cmd_str,
     integrate,
 )
-from cagent.integrator.base import _resolve_conflicts, _abort_operation, _report
+from cagent.integrator.base import _resolve_conflicts, _abort_operation, _is_conflict_xy, _report
 from cagent.integrator.cherry_pick import cherry_pick_strategy
 from cagent.integrator.merge import merge_strategy
 from cagent.integrator.rebase import rebase_strategy
@@ -54,6 +54,38 @@ class TestHasConflictMarkers:
 
     def test_empty(self) -> None:
         assert _has_conflict_markers("") is False
+
+
+class TestIsConflictXy:
+    """Phase 89.4: unified conflict marker parsing via _is_conflict_xy."""
+
+    def test_uu_is_conflict(self) -> None:
+        assert _is_conflict_xy("UU") is True
+
+    def test_au_is_conflict(self) -> None:
+        assert _is_conflict_xy("AU") is True
+
+    def test_ua_is_conflict(self) -> None:
+        assert _is_conflict_xy("UA") is True
+
+    def test_aa_is_conflict(self) -> None:
+        assert _is_conflict_xy("AA") is True
+
+    def test_dd_is_conflict(self) -> None:
+        assert _is_conflict_xy("DD") is True
+
+    def test_mm_not_conflict(self) -> None:
+        assert _is_conflict_xy("MM") is False
+
+    def test_m_not_conflict(self) -> None:
+        assert _is_conflict_xy(" M") is False
+
+    def test_two_char_line_consistent_with_has_conflict_markers(self) -> None:
+        """A 2-char line is processed by both helpers identically."""
+        for xy in ("UU", "AA", "DD", "AU", "UA", "MM", " M", "??"):
+            assert _is_conflict_xy(xy) == _has_conflict_markers(f"{xy} file.py\n"), (
+                f"Mismatch for XY={xy!r}"
+            )
 
 
 # --- _run_git tests ---
@@ -637,13 +669,13 @@ class TestValidateCmdStr:
 
     def test_command_with_pipes(self) -> None:
         from cagent.integrator import _validate_cmd_str
-        # Pipes are allowed (user may want to pipe output)
-        assert _validate_cmd_str("pytest | tee output.txt") is True
+        # Pipes are rejected — they enable shell injection (Phase 90.H1)
+        assert _validate_cmd_str("pytest | tee output.txt") is False
 
     def test_command_with_semicolons(self) -> None:
         from cagent.integrator import _validate_cmd_str
-        # Semicolons are allowed (user may chain commands)
-        assert _validate_cmd_str("pytest; echo done") is True
+        # Semicolons are rejected — they enable shell injection (Phase 90.H1)
+        assert _validate_cmd_str("pytest; echo done") is False
 
     def test_rejects_null_byte(self) -> None:
         from cagent.integrator import _validate_cmd_str
@@ -984,7 +1016,12 @@ class TestResolveConflicts:
 
     @pytest.mark.asyncio
     async def test_git_add_fails_aborts(self, tmp_path):
-        """git add -A fails -> abort."""
+        """conflict markers detected by grep -> abort.
+
+        After Phase 90.M8, there is only one `git add -A` (check=False).
+        The old test relied on the second add (check=True) raising.
+        Now we test that grep finding markers still causes abort.
+        """
         run_dir = tmp_path / "run"
         run_dir.mkdir()
 
@@ -992,9 +1029,10 @@ class TestResolveConflicts:
             if args[0] == "status":
                 return _git_result(0, "UU conflict.py\n")
             if args[0] == "grep":
-                return _git_result(1, "")
+                # Grep finds conflict markers -> should abort
+                return _git_result(0, "conflict.py\n")
             if args[0] == "add":
-                raise RuntimeError("git add failed")
+                return _git_result(0, "")
             return _git_result(0, "")
 
         task = _done_task("1", "abc123")

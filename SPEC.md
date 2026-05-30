@@ -1,9 +1,14 @@
-# cagent — Technical Specification (v16.0)
+# cagent — Technical Specification (v22.0)
 
-> 最新更新（2026-05-27）。
-> 基于 784 tests, 88.44% coverage, mypy 0 errors, 22 source files。
+> 最新更新（2026-05-30）。
+> 基于 807 tests, mypy 0 errors, 26 source files。
 > v14.0: 第七次全面评估 + 8 项 bug 修复。v15.0: 7 项性能优化。v16.0: 覆盖率提升 + MEDIUM 修复 + 安全加固。
 > v17.0（2026-05-29）: 第八次全面评估，发现 rebase 策略冲突解决 HIGH bug（被 mock 掩盖）等 8 项问题。详见 §11。
+> v18.0（2026-05-30）: 第九次全面评估修复，发现 noop 误报 failed HIGH bug（被 mock 掩盖）等 6 项问题，全部修复。详见 §12。
+> v19.0（2026-05-30）: 第十次全面代码审查修复，6 HIGH + 4 MEDIUM。详见 §13。
+> v20.0（2026-05-30）: 第十次审查遗留 MEDIUM 修复，12 项。详见 §14。
+> v21.0（2026-05-30）: 第十次审查遗留 MEDIUM 修复续，2 项。详见 §15。
+> v22.0（2026-05-30）: LOW 问题修复 + 代码审查，5 项。详见 §16。
 
 ---
 
@@ -387,3 +392,232 @@ v10.0 Phase 76 仍有 6 项 MEDIUM 未完成：
 | 代码质量 | 9.0 | 9.2 | 清理死代码 + 消除 _check_tokens 双份隐患 |
 | 架构 | 8.5 | 8.5 | → |
 | **综合** | **8.7** | **9.0** | rebase 真实可用 + 测试可信度提升 |
+
+---
+
+## 12. 第九次全面评估（v18.0, 2026-05-30）
+
+### 12.1 评估结论
+
+全部 26 个源文件、测试套件、mypy、pytest 复审，外加**真实 git 仓库手工复现**关键路径。基线：**792 tests 全部通过，mypy 0 errors（26 files），覆盖率 88%**。
+本轮发现 **1 个被 mock 掩盖的 HIGH 逻辑 bug**（noop 误报 failed）+ 2 MEDIUM + 3 LOW。与 v17.0 rebase bug 同源——再次印证「过度 mock 掩盖真实失败路径」是本项目的系统性测试风险：HIGH bug 所在的 noop 单测把 `git status` 直接 mock 成空字节，绕过了真实环境下注入 `.gitignore` 造成的状态污染。
+
+### 12.2 确认的 Bug
+
+#### 12.2.1 [HIGH] noop 任务在真实 git 下被误报为 failed — `agent.py:82-88` + `agent.py:328-339`
+
+**现象**：`run_agent` 在启动 agent **之前**向 worktree 的 `.gitignore` 追加 cagent 排除块（`agent.py:82-88`）。`_commit_result` 随后用 `git status --porcelain` 是否为空判定 noop（`agent.py:333-339`）。但**注入本身就让 status 非空**，noop 检测被旁路。随后 `git checkout HEAD -- .gitignore`（`agent.py:360`）还原该文件，再 `git add -A`（`agent.py:372`）+ `git commit`（`agent.py:377`）时已无任何改动 → commit 退出码 1（`nothing to commit`）→ `_git_op_checked` 返回 `AgentResult(status="failed", fail_reason="git commit failed ...")`。
+
+**真实 git 复现**（非推断）：
+```text
+# 注入 .gitignore 块 + 写入 .claude 沙箱、agent 无源码改动后：
+$ git status --porcelain
+ M .gitignore                 ← 仅注入造成的脏（非 noop）
+# 删沙箱 + checkout 还原 .gitignore + add -A 后：
+$ git commit -m "task 001: foo"
+nothing to commit, working tree clean
+COMMIT EXIT: 1               ← 误判为 failed
+```
+
+**影响**：
+1. 本应 `noop` 的任务被标记 **failed**（README 宣传的 noop 语义在真实使用中失效）；
+2. 依赖图模式下，下游任务被 `dispatcher.py:289` 连锁标记 `blocked by failed dependency`，放大故障面。
+
+**为什么 792 测试没抓到**：`test_run_agent_no_changes`（`tests/test_agent.py:218`）把 `git status` mock 成返回空字节，绕过了 `.gitignore` 注入这一真实步骤，使一个真实会失败的路径在单测中"通过"。
+
+**修复**：调整 `_commit_result` 步骤顺序——先做沙箱清理 + `git checkout HEAD -- .claude/ .gitignore` 还原 + 剥离残留注入块，**再**用 `git status --porcelain` 判 noop。无真实改动 → 正确 noop；有改动 → 正常提交。
+
+**防回归**：补一个**用真实 git 仓库、不 mock `git status`** 的 noop 集成测试（让注入与还原真实发生，断言返回 `noop`）。
+
+### 12.3 中优先级问题
+
+| # | 文件 | 问题 | 影响 |
+|---|------|------|------|
+| 12.3.1 | `progress.py:586-591` | `_write_dashboard` 把 `self._last_dashboard_snapshot`（活引用，非拷贝）入 I/O 队列，由 `asyncio.to_thread` 在工作线程 `json.dumps` 序列化；同时事件循环线程继续 `_write_dashboard` 往同一 dict 加键 | 偶发 `RuntimeError: dictionary changed size during iteration`，被 `_io_worker`（`progress.py:381`）try/except 吞掉并记日志，但**静默丢失该次 dashboard 更新**。修复：入队前 `dict(...)` 浅拷贝 |
+| 12.3.2 | `agent.py:360` | 仓库原本无 `.gitignore` 时，注入生成新文件 → `git checkout HEAD -- .gitignore` 失败 → 含 `# cagent worktree exclusions` 的 .gitignore 被 `add -A` 提交进集成分支 | cagent 内部实现细节泄漏进用户最终合并的代码；由 12.2.1 的「剥离残留注入块」步骤一并修复 |
+
+### 12.4 低优先级
+
+| # | 位置 | 问题 |
+|---|------|------|
+| 12.4.1 | `integrator/base.py:189` vs `:240` | 冲突标记解析阈值不一致（`_has_conflict_markers` 用 `len<2`，`_resolve_conflicts` 用 `len>=3`）——长度恰为 2 的行处理分歧；建议抽单一 helper |
+| 12.4.2 | `integrator/base.py:320` | `_resolve_conflicts` 完成前用 `git grep` 复查标记，仅覆盖 tracked 文件；agent 新建的未跟踪文件中残留标记漏检。建议先 `git add -A` 再 grep |
+| 12.4.3 | `memory.py:56-68` | `append` 用裸 `open(...,"a")`（非 `atomic_write`），与 `write` 的原子性不一致；当前单写者下影响有限 |
+
+### 12.5 与 v17.0 的关联
+
+- 12.2.1 的 noop bug 与 v17.0 §11.2.1 的 rebase bug **同源**：均为「单测把关键 git 命令 mock 掉，掩盖真实失败」。建议把 v17.0 §11.5 引入的 `_setup_real_conflict_repo` 真实 git 测试范式**扩展到 `run_agent` 的 noop/commit 路径**，系统性收敛此类盲区。
+- `--max-tokens` 与 dashboard 的耦合（v17.0 §11.4.3 / Phase 88.7）已复审为「有意设计」，本轮不重复提出。
+
+### 12.6 预期评分变化（Phase 89 后）
+
+| 维度 | 当前(Phase 88 后) | Phase 89 后 | 关键依据 |
+|------|------|------|----------|
+| 安全性 | 9.5 | 9.5 | 无新安全问题（.gitignore 泄漏为信息卫生，非漏洞）|
+| 正确性 | 9.5 | 9.5→ 待修复后回升 | noop HIGH bug 暴露后正确性实际低于 v17.0 记分；修复后恢复 |
+| 测试充分性 | 9.2 | 9.4 | 把真实 git 范式扩展到 agent commit/noop 路径 |
+| 性能 | 9.0 | 9.0 | → |
+| 代码质量 | 9.2 | 9.3 | 消除快照竞态 + 统一冲突解析 helper |
+| 架构 | 8.5 | 8.5 | → |
+| **综合** | **9.0** | **9.0**（修复后）| 修复前因 HIGH bug 实质回落，修复后回到 9.0 |
+
+### 12.7（修复后复审，2026-05-30）
+
+- 测试：**807 passed**（原 792 + 15 新增：2 agent real-git noop + 8 conflict xy + 4 memory atomic + 1 dashboard snapshot），`-W error::RuntimeWarning` 零警告
+- 类型：mypy **0 errors（26 files）**；覆盖率 **88%**（阈值 78%）
+- 本次修复涉及 **4 个源文件**（agent.py, progress.py, integrator/base.py, memory.py）+ **5 个测试文件**
+- 代码审查：通过（agent review），无遗留问题
+
+---
+
+## 13. 第十次全面代码审查 (v19.0, 2026-05-30)
+
+### 13.1 审查范围
+
+全部 22 个 Python 源文件，由 7 个并行审查 agent 完成。总计发现 9 HIGH + 31 MEDIUM + 36 LOW + 8 优化建议。
+
+### 13.2 已修复问题
+
+| 编号 | 优先级 | 问题 | 修复 |
+|------|--------|------|------|
+| 13.2.1 | HIGH | `_validate_cmd_str` 允许 `\|;>&<` shell 管道字符 → 通过 `--post-integrate-cmd` 注入任意命令 | 白名单追加 `\|;>&<` 拒绝 |
+| 13.2.2 | HIGH | `_do_flush_io` 单任务写入失败导致整批事件/进度数据丢失 | 逐任务 try/except，失败只丢单个 task |
+| 13.2.3 | HIGH | `build_shared_context` 缓存 key 缺 `max_chars` → 不同 max_chars 调用返回错误缓存 | key 加入 `max_chars` |
+| 13.2.4 | HIGH | `append()` docstring 声称"原子"但实际非原子 → 误导调用方 | 修正为"crash-safe, not atomic" |
+| 13.2.5 | HIGH | Windows `CTRL_BREAK_EVENT` 发送到整个控制台进程组 → 杀死父 cagent 进程 | 统一改用 `proc.kill()` |
+| 13.2.6 | HIGH | `_commit_result` 清理阶段 `git checkout` 超时未捕获 `GitTimeoutError` → 任务报 "unhandled error" | try/except 包裹 |
+| 13.2.7 | MEDIUM | auth 诊断打印 `ANTHROPIC_BASE_URL` 等敏感环境变量明文 | 全部 mask 为 `(set, length=N)` |
+| 13.2.8 | MEDIUM | `completion_mode` 无效值直接 KeyError 崩溃 | `.get()` fallback |
+| 13.2.9 | MEDIUM | `_last_dashboard_snapshot` 永不清理已完成 task → 内存持续增长 | 添加 `_prune_terminal_snapshot()` 方法 |
+| 13.2.10 | MEDIUM | `write_shared()` 未用 `atomic_write()` → 与 `write()`/`append()` 不一致 | 统一使用 `atomic_write()` |
+
+### 13.3 遗留 MEDIUM（未修复，可后续处理）
+
+| 编号 | 问题 | 说明 |
+|------|------|------|
+| 13.3.1 | cli/run.py Windows --force stale lock 无 PID | `os.replace` 路径不写 payload |
+| 13.3.2 | cli/plan.py `_cleanup_done` 过早设为 True | 部分失败后 atexit 不重试 |
+| 13.3.3 | cli/misc.py `_cmd_cancel` 不更新 dashboard.json | 状态不一致 |
+| 13.3.4 | cli/run.py `dump_state` 异常掩盖原始错误 | 需 try/except 包裹 |
+| 13.3.5 | cli/logcmd.py ANSI 颜色无 TTY 检测 | 管道输出乱码 |
+| 13.3.6 | integrator merge commit 失败未调用 abort | 脏状态残留 |
+| 13.3.7 | integrator 双重 `git add -A` 冗余 | 第二次是 no-op |
+| 13.3.8 | integrator stdin 写入失败不杀进程 | 僵尸残留 |
+| 13.3.9 | integrator `git grep ^` 锚定漏检缩进标记 | 改用更宽松正则 |
+| 13.3.10 | progress `_truncate_jsonl_if_large` 流式无换行截断 | 产生不完整行 |
+| 13.3.11 | progress `flush_async` 取消后 sentinel 残留 | 队列污染 |
+| 13.3.12 | server.py OPTIONS 死代码 | 不可达分支 |
+| 13.3.13 | server.py WebSocket RSV bits 未校验 | 协议合规 |
+| 13.3.14 | safety.py PowerShell `-Recurse` 未拦截 | 缺 `-Force` |
+| 13.3.15 | config.py `store_true` + UNSET 无法覆盖 true→false | CLI 限制 |
+| 13.3.16 | worktree.py 清理不检查 git 退出码 | 失败也计数 |
+
+### 13.4 遗留 LOW（24 项，详见审查报告）
+
+agent.py 4 项、progress.py 4 项、integrator/base.py 4 项、memory.py 3 项、config.py 1 项、server.py 2 项、safety.py 2 项、git_utils.py 3 项、worktree.py 2 项、compat.py 1 项、log.py 2 项、dispatcher.py 1 项。
+
+### 13.5 预期评分变化（Phase 90 后）
+
+| 维度 | Phase 89 后 | Phase 90 后 | 关键依据 |
+|------|------|------|----------|
+| 安全性 | 9.5 | 9.8 | shell 注入漏洞修复 + 进程安全 |
+| 正确性 | 9.5 | 9.6 | 缓存 key + GitTimeoutError |
+| 测试充分性 | 9.4 | 9.4 | → |
+| 性能 | 9.0 | 9.0 | → |
+| 代码质量 | 9.3 | 9.5 | atomic_write 统一 + docstring 修正 |
+| 架构 | 8.5 | 8.5 | → |
+| **综合** | **9.0** | **9.3** | 安全性提升最显著 |
+
+---
+
+## 14. 第十次审查遗留 MEDIUM 修复 (v20.0, 2026-05-30)
+
+### 14.1 修复清单
+
+| 编号 | 问题 | 修复 |
+|------|------|------|
+| 14.1.1 | Windows `--force` 不写 PID → stale lock 检测失效 | `--force` 路径也写 PID:TIMESTAMP |
+| 14.1.2 | `_cleanup_done` 过早设 True → 部分失败不重试 | 移到函数末尾 |
+| 14.1.3 | `_cmd_cancel` 不更新 dashboard.json | 终止后写入 "failed" 状态 |
+| 14.1.4 | `dump_state` 异常掩盖 KeyboardInterrupt | try/except 包裹 |
+| 14.1.5 | ANSI 颜色无 TTY 检测 → 管道输出乱码 | `isatty()` 检测 |
+| 14.1.6 | merge commit 失败未调用 abort → 脏状态残留 | 添加 `merge --abort` |
+| 14.1.7 | 双重 `git add -A` 冗余 | 移除第二次 |
+| 14.1.8 | stdin 写入失败不杀进程 → 僵尸残留 | 异常时 kill + wait |
+| 14.1.9 | `git grep ^` 锚定漏检缩进标记 | 移除 `^` 锚定 |
+| 14.1.10 | OPTIONS 死代码 | 简化为 `!= "GET"` |
+| 14.1.11 | PowerShell `-Recurse` 单独未拦截 | 添加单独模式 |
+| 14.1.12 | worktree 清理不检查 git 退出码 | 检查 returncode |
+
+### 14.2 遗留问题
+
+| 编号 | 优先级 | 问题 | 说明 |
+|------|--------|------|------|
+| 14.2.1 | MEDIUM | config.py `store_true` + UNSET | CLI 限制，无法从 CLI 覆盖配置文件 true→false |
+| 14.2.2 | MEDIUM | progress `_truncate_jsonl_if_large` 流式无换行截断 | 产生不完整行 |
+| 14.2.3 | MEDIUM | progress `flush_async` 取消后 sentinel 残留 | 队列污染 |
+| 14.2.4 | LOW | 24 项 LOW 问题 | 详见 §13.4 |
+
+### 14.3 预期评分变化
+
+| 维度 | Phase 90 后 | Phase 91 后 | 关键依据 |
+|------|------|------|----------|
+| 安全性 | 9.8 | 9.9 | PowerShell -Recurse 拦截 |
+| 正确性 | 9.6 | 9.7 | merge abort + PID 写入 + dashboard 更新 |
+| 代码质量 | 9.5 | 9.6 | 冗余代码清理 + TTY 检测 |
+| **综合** | **9.3** | **9.5** | 正确性 + 代码质量提升 |
+
+---
+
+## 15. 第十次审查遗留 MEDIUM 修复续 (v21.0, 2026-05-30)
+
+### 15.1 修复清单
+
+| 编号 | 问题 | 修复 |
+|------|------|------|
+| 15.1.1 | `store_true` + UNSET 无法覆盖 config true→false | 改用 `BooleanOptionalAction`（`--squash`/`--no-squash` 等） |
+| 15.1.2 | `_truncate_jsonl_if_large` 流式截断注释不清 | 添加注释说明 partial line 处理逻辑 |
+
+### 15.2 遗留问题
+
+| 编号 | 优先级 | 问题 | 说明 |
+|------|--------|------|------|
+| 15.2.1 | MEDIUM | progress `_truncate_jsonl_if_large` 流式无换行截断 | 代码已正确处理，注释已澄清 |
+| 15.2.2 | MEDIUM | progress `flush_async` 取消后 sentinel 残留 | 无害，I/O worker 会消费 |
+| 15.2.3 | LOW | 24 项 LOW 问题 | 详见 §13.4 |
+
+### 15.3 综合评分
+
+| 维度 | Phase 91 后 | Phase 92 后 | 关键依据 |
+|------|------|------|----------|
+| 正确性 | 9.7 | 9.8 | BooleanOptionalAction 消除 config 覆盖盲区 |
+| 代码质量 | 9.6 | 9.7 | 注释澄清 + API 改进 |
+| **综合** | **9.5** | **9.6** | 正确性提升 |
+
+---
+
+## 16. LOW 问题修复 + 代码审查 (v22.0, 2026-05-30)
+
+### 16.1 修复清单
+
+| 编号 | 问题 | 修复 |
+|------|------|------|
+| 16.1.1 | `get_snapshot()` dead code（无调用方） | 移除方法 |
+| 16.1.2 | TOML 解析错误静默吞掉，用户无反馈 | 添加 `_log.warning` |
+| 16.1.3 | PermissionError 误判 PID 文件为不存在 → 活跃 worktree 被清理 | PermissionError 时保守跳过 |
+| 16.1.4 | `asyncio.Queue.put_nowait()` 线程安全注释缺失 | 添加注释说明单线程安全 |
+| 16.1.5 | `CREATE_NEW_PROCESS_GROUP` docstring 过时（仍引用 CTRL_BREAK_EVENT） | 更新注释说明实际行为 |
+
+### 16.2 代码审查验证
+
+代码审查确认：
+- Phase 90-92 所有修复正确，无严重 bug
+- safety.py `"\\\\"` 在三引号字符串中是正确的（审查误判）
+- 3 个低优先级问题已处理（2 个修复 + 1 个确认正确）
+
+### 16.3 综合评分
+
+| 维度 | Phase 92 后 | Phase 93 后 | 关键依据 |
+|------|------|------|----------|
+| 代码质量 | 9.7 | 9.75 | dead code 清理 + 错误处理改进 |
+| **综合** | **9.6** | **9.65** | 代码质量小幅提升 |

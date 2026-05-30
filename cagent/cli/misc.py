@@ -3,11 +3,36 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+import time
 from pathlib import Path
 
 from .base import _get_repo_root, _get_runs_dir, _find_run_dir, _terminate_pid
+from cagent.compat import atomic_write
 from cagent.git_utils import run_git
+
+
+def _update_dashboard_task_status(
+    run_dir: Path, task_id: str, status: str, fail_reason: str | None = None
+) -> None:
+    """Update a single task's status in dashboard.json (best-effort)."""
+    dashboard_path = run_dir / "dashboard.json"
+    if not dashboard_path.exists():
+        return
+    try:
+        data = json.loads(dashboard_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return
+    if task_id in data:
+        data[task_id]["status"] = status
+        data[task_id]["ended_at"] = time.time()
+        if fail_reason:
+            data[task_id]["fail_reason"] = fail_reason
+        try:
+            atomic_write(dashboard_path, json.dumps(data, ensure_ascii=False, separators=(',', ':')))
+        except OSError:
+            pass
 
 
 def _cmd_clean(args: argparse.Namespace) -> None:
@@ -169,6 +194,9 @@ def _cmd_cancel(args: argparse.Namespace) -> None:
         _terminate_pid(pid)
         print(f"Terminated process {pid} (task-{task_id})")
         pid_path.unlink(missing_ok=True)
+        # Update dashboard.json so the cancelled task shows correct status
+        # (Phase 90.M3 fix).
+        _update_dashboard_task_status(run_dir, task_id, "failed", fail_reason="cancelled")
     except ProcessLookupError:
         print(f"Process {pid} not found. Task may have already finished.", file=sys.stderr)
         pid_path.unlink(missing_ok=True)

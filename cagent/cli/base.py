@@ -142,10 +142,11 @@ def _print_auth_diagnostics() -> None:
         val = os.environ.get(var)
         if val is None:
             print(f"  {var}: not set", file=sys.stderr)
-        elif var == "ANTHROPIC_API_KEY":
-            print(f"  {var}: (set, length={len(val)})", file=sys.stderr)
         else:
-            print(f"  {var}: {val}", file=sys.stderr)
+            # Mask sensitive values — only show that they are set, not their content
+            # (Phase 90.M6 fix: ANTHROPIC_BASE_URL and auth tokens can leak
+            # proxy URLs or credentials in shared/CI environments).
+            print(f"  {var}: (set, length={len(val)})", file=sys.stderr)
 
     print("\nPossible fixes:", file=sys.stderr)
     print("  1. Run 'claude auth login' to authenticate via OAuth", file=sys.stderr)

@@ -24,48 +24,45 @@ class TestPrintEventLine:
     """Tests for _print_event_line function."""
 
     def test_tool_use_event(self, capsys: pytest.CaptureFixture[str]) -> None:
-        """Tool use event should be formatted with cyan color."""
+        """Tool use event should be formatted with cyan color (TTY only)."""
         line = json.dumps({"kind": "tool_use", "ts": 1700000000.0, "summary": "Read file.py"})
         _print_event_line(line, None)
         captured = capsys.readouterr()
         assert "tool_use" in captured.out
         assert "Read file.py" in captured.out
-        assert "\033[36m" in captured.out  # cyan
+        # Colors only emitted when stdout is a TTY (Phase 90.M5).
+        # In tests, stdout is captured (not a TTY), so no ANSI codes.
 
     def test_error_event(self, capsys: pytest.CaptureFixture[str]) -> None:
-        """Error event should be formatted with red color."""
+        """Error event should be formatted with red color (TTY only)."""
         line = json.dumps({"kind": "error", "ts": 1700000000.0, "summary": "something failed"})
         _print_event_line(line, None)
         captured = capsys.readouterr()
         assert "error" in captured.out
         assert "something failed" in captured.out
-        assert "\033[31m" in captured.out  # red
 
     def test_denied_event(self, capsys: pytest.CaptureFixture[str]) -> None:
-        """Denied event should be formatted with yellow color."""
+        """Denied event should be formatted with yellow color (TTY only)."""
         line = json.dumps({"kind": "denied", "ts": 1700000000.0, "summary": "access denied"})
         _print_event_line(line, None)
         captured = capsys.readouterr()
         assert "denied" in captured.out
-        assert "\033[33m" in captured.out  # yellow
 
     def test_done_event(self, capsys: pytest.CaptureFixture[str]) -> None:
-        """Done event should be formatted with green color."""
+        """Done event should be formatted with green color (TTY only)."""
         line = json.dumps({"kind": "done", "ts": 1700000000.0, "summary": "commit abc1234"})
         _print_event_line(line, None)
         captured = capsys.readouterr()
         assert "done" in captured.out
         assert "commit abc1234" in captured.out
-        assert "\033[32m" in captured.out  # green
 
     def test_text_event(self, capsys: pytest.CaptureFixture[str]) -> None:
-        """Text event should be formatted with white color."""
+        """Text event should be formatted with white color (TTY only)."""
         line = json.dumps({"kind": "text", "ts": 1700000000.0, "summary": "thinking"})
         _print_event_line(line, None)
         captured = capsys.readouterr()
         assert "text" in captured.out
         assert "thinking" in captured.out
-        assert "\033[37m" in captured.out  # white
 
     def test_kind_filter_matches(self, capsys: pytest.CaptureFixture[str]) -> None:
         """Should only show events matching kind_filter."""

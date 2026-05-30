@@ -247,3 +247,39 @@ class TestAgentIdValidation:
         mem = RunMemory(tmp_path)
         with pytest.raises(ValueError, match="Invalid agent_id"):
             mem.read("../evil")
+
+
+class TestAppendAtomic:
+    """Phase 89.6: memory.append uses atomic read-modify-write."""
+
+    def test_append_creates_file_on_first_call(self, tmp_path):
+        """First append to non-existent file creates it."""
+        mem = RunMemory(tmp_path)
+        mem.append("task-1", "first entry")
+        content = mem.read("task-1")
+        assert content == "first entry"
+
+    def test_append_preserves_existing_content(self, tmp_path):
+        """Subsequent appends preserve previous content with separator."""
+        mem = RunMemory(tmp_path)
+        mem.append("task-1", "first entry")
+        mem.append("task-1", "second entry")
+        content = mem.read("task-1")
+        assert "first entry" in content
+        assert "second entry" in content
+        assert "---" in content  # separator
+
+    def test_append_no_separator_on_first_write(self, tmp_path):
+        """First write has no separator prefix."""
+        mem = RunMemory(tmp_path)
+        mem.append("task-1", "only entry")
+        content = mem.read("task-1")
+        assert not content.startswith("---")
+        assert content == "only entry"
+
+    def test_append_is_atomic_no_tmp_residual(self, tmp_path):
+        """Atomic write leaves no .tmp files behind."""
+        mem = RunMemory(tmp_path)
+        mem.append("task-1", "entry")
+        tmp_files = list((tmp_path / "memory").glob("*.tmp"))
+        assert tmp_files == []

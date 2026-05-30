@@ -38,7 +38,7 @@ class RunMemory:
     def __init__(self, run_dir: Path):
         self._dir = run_dir / "memory"
         self._dir.mkdir(parents=True, exist_ok=True)
-        self._cache_key: tuple[tuple[str, ...], int] | None = None
+        self._cache_key: tuple[tuple[str, ...], int, int] | None = None
         self._cached_context: str = ""
         self._version: int = 0  # incremented on every write/append
 
@@ -54,14 +54,23 @@ class RunMemory:
         self._version += 1
 
     def append(self, agent_id: str, content: str) -> None:
-        """Append memory for a specific agent (preserves previous entries)."""
+        """Append memory for a specific agent (preserves previous entries).
+
+        Uses read-modify-write with atomic_write for crash safety (Phase 89.6).
+        Note: not atomic against concurrent writers — safe for single-writer
+        patterns (one agent per file) but not for multiple writers to the same file.
+        """
         _validate_agent_id(agent_id)
         path = self._dir / f"{agent_id}.md"
         try:
-            with open(path, "a", encoding="utf-8") as f:
-                if f.seek(0, 2) > 0:
-                    f.write("\n\n---\n\n")
-                f.write(content)
+            existing = ""
+            if path.exists():
+                existing = path.read_text(encoding="utf-8")
+            if existing:
+                new_content = existing + "\n\n---\n\n" + content
+            else:
+                new_content = content
+            atomic_write(path, new_content)
         except OSError as e:
             _log.warning("Failed to append memory for %s: %s", agent_id, e)
             return
@@ -102,7 +111,7 @@ class RunMemory:
         """
         sorted_ids = sorted(task_ids)
         ids_tuple = tuple(sorted_ids)
-        cache_key = (ids_tuple, self._version)
+        cache_key = (ids_tuple, self._version, max_chars)
         if cache_key == self._cache_key:
             return self._cached_context
         raw_entries: list[tuple[str, str]] = []
@@ -136,10 +145,10 @@ class RunMemory:
         return result
 
     def write_shared(self, content: str) -> None:
-        """Write the aggregated shared_context.md."""
+        """Write the aggregated shared_context.md (atomic)."""
         path = self._dir / "shared_context.md"
         try:
-            path.write_text(content, encoding="utf-8")
+            atomic_write(path, content)
         except OSError as e:
             _log.warning("Failed to write shared context: %s", e)
             return

@@ -513,3 +513,109 @@ class TestResolveClaudeNegativeCache:
             result3 = mod._resolve_claude()
             assert result3 == "/usr/bin/claude"  # found on 3rd attempt
             assert mod._claude_path_cache == "/usr/bin/claude"  # now cached
+
+
+# --- Phase 89: Real-git noop integration tests ---
+
+
+class TestNoopRealGit:
+    """Phase 89.1: noop detection with real git (no mock on git status).
+
+    Guards against the bug where .gitignore injection made status non-empty
+    and a true noop was misreported as failed.
+    """
+
+    @pytest.mark.asyncio
+    async def test_noop_returns_noop_with_real_git(self, tmp_repo: Path, tmp_path: Path) -> None:
+        """Agent that makes no changes → status='noop' (real git, no status mock)."""
+        from cagent.worktree import create_worktree
+
+        import subprocess as sp
+
+        base_sha = sp.run(
+            ["git", "rev-parse", "HEAD"], cwd=tmp_repo,
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        wt = tmp_path / "worktree"
+        create_worktree(tmp_repo, wt, "cagent/test/noop", base_sha)
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+
+        # Create a mock claude that produces output but makes no file changes
+        claude_proc = _make_process(returncode=0, stdout_lines=[
+            b'{"type":"system","subtype":"init","model":"fake"}\n',
+            b'{"type":"result","subtype":"success","usage":{"input_tokens":5,"output_tokens":2}}\n',
+        ])
+
+        async def mock_exec(*args, **kwargs):
+            cmd = args[0] if args else ""
+            if cmd == "claude":
+                return claude_proc
+            # Let all git commands run for real
+            return await orig_exec(*args, **kwargs)
+
+        orig_exec = asyncio.create_subprocess_exec
+
+        task = Task(id="noop-1", prompt="Do nothing", branch="cagent/test/noop-task")
+
+        with patch("cagent.agent._resolve_claude", return_value="claude"), \
+             patch("cagent.agent.asyncio.create_subprocess_exec", side_effect=mock_exec), \
+             patch("cagent.agent.prepare_sandbox"):
+            result = await run_agent(
+                task=task, worktree_path=wt, run_dir=run_dir,
+            )
+
+        assert result.status == "noop", (
+            f"Expected noop but got {result.status}: {result.fail_reason}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_noop_no_gitignore_leak(self, tmp_repo: Path, tmp_path: Path) -> None:
+        """Phase 89.3: noop task does not leave cagent marker in .gitignore."""
+        from cagent.worktree import create_worktree
+        from cagent.agent import _CAGENT_GITIGNORE_MARKER
+
+        import subprocess as sp
+
+        base_sha = sp.run(
+            ["git", "rev-parse", "HEAD"], cwd=tmp_repo,
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        wt = tmp_path / "worktree"
+        create_worktree(tmp_repo, wt, "cagent/test/noop-gitignore", base_sha)
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+
+        claude_proc = _make_process(returncode=0, stdout_lines=[
+            b'{"type":"system","subtype":"init","model":"fake"}\n',
+            b'{"type":"result","subtype":"success","usage":{"input_tokens":5,"output_tokens":2}}\n',
+        ])
+
+        async def mock_exec(*args, **kwargs):
+            cmd = args[0] if args else ""
+            if cmd == "claude":
+                return claude_proc
+            return await orig_exec(*args, **kwargs)
+
+        orig_exec = asyncio.create_subprocess_exec
+
+        task = Task(id="noop-2", prompt="Do nothing", branch="cagent/test/noop-gitignore-task")
+
+        with patch("cagent.agent._resolve_claude", return_value="claude"), \
+             patch("cagent.agent.asyncio.create_subprocess_exec", side_effect=mock_exec), \
+             patch("cagent.agent.prepare_sandbox"):
+            result = await run_agent(
+                task=task, worktree_path=wt, run_dir=run_dir,
+            )
+
+        assert result.status == "noop"
+
+        # Verify .gitignore does NOT contain cagent marker
+        gitignore = wt / ".gitignore"
+        if gitignore.exists():
+            content = gitignore.read_text(encoding="utf-8")
+            assert _CAGENT_GITIGNORE_MARKER not in content, (
+                "cagent marker leaked into .gitignore after noop task"
+            )

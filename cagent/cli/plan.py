@@ -64,7 +64,6 @@ def _cmd_plan(args: argparse.Namespace) -> None:
         nonlocal _cleanup_done
         if _cleanup_done:
             return
-        _cleanup_done = True
         for f in sandbox_files:
             try:
                 if f.exists():
@@ -91,6 +90,7 @@ def _cmd_plan(args: argparse.Namespace) -> None:
                 claude_dir.rmdir()
         except OSError:
             pass
+        _cleanup_done = True
 
     atexit.register(_cleanup_sandbox)
 

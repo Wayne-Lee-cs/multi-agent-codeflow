@@ -207,7 +207,9 @@ class TestMemoryBenchmark:
 
         elapsed = _bench(run, iterations=iterations)
         ops_per_sec = iterations / elapsed
-        assert ops_per_sec > 500, f"Too slow: {ops_per_sec:.0f} appends/s"
+        # Phase 89.6: append uses atomic read-modify-write for consistency,
+        # which is slower than raw open("a") but prevents partial writes.
+        assert ops_per_sec > 100, f"Too slow: {ops_per_sec:.0f} appends/s"
 
 
 # ---------------------------------------------------------------------------

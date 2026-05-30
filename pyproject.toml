@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cagent"
-version = "17.0.0"
+version = "22.0.0"
 description = "Concurrent agent workflow dispatcher — run multiple claude -p workers in parallel git worktrees"
 requires-python = ">=3.11"
 dependencies = []
