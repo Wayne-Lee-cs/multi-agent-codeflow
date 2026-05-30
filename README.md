@@ -5,9 +5,18 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Zero dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)](pyproject.toml)
 
-> **v17.0.0** — 792 tests, ~88% coverage, zero third-party dependencies.
+> **v22.0.0** — 809 tests, ~87% coverage, zero third-party dependencies.
 
-Concurrent agent workflow dispatcher — run multiple `claude -p` workers in parallel git worktrees.
+**Spawn N Claude Code workers in parallel — one isolated git worktree each — then auto-merge their commits back into a single branch.**
+
+Got a batch of independent coding tasks? List them in a text or Markdown file and cagent runs them *concurrently*, one `claude -p` subprocess per task, then stitches every successful commit into one integration branch — with an AI agent resolving merge conflicts along the way. Live progress streams to your terminal or a browser dashboard.
+
+```bash
+pip install cagent          # or: git clone … && python -m cagent
+cagent run tasks.md -j 4    # run 4 tasks at once
+```
+
+**Jump to:** [Features](#features) · [Install](#installation) · [Quick Start](#quick-start) · [Commands](#commands) · [Task File Format](#tasks-file-format) · [Config](#configuration-file) · [Safety](#safety) · [Architecture](#architecture) · [Limitations](#known-limitations)
 
 ## Features
 
@@ -230,7 +239,7 @@ CLI (argparse + config file)
 | `cagent/config.py` | Configuration file loading (.cagentrc, pyproject.toml) |
 | `cagent/dispatcher.py` | Async task scheduling, dependency graph, retry, budget |
 | `cagent/agent.py` | Subprocess management, stream parsing, commit |
-| `cagent/integrator/` | Branch integration package: `base` + `cherry_pick`/`merge`/`rebase` strategies, conflict resolution, post-validate |
+| `cagent/integrator/` | Branch integration package — `base.py` (shared git/conflict helpers) + one file per strategy: `cherry_pick.py`, `merge.py`, `rebase.py` |
 | `cagent/safety.py` | Sandbox hook generation, deny patterns |
 | `cagent/tasks.py` | Task data model, plain text / Markdown parsing |
 | `cagent/worktree.py` | Git worktree CRUD |
