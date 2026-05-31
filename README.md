@@ -1,13 +1,21 @@
-# cagent
+<div align="center">
+
+# 🚀 cagent
+
+**Spawn N Claude Code workers in parallel — one isolated git worktree each —<br>then auto-merge their commits back into a single branch.**
 
 [![CI](https://github.com/Wayne-Lee-cs/multi-agent-codeflow/actions/workflows/ci.yml/badge.svg)](https://github.com/Wayne-Lee-cs/multi-agent-codeflow/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Zero dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)](pyproject.toml)
+[![Tests](https://img.shields.io/badge/tests-809%20passing-success)](tests/)
+[![Coverage](https://img.shields.io/badge/coverage-~87%25-brightgreen)](#development)
 
-> **v22.0.0** — 809 tests, ~87% coverage, zero third-party dependencies.
+**English** · [简体中文](README.zh-CN.md)
 
-**Spawn N Claude Code workers in parallel — one isolated git worktree each — then auto-merge their commits back into a single branch.**
+</div>
+
+---
 
 Got a batch of independent coding tasks? List them in a text or Markdown file and cagent runs them *concurrently*, one `claude -p` subprocess per task, then stitches every successful commit into one integration branch — with an AI agent resolving merge conflicts along the way. Live progress streams to your terminal or a browser dashboard.
 
@@ -16,9 +24,11 @@ pip install cagent          # or: git clone … && python -m cagent
 cagent run tasks.md -j 4    # run 4 tasks at once
 ```
 
-**Jump to:** [Features](#features) · [Install](#installation) · [Quick Start](#quick-start) · [Commands](#commands) · [Task File Format](#tasks-file-format) · [Config](#configuration-file) · [Safety](#safety) · [Architecture](#architecture) · [Limitations](#known-limitations)
+> **v22.0.0** — 809 tests, ~87% coverage, zero third-party dependencies.
 
-## Features
+**Jump to:** [Features](#-features) · [Install](#installation) · [Quick Start](#quick-start) · [Commands](#commands) · [Task File Format](#tasks-file-format) · [Config](#configuration-file) · [Safety](#-safety) · [Architecture](#architecture) · [Limitations](#known-limitations)
+
+## ✨ Features
 
 - **Parallel execution** — bounded-concurrency async dispatcher with configurable `-j` workers
 - **Git worktree isolation** — each task runs in its own worktree, zero interference
@@ -194,7 +204,7 @@ retries = 2
 
 Supported keys: `jobs`, `timeout`, `strategy`, `squash`, `quiet`, `retries`, `worker_model`, `integrator_model`, `max_turns`, `max_tokens`, `keep_worktrees`.
 
-## Safety
+## 🛡️ Safety
 
 - cagent **never pushes automatically** — only `cagent push` with explicit y/N confirmation
 - Workers cannot run `git push`, `rm -rf`, `node -e`, `python -c`, `powershell -Command`, or other destructive commands (regex + token-based detection, including split-flag patterns like `rm -r -f`)
