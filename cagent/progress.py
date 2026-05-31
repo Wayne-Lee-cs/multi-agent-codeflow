@@ -561,18 +561,6 @@ class Dashboard:
             except OSError:
                 _log.warning("Failed to flush progress for task %s", task_id, exc_info=True)
 
-    _TERMINAL_STATUSES = frozenset({"done", "failed", "noop", "unhandled error"})
-
-    def _prune_terminal_snapshot(self) -> None:
-        """Remove terminal-state tasks from the in-memory snapshot.
-
-        Called after flush to prevent unbounded memory growth over long runs
-        with many tasks (Phase 90.M14 fix).  Safe to call multiple times.
-        """
-        for tid in list(self._last_dashboard_snapshot):
-            if self._last_dashboard_snapshot[tid].get("status") in self._TERMINAL_STATUSES:
-                del self._last_dashboard_snapshot[tid]
-
     def _write_dashboard(self, force: bool = False) -> None:
         """Write dashboard.json with time-based throttling (incremental).
 

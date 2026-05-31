@@ -137,14 +137,24 @@ async def integrate(
             dashboard=dashboard,
             api_key=api_key,
         )
-        if not validation_ok and dashboard:
-            event = Event(
-                ts=time.time(),
-                kind="error",
-                summary="post-integrate-cmd failed after 2 repair rounds — integration marked partial",
-                raw={},
+        if not validation_ok:
+            # Surface the failure to the caller instead of swallowing it.
+            # _integrate_phase catches RuntimeError, reports FAILED, and returns
+            # None, which makes `cagent run` exit non-zero — otherwise CI would
+            # merge code whose tests never passed.
+            if dashboard:
+                event = Event(
+                    ts=time.time(),
+                    kind="error",
+                    summary="post-integrate-cmd failed after 2 repair rounds — integration failed",
+                    raw={},
+                )
+                dashboard.update("_integrator", event)
+            raise RuntimeError(
+                f"post-integrate-cmd failed after 2 repair rounds. "
+                f"Integration branch {integration_branch} preserved at "
+                f"{worktree_path} for inspection."
             )
-            dashboard.update("_integrator", event)
 
     if squash:
         try:

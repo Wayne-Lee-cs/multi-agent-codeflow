@@ -131,7 +131,15 @@ cagent push cagent/<run-id>/integration
 --keep-worktrees          Keep worktrees after run
 --force                   Skip run lock check
 --dry-run                 Show planned execution without running
+--fail-on-partial         Exit non-zero if ANY task fails (default: only on
+                          complete failure or integration failure)
 ```
+
+**Exit codes** — `cagent run` returns `0` on success and `1` when nothing
+succeeded, when integration fails, or when `--post-integrate-cmd` validation
+fails. By default a *partial* success (some tasks failed, some integrated) still
+returns `0`; pass `--fail-on-partial` to treat any task failure as a non-zero
+exit. This makes `cagent run … && deploy` safe to use in CI.
 
 ## Tasks File Format
 
@@ -208,7 +216,7 @@ Supported keys: `jobs`, `timeout`, `strategy`, `squash`, `quiet`, `retries`, `wo
 
 - cagent **never pushes automatically** — only `cagent push` with explicit y/N confirmation
 - Workers cannot run `git push`, `rm -rf`, `node -e`, `python -c`, `powershell -Command`, or other destructive commands (regex + token-based detection, including split-flag patterns like `rm -r -f`)
-- Write and Edit tool content is scanned for dangerous patterns (defense-in-depth)
+- Write, Edit, and MultiEdit tool content is scanned for dangerous patterns (defense-in-depth)
 - All work happens in isolated git worktrees — your working tree is untouched
 - Failed tasks preserve their worktree for debugging
 - Token budget enforcement prevents runaway API costs

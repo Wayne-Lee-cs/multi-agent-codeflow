@@ -302,6 +302,29 @@ def _summary_phase(
         _prompt_clean_memory(memory_dir)
 
 
+def _compute_exit_code(
+    results: list["AgentResult"],
+    integration_sha: str | None,
+    fail_on_partial: bool,
+) -> int:
+    """Derive the process exit code from the run outcome.
+
+    - Complete failure (no task succeeded but some failed) -> 1
+    - Had successful tasks but integration produced nothing / failed -> 1
+    - Partial failure (some tasks failed) -> 1 only when --fail-on-partial
+    - Otherwise (all done/noop, integration ok) -> 0
+    """
+    done = sum(1 for r in results if r.status == "done")
+    failed = sum(1 for r in results if r.status == "failed")
+    if done > 0 and integration_sha is None:
+        return 1  # integration itself failed
+    if done == 0 and failed > 0:
+        return 1  # nothing succeeded
+    if failed > 0 and fail_on_partial:
+        return 1
+    return 0
+
+
 def _execute_run(
     all_tasks: list["Task"],
     dispatch_tasks: list["Task"],
@@ -314,8 +337,8 @@ def _execute_run(
     retry_hint: str | None = None,
     conventions: str = "",
     api_key: str | None = None,
-) -> None:
-    """Shared run logic: dispatch -> integrate -> summary."""
+) -> int:
+    """Shared run logic: dispatch -> integrate -> summary. Returns exit code."""
     from cagent.log import LinePrinter
     from cagent.memory import RunMemory
     from cagent.progress import Dashboard
@@ -405,6 +428,9 @@ def _execute_run(
         all_tasks, results, run_id, run_dir, base_sha,
         repo_root, integration_sha, elapsed, args,
     )
+    return _compute_exit_code(
+        results, integration_sha, getattr(args, "fail_on_partial", False)
+    )
 
 
 def _resolve_api_key(args: argparse.Namespace) -> str | None:
@@ -431,8 +457,11 @@ def _resolve_api_key(args: argparse.Namespace) -> str | None:
     return getattr(args, "api_key", None)
 
 
-def _cmd_run(args: argparse.Namespace) -> None:
-    """Execute the full run workflow: dispatch -> integrate -> summary."""
+def _cmd_run(args: argparse.Namespace) -> int:
+    """Execute the full run workflow: dispatch -> integrate -> summary.
+
+    Returns the process exit code (0 on success).
+    """
     repo_root = _get_repo_root()
 
     from cagent.config import apply_config, load_config
@@ -449,13 +478,12 @@ def _cmd_run(args: argparse.Namespace) -> None:
 
     with _run_lock(repo_root, force=getattr(args, "force", False)):
         if args.resume:
-            _cmd_resume(args, repo_root, api_key=api_key)
-            return
-        _cmd_run_inner(args, repo_root, api_key=api_key)
+            return _cmd_resume(args, repo_root, api_key=api_key)
+        return _cmd_run_inner(args, repo_root, api_key=api_key)
 
 
-def _cmd_run_inner(args: argparse.Namespace, repo_root: Path, api_key: str | None = None) -> None:
-    """Inner run logic, called while holding the run lock."""
+def _cmd_run_inner(args: argparse.Namespace, repo_root: Path, api_key: str | None = None) -> int:
+    """Inner run logic, called while holding the run lock. Returns exit code."""
     from cagent.tasks import dump_state, parse_tasks_file
     from cagent.worktree import cleanup_orphan_worktrees, current_head, detect_orphan_worktrees
 
@@ -510,7 +538,7 @@ def _cmd_run_inner(args: argparse.Namespace, repo_root: Path, api_key: str | Non
             print(f"  [{t.id}] {prompt_preview}")
         print()
         print("Run with: python -m cagent run", args.tasks_file)
-        return
+        return 0
 
     dump_state(run_dir, tasks)
 
@@ -535,7 +563,7 @@ def _cmd_run_inner(args: argparse.Namespace, repo_root: Path, api_key: str | Non
         print(f"  budget:   {args.max_tokens:,} tokens")
     print()
 
-    _execute_run(
+    return _execute_run(
         all_tasks=tasks,
         dispatch_tasks=tasks,
         run_id=run_id,
@@ -549,8 +577,8 @@ def _cmd_run_inner(args: argparse.Namespace, repo_root: Path, api_key: str | Non
     )
 
 
-def _cmd_resume(args: argparse.Namespace, repo_root: Path, api_key: str | None = None) -> None:
-    """Resume a previous run, skipping already-completed tasks."""
+def _cmd_resume(args: argparse.Namespace, repo_root: Path, api_key: str | None = None) -> int:
+    """Resume a previous run, skipping already-completed tasks. Returns exit code."""
     from cagent.agent import AgentResult
     from cagent.tasks import dump_state, load_state
     from cagent.worktree import current_head
@@ -588,7 +616,7 @@ def _cmd_resume(args: argparse.Namespace, repo_root: Path, api_key: str | None =
 
     if not pending_tasks:
         print(f"All {len(tasks)} tasks already completed. Nothing to resume.")
-        return
+        return 0
 
     print(f"Resuming run {run_id}")
     print(f"  Already done: {len(done_tasks)}")
@@ -638,7 +666,7 @@ def _cmd_resume(args: argparse.Namespace, repo_root: Path, api_key: str | None =
                 merged.append(AgentResult(task_id=t.id, status=status, commit_sha=t.commit_sha))
         return merged
 
-    _execute_run(
+    return _execute_run(
         all_tasks=tasks,
         dispatch_tasks=pending_tasks,
         run_id=run_id,

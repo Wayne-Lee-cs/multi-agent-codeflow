@@ -468,6 +468,45 @@ class TestExecuteRun:
         assert "unexpected" in err
 
 
+class TestComputeExitCode:
+    """Tests for _compute_exit_code — exit code derivation from run outcome."""
+
+    def _r(self, status):
+        return FakeResult(task_id="x", status=status)
+
+    def test_all_done_with_integration_is_zero(self):
+        from cagent.cli.run import _compute_exit_code
+        results = [self._r("done"), self._r("done")]
+        assert _compute_exit_code(results, "sha", False) == 0
+
+    def test_all_noop_is_zero(self):
+        from cagent.cli.run import _compute_exit_code
+        results = [self._r("noop"), self._r("noop")]
+        # No done tasks -> no integration; that is success, not failure.
+        assert _compute_exit_code(results, None, False) == 0
+
+    def test_complete_failure_is_one(self):
+        from cagent.cli.run import _compute_exit_code
+        results = [self._r("failed"), self._r("failed")]
+        assert _compute_exit_code(results, None, False) == 1
+
+    def test_integration_failed_with_done_tasks_is_one(self):
+        from cagent.cli.run import _compute_exit_code
+        # Tasks succeeded but integration produced nothing (e.g. integrate raised).
+        results = [self._r("done")]
+        assert _compute_exit_code(results, None, False) == 1
+
+    def test_partial_failure_default_is_zero(self):
+        from cagent.cli.run import _compute_exit_code
+        results = [self._r("done"), self._r("failed")]
+        assert _compute_exit_code(results, "sha", False) == 0
+
+    def test_partial_failure_with_flag_is_one(self):
+        from cagent.cli.run import _compute_exit_code
+        results = [self._r("done"), self._r("failed")]
+        assert _compute_exit_code(results, "sha", True) == 1
+
+
 class TestWriteSummaryDashboardFallback:
     """Tests for _write_summary dashboard token fallback."""
 

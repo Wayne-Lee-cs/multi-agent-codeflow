@@ -332,12 +332,19 @@ tool_input = inp.get("tool_input", {})
 if tool_name in ("Bash", "PowerShell"):
     _check_command(tool_input.get("command", ""))
 
-# Check Write/Edit tool content — block file content that contains dangerous patterns
-# (defense-in-depth: prevents writing malicious scripts that could be executed later)
+# Check Write/Edit/MultiEdit tool content — block file content that contains
+# dangerous patterns (defense-in-depth: prevents writing malicious scripts that
+# could be executed later). MultiEdit applies several edits at once, so scan the
+# new_string of every edit (otherwise it is a hole in the content check).
 if tool_name == "Write":
     content = tool_input.get("content", "")
 elif tool_name == "Edit":
     content = tool_input.get("new_string", "")
+elif tool_name == "MultiEdit":
+    edits = tool_input.get("edits", [])
+    content = "\\n".join(
+        str(e.get("new_string", "")) for e in edits if isinstance(e, dict)
+    ) if isinstance(edits, list) else ""
 else:
     content = ""
 
@@ -390,6 +397,7 @@ def prepare_sandbox(worktree_path: str | Path) -> None:
                 {"matcher": "PowerShell", "hooks": [hook_entry]},
                 {"matcher": "Write", "hooks": [hook_entry]},
                 {"matcher": "Edit", "hooks": [hook_entry]},
+                {"matcher": "MultiEdit", "hooks": [hook_entry]},
             ]
         }
     }

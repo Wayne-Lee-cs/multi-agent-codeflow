@@ -73,6 +73,7 @@ def main() -> None:
     run_p.add_argument("--post-integrate-cmd", default=None, help="Command to run after integration (e.g. 'pytest'); failures trigger agent repair, max 2 rounds")
     run_p.add_argument("--max-turns", type=int, default=UNSET, help="Max conversation turns per task (passed to claude -p --max-turns)")
     run_p.add_argument("--max-tokens", type=int, default=UNSET, help="Token budget for entire run (input+output combined); stops dispatching new tasks when exceeded. Note: budget is checked between tasks, so concurrent tasks may overshoot by up to (concurrency-1) tasks worth of tokens.")
+    run_p.add_argument("--fail-on-partial", action="store_true", help="Exit non-zero if ANY task fails. By default cagent only exits non-zero on complete failure (no task succeeded) or when integration itself fails.")
 
     # --- status ---
     status_p = sub.add_parser("status", help="Show run status snapshot")
@@ -139,7 +140,11 @@ def main() -> None:
         "plan": _cmd_plan,
         "cancel": _cmd_cancel,
     }
-    handlers[args.command](args)
+    # Handlers return an int exit code (run) or None (everything else).
+    # Exit non-zero only on an explicit nonzero integer code.
+    exit_code = handlers[args.command](args)
+    if isinstance(exit_code, int) and exit_code != 0:
+        sys.exit(exit_code)
 
 
 # Lazy re-exports for backward compatibility (tests, bin/cagent).

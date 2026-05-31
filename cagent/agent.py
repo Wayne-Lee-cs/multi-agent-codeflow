@@ -163,6 +163,20 @@ async def run_agent(
         try:
             proc.stdin.write(prompt.encode("utf-8"))
             await asyncio.wait_for(proc.stdin.drain(), timeout=30)
+        except (OSError, asyncio.TimeoutError) as e:
+            # stdin write/drain failed (e.g. claude exited early -> BrokenPipe,
+            # or drain hung). Kill the process so it does not leak as a zombie,
+            # and surface a clear reason instead of a generic "unhandled error"
+            # in the dispatcher. Mirrors integrator._run_claude_agent (Phase 90.M9).
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            await proc.wait()
+            reason = f"failed to send prompt to claude: {e}"
+            if dashboard:
+                dashboard.set_task_status(task.id, "failed", fail_reason=reason)
+            return AgentResult(task_id=task.id, status="failed", fail_reason=reason)
         finally:
             proc.stdin.close()
             try:

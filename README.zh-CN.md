@@ -131,7 +131,14 @@ cagent push cagent/<run-id>/integration
 --keep-worktrees          运行后保留 worktree
 --force                   跳过运行锁检查
 --dry-run                 只展示计划好的执行，不实际运行
+--fail-on-partial         只要有任意任务失败就以非零退出（默认仅在完全失败
+                          或集成失败时非零）
 ```
+
+**退出码** —— `cagent run` 成功返回 `0`；当无任何任务成功、集成失败、或
+`--post-integrate-cmd` 校验失败时返回 `1`。默认情况下*部分*成功（部分任务失败、
+部分已集成）仍返回 `0`；加 `--fail-on-partial` 则任意任务失败都使退出码非零。
+这样 `cagent run … && deploy` 在 CI 中才安全可靠。
 
 ## 任务文件格式
 
@@ -208,7 +215,7 @@ retries = 2
 
 - cagent **永不自动推送** —— 只有 `cagent push` 并经过显式 y/N 确认才会推
 - worker 无法运行 `git push`、`rm -rf`、`node -e`、`python -c`、`powershell -Command` 等破坏性命令（正则 + 基于 token 的检测，包括 `rm -r -f` 这类拆分参数的写法）
-- Write 和 Edit 工具写入的内容会被扫描危险模式（纵深防御）
+- Write、Edit 和 MultiEdit 工具写入的内容会被扫描危险模式（纵深防御）
 - 所有工作都发生在隔离的 git worktree 中 —— 你的工作区不会被动到
 - 失败的任务会保留其 worktree 以便调试
 - Token 预算约束可防止 API 成本失控

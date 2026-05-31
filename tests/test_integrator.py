@@ -1862,7 +1862,12 @@ class TestIntegrate:
 
     @pytest.mark.asyncio
     async def test_post_integrate_cmd_fails_reports(self, tmp_path):
-        """post_integrate_cmd failure -> dashboard error event."""
+        """post_integrate_cmd failure -> dashboard error event AND raises.
+
+        The failure must propagate (not be swallowed) so that `cagent run`
+        exits non-zero instead of leaving the user with an integration branch
+        whose tests never passed.
+        """
         task = _done_task("1", "abc123")
         dashboard = MagicMock()
 
@@ -1873,12 +1878,13 @@ class TestIntegrate:
              patch("cagent.integrator.cherry_pick_strategy", new_callable=AsyncMock, return_value=([task], [])), \
              patch("cagent.integrator._run_git", side_effect=fake_git), \
              patch("cagent.integrator._post_integrate_validate", new_callable=AsyncMock, return_value=False):
-            await integrate(
-                tasks=[task], run_dir=tmp_path / "run1",
-                base_sha="basesha", repo_root=tmp_path,
-                post_integrate_cmd="pytest",
-                dashboard=dashboard,
-            )
+            with pytest.raises(RuntimeError, match="post-integrate-cmd failed"):
+                await integrate(
+                    tasks=[task], run_dir=tmp_path / "run1",
+                    base_sha="basesha", repo_root=tmp_path,
+                    post_integrate_cmd="pytest",
+                    dashboard=dashboard,
+                )
         summaries = [c[0][1].summary for c in dashboard.update.call_args_list]
         assert any("failed" in s for s in summaries)
 
