@@ -170,6 +170,13 @@ class TestDashboardHTML:
         assert "status-failed" in _DASHBOARD_HTML
         assert "status-running" in _DASHBOARD_HTML
 
+    def test_html_token_template_is_not_mojibake(self) -> None:
+        """Token display keeps the UTF-8 arrow and both JS interpolations."""
+        from cagent.server import _DASHBOARD_HTML
+
+        assert "`${tIn.toLocaleString()}→${tOut.toLocaleString()}`" in _DASHBOARD_HTML
+        assert "鈫?" not in _DASHBOARD_HTML
+
 
 class TestOriginValidation:
     """Tests for WebSocket Origin validation (52.3)."""

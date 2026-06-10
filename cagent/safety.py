@@ -116,12 +116,23 @@ def _check_tokens(cmd: str) -> str | None:
     if sys.platform == "win32":
         tokens = [t.strip('"').strip("'") for t in tokens]
 
+    # git global options that consume a separate argument (e.g. `git -C dir push`).
+    # These must be skipped to find the real subcommand, otherwise
+    # `git -C . push` bypasses the subcommand check.
+    _git_opts_with_arg = {"-C", "-c", "--git-dir", "--work-tree", "--namespace",
+                          "--exec-path", "--config-env"}
+    _separators = ("&&", "||", ";", "|")
+
     # Walk through semicolons and && / || chains — check each sub-command
     i = 0
     while i < len(tokens):
-        # Find the command name (skip leading environment var assignments like A=B)
+        # Find the command name (skip leading environment var assignments like
+        # A=B, and the PowerShell call operator `&`)
         cmd_start = i
-        while cmd_start < len(tokens) and "=" in tokens[cmd_start] and not tokens[cmd_start].startswith("-"):
+        while cmd_start < len(tokens) and (
+            tokens[cmd_start] == "&"
+            or ("=" in tokens[cmd_start] and not tokens[cmd_start].startswith("-"))
+        ):
             cmd_start += 1
         if cmd_start >= len(tokens):
             break
@@ -129,27 +140,42 @@ def _check_tokens(cmd: str) -> str | None:
         base = tokens[cmd_start].rstrip(";")
         # Absolute path bypass: /usr/bin/git push should still be caught
         base_name = Path(base).name if "/" in base or "\\" in base else base
+        # Windows executable suffix bypass: git.exe / git.cmd
+        base_lower = base_name.lower()
+        if base_lower.endswith((".exe", ".cmd", ".bat")):
+            base_lower = base_lower.rsplit(".", 1)[0]
 
         # Check git subcommands (absolute path bypass for regex patterns)
-        if base_name == "git" and cmd_start + 1 < len(tokens):
-            subcmd = tokens[cmd_start + 1]
+        if base_lower == "git" and cmd_start + 1 < len(tokens):
+            # Skip global options to find the actual subcommand
+            # (`git -C dir push`, `git --git-dir=x push`, `git -P push`, ...)
+            j = cmd_start + 1
+            while j < len(tokens) and tokens[j] not in _separators:
+                if tokens[j] in _git_opts_with_arg:
+                    j += 2
+                    continue
+                if tokens[j].startswith("-"):
+                    j += 1
+                    continue
+                break
+            subcmd = tokens[j] if j < len(tokens) and tokens[j] not in _separators else ""
             if subcmd == "push":
                 return "git push (token check)"
-            if subcmd == "reset" and "--hard" in tokens[cmd_start + 2:]:
+            if subcmd == "reset" and "--hard" in tokens[j + 1:]:
                 return "git reset --hard (token check)"
             if subcmd == "clean" and any(
                 t.startswith("-") and ("f" in t or "F" in t)
-                for t in tokens[cmd_start + 2:]
+                for t in tokens[j + 1:]
                 if t.startswith("-") and t not in ("&&", "||", ";", "|")
             ):
                 return "git clean with force (token check)"
             if subcmd == "update-ref":
                 return "git update-ref (token check)"
-            if subcmd == "remote" and cmd_start + 2 < len(tokens):
-                if tokens[cmd_start + 2] in ("set-url", "add"):
-                    return f"git remote {tokens[cmd_start + 2]} (token check)"
+            if subcmd == "remote" and j + 1 < len(tokens):
+                if tokens[j + 1] in ("set-url", "add"):
+                    return f"git remote {tokens[j + 1]} (token check)"
 
-        if base_name == "rm":
+        if base_lower == "rm":
             flags: set[str] = set()
             has_recursive_long = False
             has_force_long = False
@@ -217,33 +243,51 @@ def _check_tokens(cmd):
         return "malformed command (unbalanced quotes)"
     if sys.platform == "win32":
         tokens = [t.strip('"').strip("'") for t in tokens]
+    _git_opts_with_arg = {"-C", "-c", "--git-dir", "--work-tree", "--namespace",
+                          "--exec-path", "--config-env"}
+    _separators = ("&&", "||", ";", "|")
     i = 0
     while i < len(tokens):
         cmd_start = i
-        while cmd_start < len(tokens) and "=" in tokens[cmd_start] and not tokens[cmd_start].startswith("-"):
+        while cmd_start < len(tokens) and (
+            tokens[cmd_start] == "&"
+            or ("=" in tokens[cmd_start] and not tokens[cmd_start].startswith("-"))
+        ):
             cmd_start += 1
         if cmd_start >= len(tokens):
             break
         base = tokens[cmd_start].rstrip(";")
         base_name = Path(base).name if "/" in base or "\\\\" in base else base
-        if base_name == "git" and cmd_start + 1 < len(tokens):
-            subcmd = tokens[cmd_start + 1]
+        base_lower = base_name.lower()
+        if base_lower.endswith((".exe", ".cmd", ".bat")):
+            base_lower = base_lower.rsplit(".", 1)[0]
+        if base_lower == "git" and cmd_start + 1 < len(tokens):
+            j = cmd_start + 1
+            while j < len(tokens) and tokens[j] not in _separators:
+                if tokens[j] in _git_opts_with_arg:
+                    j += 2
+                    continue
+                if tokens[j].startswith("-"):
+                    j += 1
+                    continue
+                break
+            subcmd = tokens[j] if j < len(tokens) and tokens[j] not in _separators else ""
             if subcmd == "push":
                 return "git push (token check)"
-            if subcmd == "reset" and "--hard" in tokens[cmd_start + 2:]:
+            if subcmd == "reset" and "--hard" in tokens[j + 1:]:
                 return "git reset --hard (token check)"
             if subcmd == "clean" and any(
                 t.startswith("-") and ("f" in t or "F" in t)
-                for t in tokens[cmd_start + 2:]
+                for t in tokens[j + 1:]
                 if t.startswith("-") and t not in ("&&", "||", ";", "|")
             ):
                 return "git clean with force (token check)"
             if subcmd == "update-ref":
                 return "git update-ref (token check)"
-            if subcmd == "remote" and cmd_start + 2 < len(tokens):
-                if tokens[cmd_start + 2] in ("set-url", "add"):
-                    return f"git remote {tokens[cmd_start + 2]} (token check)"
-        if base_name == "rm":
+            if subcmd == "remote" and j + 1 < len(tokens):
+                if tokens[j + 1] in ("set-url", "add"):
+                    return f"git remote {tokens[j + 1]} (token check)"
+        if base_lower == "rm":
             flags = set()
             has_recursive_long = False
             has_force_long = False

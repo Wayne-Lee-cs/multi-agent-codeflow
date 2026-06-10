@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import shutil
 import subprocess
 import sys
 import time
@@ -25,6 +24,7 @@ __all__ = [
     "_validate_cmd_str",
     "_has_conflict_markers",
     "_is_conflict_xy",
+    "_remove_sandbox_files",
     "_resolve_conflicts",
     "_abort_operation",
     "_report",
@@ -197,6 +197,31 @@ async def _run_claude_agent(
     return proc.returncode
 
 
+def _remove_sandbox_files(worktree_path: Path) -> None:
+    """Remove cagent sandbox artifacts injected by prepare_sandbox().
+
+    Deletes only the files cagent itself wrote (.claude/settings.local.json and
+    .claude/hooks/cagent-guard.py) — NOT the whole .claude/ directory, which may
+    contain files tracked in the user's repository. Must be called BEFORE any
+    `git add -A`, otherwise the sandbox files get staged and committed into the
+    integration branch (they contain machine-local absolute paths).
+    """
+    claude_dir = worktree_path / ".claude"
+    for f in (claude_dir / "settings.local.json", claude_dir / "hooks" / "cagent-guard.py"):
+        try:
+            f.unlink(missing_ok=True)
+        except OSError:
+            pass
+    hooks_dir = claude_dir / "hooks"
+    try:
+        if hooks_dir.is_dir() and not any(hooks_dir.iterdir()):
+            hooks_dir.rmdir()
+        if claude_dir.is_dir() and not any(claude_dir.iterdir()):
+            claude_dir.rmdir()
+    except OSError:
+        pass
+
+
 def _is_conflict_xy(xy: str) -> bool:
     """Check if a 2-char git porcelain XY status indicates a conflict.
 
@@ -340,6 +365,14 @@ async def _resolve_conflicts(
         await _abort_operation(completion_mode, worktree_path)
         return False
 
+    # Remove sandbox artifacts BEFORE staging (Phase 91 fix). The previous
+    # order (add -A first, rmtree .claude after) left the sandbox files in the
+    # index, so `cherry-pick --continue` committed .claude/settings.local.json
+    # and the guard hook into the integration branch. Targeted removal also
+    # avoids deleting user-tracked files under .claude/ (the old shutil.rmtree
+    # nuked the whole directory and relied on the stale index to mask it).
+    _remove_sandbox_files(worktree_path)
+
     # Stage all files first so `git grep` also covers newly-created untracked
     # files that the agent may have written conflict markers into (Phase 89.5).
     await _run_git("add", "-A", cwd=worktree_path, check=False)
@@ -367,13 +400,6 @@ async def _resolve_conflicts(
             dashboard.update("_integrator", event)
         await _abort_operation(completion_mode, worktree_path)
         return False
-
-    claude_dir = worktree_path / ".claude"
-    if claude_dir.exists():
-        try:
-            shutil.rmtree(claude_dir)
-        except OSError:
-            pass
 
     env_continue = {**os.environ, "GIT_EDITOR": "true"}
     # Note: `git add -A` already done above before grep (Phase 89.5).
@@ -498,6 +524,10 @@ async def _post_integrate_validate(
             break
 
         try:
+            # Strip sandbox artifacts before staging, otherwise the repair
+            # commit would include .claude/settings.local.json + the guard
+            # hook (Phase 91 fix — same root cause as _resolve_conflicts).
+            _remove_sandbox_files(worktree_path)
             await _run_git("add", "-A", cwd=worktree_path)
             status = await _run_git("status", "--porcelain", cwd=worktree_path, check=False)
             if status.stdout.strip():

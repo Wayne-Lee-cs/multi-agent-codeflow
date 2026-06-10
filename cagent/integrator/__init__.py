@@ -62,16 +62,16 @@ async def integrate(
     integration_branch = f"cagent/{run_id}/integration"
     worktree_path = repo_root / ".cagent" / "worktrees" / run_id / "_integration"
 
-    from cagent.worktree import create_worktree
-    create_worktree(repo_root, worktree_path, integration_branch, base_sha)
+    valid_strategies = {"cherry-pick", "merge", "rebase"}
+    if strategy not in valid_strategies:
+        raise ValueError(f"Unknown strategy: {strategy!r}. Must be one of {valid_strategies}")
 
     done_tasks = [t for t in tasks if t.status == "done" and t.commit_sha]
     if not done_tasks:
         return base_sha
 
-    valid_strategies = {"cherry-pick", "merge", "rebase"}
-    if strategy not in valid_strategies:
-        raise ValueError(f"Unknown strategy: {strategy!r}. Must be one of {valid_strategies}")
+    from cagent.worktree import create_worktree
+    create_worktree(repo_root, worktree_path, integration_branch, base_sha)
 
     if strategy == "merge":
         integrated, failed = await merge_strategy(

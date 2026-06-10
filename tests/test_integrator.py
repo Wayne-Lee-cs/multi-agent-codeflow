@@ -1038,8 +1038,7 @@ class TestResolveConflicts:
         task = _done_task("1", "abc123")
         with patch("cagent.integrator.base._run_git", side_effect=fake_git), \
              patch("cagent.integrator.base.prepare_sandbox"), \
-             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0), \
-             patch("cagent.integrator.base.shutil.rmtree"):
+             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0):
             result = await _resolve_conflicts(
                 task=task, integrated_tasks=[], worktree_path=tmp_path,
                 run_dir=run_dir, integrator_model_override=None,
@@ -1069,8 +1068,7 @@ class TestResolveConflicts:
 
         with patch("cagent.integrator.base._run_git", side_effect=fake_git), \
              patch("cagent.integrator.base.prepare_sandbox"), \
-             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0), \
-             patch("cagent.integrator.base.shutil.rmtree"):
+             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0):
             result = await _resolve_conflicts(
                 task=task, integrated_tasks=[], worktree_path=tmp_path,
                 run_dir=run_dir, integrator_model_override=None,
@@ -1101,8 +1099,7 @@ class TestResolveConflicts:
         task = _done_task("1", "abc123")
         with patch("cagent.integrator.base._run_git", side_effect=fake_git), \
              patch("cagent.integrator.base.prepare_sandbox"), \
-             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0), \
-             patch("cagent.integrator.base.shutil.rmtree"):
+             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0):
             result = await _resolve_conflicts(
                 task=task, integrated_tasks=[], worktree_path=tmp_path,
                 run_dir=run_dir, integrator_model_override=None,
@@ -1128,8 +1125,7 @@ class TestResolveConflicts:
         task = _done_task("1", "abc123")
         with patch("cagent.integrator.base._run_git", side_effect=fake_git), \
              patch("cagent.integrator.base.prepare_sandbox"), \
-             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0), \
-             patch("cagent.integrator.base.shutil.rmtree"):
+             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0):
             result = await _resolve_conflicts(
                 task=task, integrated_tasks=[], worktree_path=tmp_path,
                 run_dir=run_dir, integrator_model_override=None,
@@ -1155,8 +1151,7 @@ class TestResolveConflicts:
         task = _done_task("1", "abc123")
         with patch("cagent.integrator.base._run_git", side_effect=fake_git), \
              patch("cagent.integrator.base.prepare_sandbox"), \
-             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0), \
-             patch("cagent.integrator.base.shutil.rmtree"):
+             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0):
             result = await _resolve_conflicts(
                 task=task, integrated_tasks=[], worktree_path=tmp_path,
                 run_dir=run_dir, integrator_model_override=None,
@@ -1182,8 +1177,7 @@ class TestResolveConflicts:
         task = _done_task("1", "abc123")
         with patch("cagent.integrator.base._run_git", side_effect=fake_git), \
              patch("cagent.integrator.base.prepare_sandbox"), \
-             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0), \
-             patch("cagent.integrator.base.shutil.rmtree"):
+             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0):
             result = await _resolve_conflicts(
                 task=task, integrated_tasks=[], worktree_path=tmp_path,
                 run_dir=run_dir, integrator_model_override=None,
@@ -1209,8 +1203,7 @@ class TestResolveConflicts:
         task = _done_task("1", "abc123")
         with patch("cagent.integrator.base._run_git", side_effect=fake_git), \
              patch("cagent.integrator.base.prepare_sandbox"), \
-             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0), \
-             patch("cagent.integrator.base.shutil.rmtree"):
+             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0):
             result = await _resolve_conflicts(
                 task=task, integrated_tasks=[], worktree_path=tmp_path,
                 run_dir=run_dir, integrator_model_override=None,
@@ -1240,8 +1233,7 @@ class TestResolveConflicts:
 
         with patch("cagent.integrator.base._run_git", side_effect=fake_git), \
              patch("cagent.integrator.base.prepare_sandbox"), \
-             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0), \
-             patch("cagent.integrator.base.shutil.rmtree"):
+             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0):
             result = await _resolve_conflicts(
                 task=task, integrated_tasks=[prior], worktree_path=tmp_path,
                 run_dir=run_dir, integrator_model_override=None,
@@ -1268,8 +1260,7 @@ class TestResolveConflicts:
         task = _done_task("1", "abc123")
         with patch("cagent.integrator.base._run_git", side_effect=fake_git), \
              patch("cagent.integrator.base.prepare_sandbox"), \
-             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0), \
-             patch("cagent.integrator.base.shutil.rmtree"):
+             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0):
             result = await _resolve_conflicts(
                 task=task, integrated_tasks=[], worktree_path=tmp_path,
                 run_dir=run_dir, integrator_model_override=None,
@@ -1279,12 +1270,20 @@ class TestResolveConflicts:
 
     @pytest.mark.asyncio
     async def test_claude_dir_cleanup(self, tmp_path):
-        """Existing .claude dir gets cleaned up after agent resolution."""
+        """Sandbox files are removed; user .claude content survives (Phase 91).
+
+        The pre-91 behavior rmtree'd the whole .claude directory — including
+        files tracked in the user's repo — and relied on the stale git index
+        to mask the deletion. Now only cagent's own sandbox artifacts go.
+        """
         run_dir = tmp_path / "run"
         run_dir.mkdir()
         claude_dir = tmp_path / ".claude"
-        claude_dir.mkdir()
-        (claude_dir / "settings.json").write_text("{}", encoding="utf-8")
+        (claude_dir / "hooks").mkdir(parents=True)
+        (claude_dir / "settings.local.json").write_text("{}", encoding="utf-8")
+        (claude_dir / "hooks" / "cagent-guard.py").write_text("# guard", encoding="utf-8")
+        user_file = claude_dir / "settings.json"
+        user_file.write_text("{}", encoding="utf-8")
 
         async def fake_git(*args, cwd, env=None, check=True, timeout=60):
             if args[0] == "status":
@@ -1305,7 +1304,9 @@ class TestResolveConflicts:
                 timeout=60, dashboard=None,
             )
         assert result is True
-        assert not claude_dir.exists()
+        assert not (claude_dir / "settings.local.json").exists()
+        assert not (claude_dir / "hooks").exists()
+        assert user_file.exists()  # user content is preserved
 
     @pytest.mark.asyncio
     async def test_rename_in_conflict_files(self, tmp_path):
@@ -1325,8 +1326,7 @@ class TestResolveConflicts:
         task = _done_task("1", "abc123")
         with patch("cagent.integrator.base._run_git", side_effect=fake_git), \
              patch("cagent.integrator.base.prepare_sandbox"), \
-             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0) as mock_agent, \
-             patch("cagent.integrator.base.shutil.rmtree"):
+             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0) as mock_agent:
             await _resolve_conflicts(
                 task=task, integrated_tasks=[], worktree_path=tmp_path,
                 run_dir=run_dir, integrator_model_override=None,
@@ -1334,6 +1334,126 @@ class TestResolveConflicts:
             )
         prompt_used = mock_agent.call_args[1]["prompt"]
         assert "new.py" in prompt_used
+
+
+# --- sandbox file leak tests (Phase 91) ---
+
+
+class TestSandboxFileLeak:
+    """Sandbox artifacts must never be staged into integration commits.
+
+    Phase 91 regression tests: prepare_sandbox() writes
+    .claude/settings.local.json and .claude/hooks/cagent-guard.py into the
+    integration worktree. They must be removed BEFORE any `git add -A`,
+    otherwise `cherry-pick --continue` / the repair commit publishes them
+    (they contain machine-local absolute paths) into the integration branch.
+    """
+
+    @staticmethod
+    def _write_sandbox(worktree: Path) -> tuple[Path, Path]:
+        claude_dir = worktree / ".claude"
+        (claude_dir / "hooks").mkdir(parents=True)
+        settings = claude_dir / "settings.local.json"
+        settings.write_text("{}", encoding="utf-8")
+        guard = claude_dir / "hooks" / "cagent-guard.py"
+        guard.write_text("# guard", encoding="utf-8")
+        return settings, guard
+
+    @pytest.mark.asyncio
+    async def test_resolve_conflicts_removes_sandbox_before_add(self, tmp_path):
+        """Sandbox files are gone by the time `git add -A` runs."""
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        settings, guard = self._write_sandbox(tmp_path)
+
+        sandbox_present_at_add: list[bool] = []
+
+        async def fake_git(*args, cwd, env=None, check=True, timeout=60):
+            if args[0] == "status":
+                return _git_result(0, "UU conflict.py\n")
+            if args[0] == "add":
+                sandbox_present_at_add.append(settings.exists() or guard.exists())
+            if args[0] == "grep":
+                return _git_result(1, "")
+            if args[0] == "rev-parse":
+                return _git_result(0, "newsha\n")
+            return _git_result(0, "")
+
+        task = _done_task("1", "abc123")
+        with patch("cagent.integrator.base._run_git", side_effect=fake_git), \
+             patch("cagent.integrator.base.prepare_sandbox"), \
+             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0):
+            result = await _resolve_conflicts(
+                task=task, integrated_tasks=[], worktree_path=tmp_path,
+                run_dir=run_dir, integrator_model_override=None,
+                timeout=60, dashboard=None,
+            )
+        assert result is True
+        assert sandbox_present_at_add, "git add -A was never invoked"
+        assert not any(sandbox_present_at_add), (
+            "sandbox files still existed when `git add -A` ran — they would be "
+            "staged and committed into the integration branch"
+        )
+        assert not settings.exists()
+        assert not guard.exists()
+
+    @pytest.mark.asyncio
+    async def test_post_integrate_repair_removes_sandbox_before_add(self, tmp_path):
+        """The repair-round commit must not stage sandbox files either."""
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        settings, guard = self._write_sandbox(tmp_path)
+
+        sandbox_present_at_add: list[bool] = []
+
+        async def fake_git(*args, cwd, env=None, check=True, timeout=60):
+            if args[0] == "add":
+                sandbox_present_at_add.append(settings.exists() or guard.exists())
+            if args[0] == "status":
+                return _git_result(0, "M  fixed.py\n")
+            return _git_result(0, "")
+
+        with patch("cagent.integrator.base._run_git", side_effect=fake_git), \
+             patch("cagent.integrator.base._run_shell_cmd", new_callable=AsyncMock, return_value=(1, "tests failed")), \
+             patch("cagent.integrator.base.prepare_sandbox"), \
+             patch("cagent.integrator.base._run_claude_agent", new_callable=AsyncMock, return_value=0):
+            ok = await _post_integrate_validate(
+                cmd_str="pytest", worktree_path=tmp_path, run_dir=run_dir,
+                integrator_model_override=None, timeout=60, dashboard=None,
+            )
+        assert ok is False  # command kept failing — but the repair commit ran
+        assert sandbox_present_at_add, "git add -A was never invoked"
+        assert not any(sandbox_present_at_add)
+
+    def test_remove_sandbox_files_preserves_user_files(self, tmp_path):
+        """Only cagent's own files are deleted — user .claude content survives."""
+        from cagent.integrator.base import _remove_sandbox_files
+
+        settings, guard = self._write_sandbox(tmp_path)
+        user_file = tmp_path / ".claude" / "agents.md"
+        user_file.write_text("user content", encoding="utf-8")
+
+        _remove_sandbox_files(tmp_path)
+
+        assert not settings.exists()
+        assert not guard.exists()
+        assert not (tmp_path / ".claude" / "hooks").exists()  # emptied -> removed
+        assert user_file.exists()
+        assert (tmp_path / ".claude").exists()  # kept: still holds user file
+
+    def test_remove_sandbox_files_removes_empty_claude_dir(self, tmp_path):
+        """A .claude dir that held only sandbox files is removed entirely."""
+        from cagent.integrator.base import _remove_sandbox_files
+
+        self._write_sandbox(tmp_path)
+        _remove_sandbox_files(tmp_path)
+        assert not (tmp_path / ".claude").exists()
+
+    def test_remove_sandbox_files_noop_without_claude_dir(self, tmp_path):
+        """No .claude directory at all — must not raise."""
+        from cagent.integrator.base import _remove_sandbox_files
+
+        _remove_sandbox_files(tmp_path)
 
 
 # --- _post_integrate_validate tests ---
@@ -1768,24 +1888,26 @@ class TestIntegrate:
         """No done tasks -> return base_sha."""
         task = Task(id="1", prompt="test", branch="b")
         task.status = "pending"
-        with patch("cagent.worktree.create_worktree"):
+        with patch("cagent.worktree.create_worktree") as mock_create:
             result = await integrate(
                 tasks=[task], run_dir=tmp_path / "run1",
                 base_sha="basesha", repo_root=tmp_path,
             )
         assert result == "basesha"
+        mock_create.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_invalid_strategy_raises(self, tmp_path):
         """Invalid strategy -> ValueError."""
         task = _done_task("1", "abc123")
-        with patch("cagent.worktree.create_worktree"), \
+        with patch("cagent.worktree.create_worktree") as mock_create, \
              pytest.raises(ValueError, match="Unknown strategy"):
             await integrate(
                 tasks=[task], run_dir=tmp_path / "run1",
                 base_sha="basesha", repo_root=tmp_path,
                 strategy="invalid",
             )
+        mock_create.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_all_fail_raises_runtime_error(self, tmp_path):

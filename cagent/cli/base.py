@@ -169,6 +169,16 @@ def _get_runs_dir(repo_root: Path) -> Path:
     return repo_root / ".cagent" / "runs"
 
 
+def _resolve_run_dir(runs_dir: Path, run_id: str) -> Path:
+    """Resolve a user-supplied run ID and keep it under runs_dir."""
+    runs_root = runs_dir.resolve()
+    target = (runs_dir / run_id).resolve()
+    if not target.is_relative_to(runs_root):
+        print(f"Error: invalid run ID (path traversal detected): {run_id}", file=sys.stderr)
+        sys.exit(1)
+    return target
+
+
 def _find_run_dir(repo_root: Path, run_id: str | None) -> Path:
     """Find a run directory by ID, or the latest one."""
     runs_dir = _get_runs_dir(repo_root)
@@ -177,8 +187,8 @@ def _find_run_dir(repo_root: Path, run_id: str | None) -> Path:
         sys.exit(1)
 
     if run_id:
-        target = runs_dir / run_id
-        if not target.exists():
+        target = _resolve_run_dir(runs_dir, run_id)
+        if not target.is_dir():
             print(f"Run not found: {run_id}", file=sys.stderr)
             sys.exit(1)
         return target

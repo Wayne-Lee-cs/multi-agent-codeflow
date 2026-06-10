@@ -8,7 +8,7 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Zero dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)](pyproject.toml)
-[![Tests](https://img.shields.io/badge/tests-809%20passing-success)](tests/)
+[![Tests](https://img.shields.io/badge/tests-843%20passing-success)](tests/)
 [![Coverage](https://img.shields.io/badge/coverage-~87%25-brightgreen)](#开发)
 
 [English](README.md) · **简体中文**
@@ -24,7 +24,7 @@ pip install cagent          # 或：git clone … && python -m cagent
 cagent run tasks.md -j 4    # 同时跑 4 个任务
 ```
 
-> **v22.0.0** —— 809 个测试，约 87% 覆盖率，零第三方依赖。
+> **v22.0.0** —— 843 个测试，约 87% 覆盖率，零第三方依赖。
 
 **快速跳转：** [特性](#-特性) · [安装](#安装) · [快速上手](#快速上手) · [命令](#命令) · [任务文件格式](#任务文件格式) · [配置](#配置文件) · [安全](#-安全) · [架构](#架构) · [已知限制](#已知限制)
 

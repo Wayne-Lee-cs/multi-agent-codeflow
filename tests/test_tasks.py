@@ -199,6 +199,42 @@ class TestParseTasksMd:
         with pytest.raises(ValueError, match="No tasks found"):
             parse_tasks_md(f, "run-001")
 
+    def test_duplicate_task_ids_rejected(self, tmp_path):
+        """Duplicate ### Task NNN headings would collide on branch names and
+        silently overwrite results keyed by task ID (Phase 91 fix)."""
+        f = tmp_path / "tasks.md"
+        f.write_text(
+            "### Task 001\n\nDo A.\n\n"
+            "### Task 001\n\nDo B.\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="Duplicate task IDs.*001"):
+            parse_tasks_md(f, "run-001")
+
+    def test_duplicate_ids_after_zfill_rejected(self, tmp_path):
+        """'Task 1' and 'Task 001' normalize to the same ID — also rejected."""
+        f = tmp_path / "tasks.md"
+        f.write_text(
+            "### Task 1\n\nDo A.\n\n"
+            "### Task 001\n\nDo B.\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="Duplicate task IDs"):
+            parse_tasks_md(f, "run-001")
+
+    def test_depends_on_numeric_normalized_to_task_id(self, tmp_path):
+        """'depends_on: 1' must match task ID '001' (Phase 91 fix)."""
+        f = tmp_path / "tasks.md"
+        f.write_text(
+            "### Task 001\n\nDo A.\n\n"
+            "### Task 002\n"
+            "- **depends_on**: 1\n\n"
+            "Do B after A.\n",
+            encoding="utf-8",
+        )
+        tasks, _ = parse_tasks_md(f, "run-001")
+        assert tasks[1].depends_on == ["001"]
+
     def test_missing_file_raises(self, tmp_path):
         f = tmp_path / "nonexistent.md"
         with pytest.raises(FileNotFoundError):

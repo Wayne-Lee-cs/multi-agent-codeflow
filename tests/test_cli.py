@@ -771,6 +771,36 @@ class TestDryRun:
                 assert not (d / "tasks.json").exists()
                 assert not (d / "base_sha").exists()
 
+    def test_dry_run_does_not_cleanup_orphans(self, tmp_path):
+        """Dry-run mode must not remove orphaned worktrees."""
+        from cagent.cli.run import _cmd_run_inner
+
+        tasks_file = tmp_path / "tasks.txt"
+        tasks_file.write_text("Task one\n", encoding="utf-8")
+
+        args = MagicMock()
+        args.dry_run = True
+        args.base = None
+        args.tasks_file = str(tasks_file)
+        args.jobs = 1
+        args.timeout = 300
+        args.squash = False
+        args.strategy = "cherry-pick"
+        args.worker_model = None
+        args.max_turns = None
+        args.max_tokens = None
+
+        with patch("cagent.worktree.current_head", return_value="aaa111"), \
+             patch("cagent.worktree.detect_orphan_worktrees") as mock_detect, \
+             patch("cagent.worktree.cleanup_orphan_worktrees") as mock_cleanup, \
+             patch("cagent.cli.run._execute_run") as mock_exec:
+            _cmd_run_inner(args, tmp_path)
+
+        mock_detect.assert_not_called()
+        mock_cleanup.assert_not_called()
+        mock_exec.assert_not_called()
+        assert not (tmp_path / ".cagent" / "runs").exists()
+
 
 class TestRunLockLifecycle:
     """Tests for _run_lock exception safety (60.2.3)."""
@@ -882,6 +912,46 @@ class TestRunLockLifecycle:
         # Acquiring the lock again should succeed (fd was properly closed)
         with _run_lock(repo_root):
             pass
+
+    def test_failed_acquisition_preserves_holder_lock(self, tmp_path, capsys):
+        """Failed lock acquisition must NOT delete or truncate the active
+        holder's lock file (Phase 91 fix).
+
+        Previously: open(..., "w") truncated the holder's PID:TIMESTAMP
+        content before the lock attempt, and the finally block unconditionally
+        unlinked the lock file on exit — so a rejected second instance
+        destroyed the first instance's lock, letting a third instance start
+        concurrently.
+        """
+        import sys
+        import time as _time
+        from cagent.cli.run import _run_lock
+
+        repo_root = tmp_path
+        lock_dir = repo_root / ".cagent"
+        lock_dir.mkdir()
+        lock_path = lock_dir / "run.lock"
+        holder_content = f"99999:{_time.time()}"
+        lock_path.write_text(holder_content, encoding="utf-8")
+
+        if sys.platform == "win32":
+            import msvcrt
+            lock_patch = patch.object(msvcrt, "locking", side_effect=OSError("lock held"))
+        else:
+            import fcntl
+            lock_patch = patch.object(fcntl, "flock", side_effect=OSError("lock held"))
+
+        # PID 99999 reported active -> stale-lock cleanup must not remove it
+        with patch("cagent.cli.base._is_pid_active", return_value=True), lock_patch:
+            with pytest.raises(SystemExit, match="1"):
+                with _run_lock(repo_root):
+                    pass
+
+        err = capsys.readouterr().err
+        assert "Another cagent run is active" in err
+        # The holder's lock file survives intact — no truncation, no deletion.
+        assert lock_path.exists()
+        assert lock_path.read_text(encoding="utf-8") == holder_content
 
 
 class TestCmdResume:
@@ -1216,6 +1286,22 @@ class TestFindRunDirExtra:
 
         err = capsys.readouterr().err
         assert "Run not found" in err
+
+    def test_find_run_dir_path_traversal_rejected(self, tmp_path, capsys):
+        """Explicit run IDs must stay under .cagent/runs."""
+        from cagent.cli.base import _find_run_dir
+
+        runs_dir = tmp_path / ".cagent" / "runs"
+        runs_dir.mkdir(parents=True)
+        outside = tmp_path / "outside-run"
+        outside.mkdir()
+        (outside / "dashboard.json").write_text("{}", encoding="utf-8")
+
+        with pytest.raises(SystemExit, match="1"):
+            _find_run_dir(tmp_path, "../../outside-run")
+
+        err = capsys.readouterr().err
+        assert "path traversal" in err.lower()
 
     def test_find_run_dir_no_completed_runs(self, tmp_path, capsys):
         """Exits when no completed runs exist."""
@@ -1727,6 +1813,30 @@ class TestCmdCleanExtra:
 
         err = capsys.readouterr().err
         assert "Run not found" in err
+
+    def test_clean_path_traversal_rejected(self, tmp_path, capsys):
+        """Clean rejects run IDs that resolve outside .cagent/runs."""
+        from cagent.cli.misc import _cmd_clean
+
+        runs_dir = tmp_path / ".cagent" / "runs"
+        runs_dir.mkdir(parents=True)
+        outside = tmp_path / "outside-run"
+        outside.mkdir()
+        (outside / "dashboard.json").write_text("{}", encoding="utf-8")
+
+        args = MagicMock()
+        args.all = False
+        args.run_id = "../../outside-run"
+        args.force = True
+        args.memory = True
+
+        with patch("cagent.cli.misc._get_repo_root", return_value=tmp_path), \
+             pytest.raises(SystemExit, match="1"):
+            _cmd_clean(args)
+
+        err = capsys.readouterr().err
+        assert "path traversal" in err.lower()
+        assert outside.exists()
 
     def test_clean_latest_no_runs(self, tmp_path, capsys):
         """Clean latest when no runs exist exits with error."""

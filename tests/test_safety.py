@@ -209,6 +209,39 @@ class TestCheckTokens:
         reason = _check_tokens("rm -- -r -f")
         assert reason is None
 
+    @pytest.mark.parametrize("cmd", [
+        # git global options before the subcommand (Phase 91 bypass fix)
+        "git -C . push",
+        "git -C /repo push origin main",
+        "git --git-dir x/.git push",
+        "git --git-dir=x/.git push",
+        "git -P push",
+        "git -C sub reset --hard HEAD~1",
+        "git -C sub clean -fd",
+    ])
+    def test_git_global_options_blocked(self, cmd):
+        """`git -C dir push` etc. must not bypass the subcommand check."""
+        assert _check_tokens(cmd) is not None
+
+    @pytest.mark.parametrize("cmd", [
+        # .exe/.cmd suffix and PowerShell call operator (Phase 91 bypass fix)
+        "cd repo && git.exe push",
+        "& git.exe push",
+        "& git push",
+        "rm.exe -rf C:/tmp",
+    ])
+    def test_windows_exe_and_call_operator_blocked(self, cmd):
+        assert _check_tokens(cmd) is not None
+
+    @pytest.mark.parametrize("cmd", [
+        "git -C sub status",
+        "git -c user.name=x commit -m hi",
+        "git -C . log --oneline",
+        "git -C",  # truncated — nothing dangerous
+    ])
+    def test_git_global_options_safe_commands_pass(self, cmd):
+        assert _check_tokens(cmd) is None
+
     def test_hook_blocks_split_flags(self, tmp_path):
         """End-to-end: hook script blocks rm with split flags."""
         prepare_sandbox(tmp_path)
@@ -298,6 +331,19 @@ class TestCheckTokensStaticConsistency:
         'echo "unbalanced',
         "",
         "   ",
+        # git global options / Windows suffixes (Phase 91 bypass fixes)
+        "git -C . push",
+        "git -C /repo push origin main",
+        "git --git-dir x/.git push",
+        "git --git-dir=x/.git push",
+        "git -c user.name=x commit -m hi",
+        "git -C sub status",
+        "git -C sub reset --hard HEAD~1",
+        "git -C",
+        "git.exe push",
+        "cd repo && git.exe push",
+        "& git.exe push",
+        "rm.exe -rf C:/tmp",
         # safe commands
         "ls -la",
         "git status",

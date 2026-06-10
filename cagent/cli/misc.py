@@ -8,7 +8,13 @@ import sys
 import time
 from pathlib import Path
 
-from .base import _get_repo_root, _get_runs_dir, _find_run_dir, _terminate_pid
+from .base import (
+    _get_repo_root,
+    _get_runs_dir,
+    _find_run_dir,
+    _resolve_run_dir,
+    _terminate_pid,
+)
 from cagent.compat import atomic_write
 from cagent.git_utils import run_git
 
@@ -49,8 +55,8 @@ def _cmd_clean(args: argparse.Namespace) -> None:
     if args.all:
         target_runs = [d for d in runs_dir.iterdir() if d.is_dir()]
     elif args.run_id:
-        target_runs = [runs_dir / args.run_id]
-        if not target_runs[0].exists():
+        target_runs = [_resolve_run_dir(runs_dir, args.run_id)]
+        if not target_runs[0].is_dir():
             print(f"Run not found: {args.run_id}", file=sys.stderr)
             sys.exit(1)
     else:

@@ -70,63 +70,63 @@ def _run_lock(repo_root: Path, force: bool = False):
             lock_path.unlink(missing_ok=True)
 
     lock_fd = None
+    acquired = False  # we own the lock (or claimed it via --force)
     try:
-        lock_fd = open(lock_path, "w", encoding="utf-8")
+        # Open WITHOUT truncating: mode "w" would wipe the active holder's
+        # "PID:TIMESTAMP" content before we even attempt the lock, corrupting
+        # stale-lock detection for every other process (Phase 91 fix).
+        raw_fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT)
+        lock_fd = os.fdopen(raw_fd, "r+", encoding="utf-8")
         if sys.platform == "win32":
             import msvcrt
-            # Write PID first so the file has content before locking.
-            # msvcrt.locking requires the locked byte range to exist.
-            payload = f"{os.getpid()}:{time.time()}"
-            lock_fd.write(payload)
-            lock_fd.flush()
+            # msvcrt.locking requires the locked byte range to exist; seed a
+            # single placeholder byte only when the file is brand new/empty.
+            lock_fd.seek(0, os.SEEK_END)
+            if lock_fd.tell() == 0:
+                lock_fd.write("0")
+                lock_fd.flush()
             try:
                 lock_fd.seek(0)
-                msvcrt.locking(lock_fd.fileno(), msvcrt.LK_NBLCK, len(payload))
+                msvcrt.locking(lock_fd.fileno(), msvcrt.LK_NBLCK, 1)
+                acquired = True
             except OSError:
-                if force:
-                    print(
-                        "Warning: --force used, lock acquisition failed. "
-                        "Another cagent run may be active.",
-                        file=sys.stderr,
-                    )
-                    # Write PID so stale lock detection works on next run
-                    # (Phase 90.M1 fix).
-                    lock_fd.seek(0)
-                    lock_fd.truncate()
-                    lock_fd.write(f"{os.getpid()}:{time.time()}")
-                    lock_fd.flush()
-                else:
-                    lock_fd.close()
-                    print(
-                        "Error: Another cagent run is active in this repository.\n"
-                        "  Use --force to override (only if you're sure no other run is active).",
-                        file=sys.stderr,
-                    )
-                    sys.exit(1)
+                pass
         else:
             import fcntl
             try:
                 fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
             except OSError:
-                if force:
-                    print(
-                        "Warning: --force used, lock acquisition failed. "
-                        "Another cagent run may be active.",
-                        file=sys.stderr,
-                    )
-                    lock_fd.write(f"{os.getpid()}:{time.time()}")
-                    lock_fd.flush()
-                else:
-                    lock_fd.close()
-                    print(
-                        "Error: Another cagent run is active in this repository.\n"
-                        "  Use --force to override (only if you're sure no other run is active).",
-                        file=sys.stderr,
-                    )
-                    sys.exit(1)
+                pass
+
+        if not acquired:
+            if force:
+                print(
+                    "Warning: --force used, lock acquisition failed. "
+                    "Another cagent run may be active.",
+                    file=sys.stderr,
+                )
             else:
-                lock_fd.write(f"{os.getpid()}:{time.time()}")
-                lock_fd.flush()
+                lock_fd.close()
+                lock_fd = None
+                print(
+                    "Error: Another cagent run is active in this repository.\n"
+                    "  Use --force to override (only if you're sure no other run is active).",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+
+        # Record our PID only now that we own (or force-claimed) the lock.
+        # On Windows the write may hit the holder's mandatory lock region —
+        # best effort under --force (Phase 90.M1 / 91).
+        try:
+            lock_fd.seek(0)
+            lock_fd.truncate()
+            lock_fd.write(f"{os.getpid()}:{time.time()}")
+            lock_fd.flush()
+        except OSError:
+            if not force:
+                raise
         yield
     finally:
         if lock_fd is not None:
@@ -134,10 +134,13 @@ def _run_lock(repo_root: Path, force: bool = False):
                 lock_fd.close()
             except (OSError, ValueError):
                 pass
-        try:
-            lock_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        # Only remove the lock file if we actually owned it — a failed
+        # acquisition must never delete the active holder's lock (Phase 91).
+        if acquired or force:
+            try:
+                lock_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _print_task_timing(dashboard: "Dashboard") -> None:
@@ -487,14 +490,6 @@ def _cmd_run_inner(args: argparse.Namespace, repo_root: Path, api_key: str | Non
     from cagent.tasks import dump_state, parse_tasks_file
     from cagent.worktree import cleanup_orphan_worktrees, current_head, detect_orphan_worktrees
 
-    # Auto-detect and clean orphaned worktrees from crashed runs
-    orphans = detect_orphan_worktrees(repo_root)
-    if orphans:
-        print(f"  Cleaning {len(orphans)} orphaned worktree(s) from previous runs...")
-        cleaned = cleanup_orphan_worktrees(repo_root, orphans)
-        if cleaned:
-            print(f"  Cleaned {cleaned} orphaned worktree(s).")
-
     if args.base:
         try:
             result = run_git("rev-parse", args.base, cwd=repo_root)
@@ -507,7 +502,6 @@ def _cmd_run_inner(args: argparse.Namespace, repo_root: Path, api_key: str | Non
 
     run_id = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H-%M-%S-%f")
     run_dir = _get_runs_dir(repo_root) / run_id
-    run_dir.mkdir(parents=True, exist_ok=True)
 
     conventions = ""
     try:
@@ -540,6 +534,16 @@ def _cmd_run_inner(args: argparse.Namespace, repo_root: Path, api_key: str | Non
         print("Run with: python -m cagent run", args.tasks_file)
         return 0
 
+    # Auto-detect and clean orphaned worktrees from crashed runs. This is kept
+    # out of dry-run mode so dry-run remains side-effect free.
+    orphans = detect_orphan_worktrees(repo_root)
+    if orphans:
+        print(f"  Cleaning {len(orphans)} orphaned worktree(s) from previous runs...")
+        cleaned = cleanup_orphan_worktrees(repo_root, orphans)
+        if cleaned:
+            print(f"  Cleaned {cleaned} orphaned worktree(s).")
+
+    run_dir.mkdir(parents=True, exist_ok=True)
     dump_state(run_dir, tasks)
 
     (run_dir / "base_sha").write_text(base_sha, encoding="utf-8")

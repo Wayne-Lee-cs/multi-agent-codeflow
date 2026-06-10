@@ -121,7 +121,13 @@ def parse_tasks_md(path: str | Path, run_id: str) -> tuple[list[Task], str]:
         depends_on_str = _extract_field(block, "depends_on") or "none"
         depends_on = []
         if depends_on_str.lower() != "none":
-            depends_on = [d.strip() for d in depends_on_str.split(",") if d.strip()]
+            # Normalize numeric refs to the zero-padded task-ID form so that
+            # "depends_on: 1" matches task ID "001".
+            depends_on = [
+                d.strip().zfill(3) if d.strip().isdigit() else d.strip()
+                for d in depends_on_str.split(",")
+                if d.strip()
+            ]
 
         # Extract files field (for prompt injection, not stored in Task)
         _files = _extract_field(block, "files") or ""
@@ -144,6 +150,21 @@ def parse_tasks_md(path: str | Path, run_id: str) -> tuple[list[Task], str]:
         raise ValueError(
             f"No tasks found in {path}\n"
             f"  Expected ### Task NNN blocks."
+        )
+
+    # Duplicate IDs would collide on branch names and silently overwrite
+    # results keyed by task ID — reject early with a clear message.
+    seen: set[str] = set()
+    dupes_set: set[str] = set()
+    for t in tasks:
+        if t.id in seen:
+            dupes_set.add(t.id)
+        seen.add(t.id)
+    dupes = sorted(dupes_set)
+    if dupes:
+        raise ValueError(
+            f"Duplicate task IDs in {path}: {', '.join(dupes)}\n"
+            f"  Each ### Task NNN heading must use a unique number."
         )
 
     return tasks, conventions

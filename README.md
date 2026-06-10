@@ -8,7 +8,7 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Zero dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)](pyproject.toml)
-[![Tests](https://img.shields.io/badge/tests-809%20passing-success)](tests/)
+[![Tests](https://img.shields.io/badge/tests-843%20passing-success)](tests/)
 [![Coverage](https://img.shields.io/badge/coverage-~87%25-brightgreen)](#development)
 
 **English** · [简体中文](README.zh-CN.md)
@@ -24,7 +24,7 @@ pip install cagent          # or: git clone … && python -m cagent
 cagent run tasks.md -j 4    # run 4 tasks at once
 ```
 
-> **v22.0.0** — 809 tests, ~87% coverage, zero third-party dependencies.
+> **v22.0.0** — 843 tests, ~87% coverage, zero third-party dependencies.
 
 **Jump to:** [Features](#-features) · [Install](#installation) · [Quick Start](#quick-start) · [Commands](#commands) · [Task File Format](#tasks-file-format) · [Config](#configuration-file) · [Safety](#-safety) · [Architecture](#architecture) · [Limitations](#known-limitations)
 
